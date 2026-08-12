@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+program_dir=/app/program
+venv_dir="$program_dir/.venv"
+pid_file=/tmp/autosurf-app.pid
+upgrade_lock=/tmp/autosurf-upgrade-in-progress
+
+if [ ! -d "$program_dir/.git" ] || [ ! -x "$venv_dir/bin/autosurf" ]; then
+    echo "AutoSurf program volume is not initialized" >&2
+    exit 1
+fi
+
+if [ -e "$upgrade_lock" ]; then
+    echo "An AutoSurf upgrade is already running" >&2
+    exit 1
+fi
+touch "$upgrade_lock"
+cleanup() {
+    rm -f "$upgrade_lock"
+}
+trap cleanup EXIT INT TERM
+
+if [ -f "$pid_file" ]; then
+    app_pid=$(cat "$pid_file")
+    touch /tmp/autosurf-restart-requested
+    kill -TERM "$app_pid"
+    while kill -0 "$app_pid" 2>/dev/null; do
+        sleep 1
+    done
+fi
+
+"$venv_dir/bin/autosurf" upgrade --repository "$program_dir"

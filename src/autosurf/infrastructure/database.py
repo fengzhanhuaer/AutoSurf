@@ -86,7 +86,6 @@ def create_session_factory(database_url: str) -> sessionmaker[Session]:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    Base.metadata.create_all(engine)
     return sessionmaker(engine, expire_on_commit=False)
 
 

@@ -9,6 +9,7 @@ description = "A small, durable web automation platform"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+  "alembic>=1.14,<2",
   "cryptography>=44,<46",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
@@ -28,9 +29,9 @@ autosurf = "autosurf.main:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/autosurf"]
+artifacts = ["src/autosurf/migrations/versions/*.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-

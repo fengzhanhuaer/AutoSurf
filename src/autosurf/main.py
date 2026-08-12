@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -16,11 +18,14 @@ from autosurf.infrastructure.cookiecloud import CookieCloudStore
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import create_session_factory
 from autosurf.infrastructure.gzip_request import GZipRequestMiddleware
+from autosurf.infrastructure.migrations import upgrade_database
+from autosurf.upgrade import upgrade
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    upgrade_database(settings.database_url)
     sessions = create_session_factory(settings.database_url)
     registry = HandlerRegistry()
     registry.register(HttpSignInHandler())
@@ -71,7 +76,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def run() -> None:
+    parser = argparse.ArgumentParser(prog="autosurf")
+    subcommands = parser.add_subparsers(dest="command")
+    subcommands.add_parser("serve", help="start the AutoSurf service")
+    upgrade_parser = subcommands.add_parser("upgrade", help="upgrade a local Git installation")
+    upgrade_parser.add_argument("--repository", type=Path, default=Path.cwd())
+    args = parser.parse_args()
     settings = get_settings()
+    if args.command == "upgrade":
+        result = upgrade(settings, args.repository)
+        print(f"AutoSurf upgraded: {result.previous_revision[:12]} -> {result.current_revision[:12]}")
+        if result.backup_path:
+            print(f"Database backup: {result.backup_path}")
+        print("Restart the AutoSurf service to run the new version.")
+        return
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
 
 

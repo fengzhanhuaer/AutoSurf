@@ -44,6 +44,8 @@ docker compose up -d
 
 The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin a release by replacing the image tag in `compose.yaml`.
 
+The Docker image is a stable runtime shell. Application source and its Linux Python environment live in the host directory `./autosurf_program`, mounted at `/app/program`. On first start, the shell clones the AutoSurf `main` branch into that directory. Normal program upgrades do not replace the container. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
+
 For a host-only deployment, change the port mapping to `127.0.0.1:18980:8080`. This is recommended when a reverse proxy on the same machine provides HTTPS.
 
 Check service state and logs:
@@ -60,6 +62,18 @@ docker compose pull
 docker compose up -d --remove-orphans
 docker image prune -f
 ```
+
+AutoSurf applies pending Alembic database migrations during startup. The application starts only after the migration succeeds. Existing pre-migration databases are inspected and adopted at the matching schema revision before pending migrations run.
+
+For normal program-only upgrades, keep the Docker shell running and execute:
+
+```powershell
+docker exec autosurf autosurf-upgrade
+```
+
+The helper gracefully stops only the AutoSurf application process, backs up SQLite, fast-forward pulls `./autosurf_program`, updates its isolated Python environment, applies migrations, and asks the shell to start the new version. The container, `data`, and `autosurf_program` directories remain in place.
+
+Only pull and recreate the container when the runtime shell itself changes, such as a Python or operating-system dependency update. `docker compose pull && docker compose up -d` is the separate shell-upgrade path.
 
 To roll back, replace the image with the previous release tag and run `docker compose up -d` again. Back up the `data` directory before upgrading across database versions.
 
@@ -158,9 +172,17 @@ $env:AUTOSURF_PASSWORD = "development-password"
 .venv\Scripts\autosurf
 ```
 
+For a local Python installation, AutoSurf provides an upgrade command:
+
+```powershell
+.venv\Scripts\autosurf upgrade --repository D:\Code\AutoSurf
+```
+
+The command requires a clean Git working tree, creates a timestamped SQLite backup under `data/backups`, performs a fast-forward-only pull, updates installed Python dependencies, and applies database migrations. Restart the running service after it completes. If AutoSurf runs as a Windows service, restart it through the same service manager that starts it.
+
 ## Current boundaries
 
 - HTTP handlers support GET/POST and response-pattern matching.
 - CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
 - No browser worker or UI is included yet.
-- Schema migrations will be added before the first upgrade requiring a database change.
+- Database upgrades run automatically through Alembic at application startup.

@@ -8,9 +8,11 @@ services:
       - "0.0.0.0:18980:8080"
     volumes:
       - ./data:/app/data
+      - ./autosurf_program:/app/program
     tmpfs:
       - /tmp:size=64m,mode=1777
     environment:
+      HOME: /tmp/home
       TZ: Asia/Taipei
       AUTOSURF_SECRET_KEY: "CHANGE-ME-random-encryption-key-at-least-32-characters"
       AUTOSURF_USERNAME: "admin"
