@@ -1,0 +1,14 @@
+services:
+  autosurf:
+    build: .
+    image: autosurf:local
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      TZ: Asia/Taipei
+      AUTOSURF_SECRET_KEY: ${AUTOSURF_SECRET_KEY:?set AUTOSURF_SECRET_KEY in .env}
+      AUTOSURF_API_TOKEN: ${AUTOSURF_API_TOKEN:?set AUTOSURF_API_TOKEN in .env}
+    restart: unless-stopped
+
