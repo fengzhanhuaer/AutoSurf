@@ -65,6 +65,16 @@ class CookieCloudBlob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class CookieCloudSource(Base):
+    __tablename__ = "cookiecloud_sources"
+
+    uuid: Mapped[str] = mapped_column(String(128), primary_key=True)
+    encrypted_password: Mapped[str] = mapped_column(Text)
+    auto_import: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_import_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 def create_session_factory(database_url: str) -> sessionmaker[Session]:
     Path(database_url.removeprefix("sqlite:///" )).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(database_url, connect_args={"check_same_thread": False})

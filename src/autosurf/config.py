@@ -10,7 +10,8 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
     secret_key: str = Field(min_length=32)
-    api_token: str = Field(min_length=16)
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=8, max_length=1024)
     host: str = "0.0.0.0"
     port: int = 8080
     worker_poll_seconds: float = 1.0
@@ -25,4 +26,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
-

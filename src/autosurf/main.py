@@ -15,6 +15,7 @@ from autosurf.config import Settings, get_settings
 from autosurf.infrastructure.cookiecloud import CookieCloudStore
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import create_session_factory
+from autosurf.infrastructure.gzip_request import GZipRequestMiddleware
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -51,13 +52,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await task
 
     app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan)
+    app.add_middleware(GZipRequestMiddleware)
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.registry = registry
     app.state.credentials = credentials
     app.state.automations = automations
     app.state.queue = queue
-    app.state.cookiecloud = CookieCloudStore(sessions)
+    app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
     app.include_router(router)
     app.include_router(cookiecloud_router)
 
@@ -75,4 +77,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-

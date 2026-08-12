@@ -12,7 +12,7 @@ from autosurf.main import create_app
 
 @pytest.fixture
 def settings(tmp_path):
-    return Settings(data_dir=tmp_path, secret_key="s" * 32, api_token="t" * 16,
+    return Settings(data_dir=tmp_path, secret_key="s" * 32, username="admin", password="password123",
                     worker_poll_seconds=0.01, scheduler_poll_seconds=0.01)
 
 
@@ -20,19 +20,20 @@ def settings(tmp_path):
 async def test_api_creates_and_runs_automation(settings):
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {settings.api_token}"}
+    auth = (settings.username, settings.password)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        credential = await client.post("/api/v1/credentials", headers=headers, json={
+        assert (await client.get("/api/v1/credentials")).status_code == 401
+        credential = await client.post("/api/v1/credentials", auth=auth, json={
             "name": "example", "domain": "example.test", "cookies": {"sid": "secret"}
         })
         assert credential.status_code == 201
-        automation = await client.post("/api/v1/automations", headers=headers, json={
+        automation = await client.post("/api/v1/automations", auth=auth, json={
             "name": "test", "handler_type": "http_signin", "interval_seconds": 3600,
             "credential_id": credential.json()["id"],
             "config": {"url": "https://example.test/checkin"},
         })
         assert automation.status_code == 201
-        queued = await client.post(f"/api/v1/automations/{automation.json()['id']}/run", headers=headers)
+        queued = await client.post(f"/api/v1/automations/{automation.json()['id']}/run", auth=auth)
         assert queued.status_code == 202
 
 

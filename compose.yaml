@@ -1,14 +1,37 @@
 services:
   autosurf:
-    build: .
-    image: autosurf:local
+    image: ghcr.io/fengzhanhuaer/autosurf:latest
+    pull_policy: always
+    container_name: autosurf
+    init: true
     ports:
-      - "8080:8080"
+      - "0.0.0.0:18980:8080"
     volumes:
       - ./data:/app/data
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     environment:
       TZ: Asia/Taipei
-      AUTOSURF_SECRET_KEY: ${AUTOSURF_SECRET_KEY:?set AUTOSURF_SECRET_KEY in .env}
-      AUTOSURF_API_TOKEN: ${AUTOSURF_API_TOKEN:?set AUTOSURF_API_TOKEN in .env}
+      AUTOSURF_SECRET_KEY: "CHANGE-ME-random-encryption-key-at-least-32-characters"
+      AUTOSURF_USERNAME: "admin"
+      AUTOSURF_PASSWORD: "CHANGE-ME-strong-management-password"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     restart: unless-stopped
-

@@ -16,10 +16,57 @@ SQLite runs in WAL mode. A single application replica is supported in v0.1; Post
 
 ## Run with Docker
 
-Create `.env` from `.env.example`, replace both secrets, then run:
+Edit `compose.yaml` before the first start and replace the encryption key, username, and password:
+
+```yaml
+environment:
+  AUTOSURF_SECRET_KEY: "a-random-encryption-key-at-least-32-characters"
+  AUTOSURF_USERNAME: "admin"
+  AUTOSURF_PASSWORD: "a-strong-management-password"
+```
+
+PowerShell can generate a random value:
 
 ```powershell
-docker compose up --build -d
+$bytes = New-Object byte[] 48
+[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+[Convert]::ToBase64String($bytes)
+```
+
+Use separate generated values for the encryption key and password. Do not change `AUTOSURF_SECRET_KEY` after data has been written, or stored credentials will no longer decrypt. The username and management password can be changed independently.
+
+Start the service:
+
+```powershell
+docker compose pull
+docker compose up -d
+```
+
+The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin a release by replacing the image tag in `compose.yaml`.
+
+For a host-only deployment, change the port mapping to `127.0.0.1:18980:8080`. This is recommended when a reverse proxy on the same machine provides HTTPS.
+
+Check service state and logs:
+
+```powershell
+docker compose ps
+docker compose logs -f --tail 100 autosurf
+```
+
+Upgrade the pinned or latest image:
+
+```powershell
+docker compose pull
+docker compose up -d --remove-orphans
+docker image prune -f
+```
+
+To roll back, replace the image with the previous release tag and run `docker compose up -d` again. Back up the `data` directory before upgrading across database versions.
+
+To build from the local source tree instead:
+
+```powershell
+docker compose -f compose.yaml -f compose.dev.yaml up --build -d
 ```
 
 Images built from `main` and version tags are published to `ghcr.io/fengzhanhuaer/autosurf`. For example:
@@ -28,27 +75,51 @@ Images built from `main` and version tags are published to `ghcr.io/fengzhanhuae
 docker pull ghcr.io/fengzhanhuaer/autosurf:latest
 ```
 
-Health endpoint: `http://localhost:8080/health`
+Health endpoint: `http://localhost:18980/health`
 
-OpenAPI: `http://localhost:8080/docs`
+OpenAPI: `http://localhost:18980/docs`
 
-CookieCloud-compatible base URL: `http://localhost:8080/cookiecloud`
+CookieCloud-compatible base URL: `http://localhost:18980/cookiecloud`
 
-Do not expose the service directly to the public internet. Put it behind HTTPS and access control when remote access is required. CookieCloud upload/download endpoints intentionally do not use the management API token because compatibility is based on its UUID and end-to-end encrypted payload.
+Do not expose the service directly to the public internet. Put it behind HTTPS and access control when remote access is required. CookieCloud upload/download endpoints intentionally do not use management login because compatibility is based on its UUID and end-to-end encrypted payload.
+
+### CookieCloud automatic import
+
+Configure a CookieCloud UUID once through the authenticated management API. The password is encrypted at rest. Future browser uploads for that UUID are decrypted and imported into versioned credentials automatically:
+
+```powershell
+$pair = "admin:your-management-password"
+$headers = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pair)) }
+$body = @{
+  uuid = "your-cookiecloud-uuid"
+  password = "your-cookiecloud-password"
+  auto_import = $true
+} | ConvertTo-Json
+Invoke-RestMethod -Method Put `
+  -Uri http://localhost:18980/api/v1/cookiecloud/sources/your-cookiecloud-uuid `
+  -Headers $headers -ContentType application/json -Body $body
+```
+
+Existing stored data can be imported immediately with:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:18980/api/v1/cookiecloud/sources/your-cookiecloud-uuid/import `
+  -Headers $headers -ContentType application/json -Body '{}'
+```
+
+Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported. Imported credential names use `cookiecloud:<uuid>:<domain>`.
 
 ## Management API
 
-All `/api/v1` endpoints require:
-
-```text
-Authorization: Bearer <AUTOSURF_API_TOKEN>
-```
+All `/api/v1` endpoints use HTTP Basic authentication with the username and password configured in `compose.yaml`. Swagger `/docs` provides a standard **Authorize** dialog.
 
 Create an encrypted cookie credential:
 
 ```powershell
-$headers = @{ Authorization = "Bearer $env:AUTOSURF_API_TOKEN" }
-$credential = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/credentials `
+$pair = "admin:your-management-password"
+$headers = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pair)) }
+$credential = Invoke-RestMethod -Method Post -Uri http://localhost:18980/api/v1/credentials `
   -Headers $headers -ContentType application/json -Body '{
     "name":"my-site","domain":"example.com","cookies":{"session":"replace-me"}
   }'
@@ -69,7 +140,7 @@ $body = @{
     already_patterns = @("已经签到", "already signed")
   }
 } | ConvertTo-Json -Depth 5
-Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/automations `
+Invoke-RestMethod -Method Post -Uri http://localhost:18980/api/v1/automations `
   -Headers $headers -ContentType application/json -Body $body
 ```
 
@@ -81,7 +152,8 @@ The first scheduled run is due immediately. A run can also be queued with `POST 
 py -3.13 -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
 $env:AUTOSURF_SECRET_KEY = "development-secret-key-at-least-32-chars"
-$env:AUTOSURF_API_TOKEN = "development-api-token"
+$env:AUTOSURF_USERNAME = "admin"
+$env:AUTOSURF_PASSWORD = "development-password"
 .venv\Scripts\pytest
 .venv\Scripts\autosurf
 ```
@@ -89,6 +161,6 @@ $env:AUTOSURF_API_TOKEN = "development-api-token"
 ## Current boundaries
 
 - HTTP handlers support GET/POST and response-pattern matching.
-- CookieCloud blobs are stored compatibly, but importing/decrypting those blobs into the internal credential hub is a separate upcoming feature.
+- CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
 - No browser worker or UI is included yet.
 - Schema migrations will be added before the first upgrade requiring a database change.

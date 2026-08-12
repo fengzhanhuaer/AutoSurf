@@ -6,12 +6,18 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from autosurf.domain.models import utc_now
-from autosurf.infrastructure.database import CookieCloudBlob
+from autosurf.application.services import CredentialService
+from autosurf.infrastructure.cookiecloud_crypto import decrypt_cookiecloud
+from autosurf.infrastructure.crypto import SecretBox
+from autosurf.infrastructure.database import CookieCloudBlob, CookieCloudSource
 
 
 class CookieCloudStore:
-    def __init__(self, sessions: sessionmaker[Session]) -> None:
+    def __init__(self, sessions: sessionmaker[Session], secrets: SecretBox,
+                 credentials: CredentialService) -> None:
         self.sessions = sessions
+        self.secrets = secrets
+        self.credentials = credentials
 
     def put(self, payload: dict[str, Any]) -> str:
         uuid = str(payload.get("uuid") or payload.get("key") or "").strip()
@@ -28,7 +34,83 @@ class CookieCloudStore:
                 blob.updated_at = utc_now()
         return uuid
 
+    def configure(self, uuid: str, password: str, auto_import: bool = True) -> CookieCloudSource:
+        if not uuid or len(uuid) > 128:
+            raise ValueError("invalid CookieCloud UUID")
+        with self.sessions.begin() as session:
+            source = session.get(CookieCloudSource, uuid)
+            if source is None:
+                source = CookieCloudSource(uuid=uuid, encrypted_password="", auto_import=auto_import)
+                session.add(source)
+            source.encrypted_password = self.secrets.encrypt_json(password)
+            source.auto_import = auto_import
+            source.last_error = None
+            session.flush()
+            return source
+
+    def import_credentials(self, uuid: str, password: str | None = None) -> dict[str, Any]:
+        with self.sessions() as session:
+            blob = session.get(CookieCloudBlob, uuid)
+            source = session.get(CookieCloudSource, uuid)
+            if blob is None:
+                raise ValueError("CookieCloud key not found")
+            payload = json.loads(blob.encrypted_data)
+            if password is None:
+                if source is None:
+                    raise ValueError("CookieCloud password has not been configured")
+                password = self.secrets.decrypt_json(source.encrypted_password)
+
+        decrypted = decrypt_cookiecloud(uuid, password, str(payload.get("encrypted", "")),
+                                        str(payload.get("crypto_type", "legacy")))
+        imported: list[dict[str, Any]] = []
+        for bucket, entries in decrypted["cookie_data"].items():
+            if not isinstance(entries, list):
+                continue
+            domain = _canonical_domain(str(bucket), entries)
+            cookies = {
+                str(cookie["name"]): str(cookie["value"])
+                for cookie in entries
+                if isinstance(cookie, dict) and cookie.get("name") is not None and cookie.get("value") is not None
+            }
+            if not domain or not cookies:
+                continue
+            record = self.credentials.upsert(f"cookiecloud:{uuid}:{domain}", domain, cookies, "cookiecloud")
+            imported.append({"id": record.id, "domain": domain, "version": record.version,
+                             "cookie_count": len(cookies)})
+
+        now = utc_now()
+        if source is not None:
+            with self.sessions.begin() as session:
+                current = session.get(CookieCloudSource, uuid)
+                current.last_import_at = now
+                current.last_error = None
+        return {"uuid": uuid, "update_time": decrypted.get("update_time"), "credentials": imported}
+
+    def auto_import_if_configured(self, uuid: str) -> dict[str, Any] | None:
+        with self.sessions() as session:
+            source = session.get(CookieCloudSource, uuid)
+            enabled = bool(source and source.auto_import)
+        if not enabled:
+            return None
+        try:
+            return self.import_credentials(uuid)
+        except ValueError as exc:
+            with self.sessions.begin() as session:
+                current = session.get(CookieCloudSource, uuid)
+                if current:
+                    current.last_error = str(exc)
+            raise
+
     def get(self, uuid: str) -> dict[str, Any] | None:
         with self.sessions() as session:
             blob = session.get(CookieCloudBlob, uuid)
             return json.loads(blob.encrypted_data) if blob else None
+
+
+def _canonical_domain(bucket: str, entries: list[Any]) -> str:
+    domain = bucket
+    for cookie in entries:
+        if isinstance(cookie, dict) and cookie.get("domain"):
+            domain = str(cookie["domain"])
+            break
+    return domain.lower().strip().lstrip(".")

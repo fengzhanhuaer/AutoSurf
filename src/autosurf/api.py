@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from typing import Annotated, Any
+import secrets
+from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -25,13 +26,30 @@ class AutomationInput(BaseModel):
     config: dict[str, Any]
 
 
-def require_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
-    expected = request.app.state.settings.api_token
-    if authorization != f"Bearer {expected}":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API token")
+class CookieCloudSourceInput(BaseModel):
+    uuid: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+    auto_import: bool = True
 
 
-router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_token)])
+class CookieCloudImportInput(BaseModel):
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+basic_auth = HTTPBasic()
+
+
+def require_login(request: Request, credentials: HTTPBasicCredentials = Depends(basic_auth)) -> str:
+    settings = request.app.state.settings
+    username_ok = secrets.compare_digest(credentials.username.encode(), settings.username.encode())
+    password_ok = secrets.compare_digest(credentials.password.encode(), settings.password.encode())
+    if not username_ok or not password_ok:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid username or password",
+                            headers={"WWW-Authenticate": "Basic"})
+    return credentials.username
+
+
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_login)])
 
 
 @router.get("/handlers")
@@ -86,6 +104,26 @@ def list_executions(request: Request, limit: int = 50) -> dict[str, Any]:
         return {"items": [execution_view(item) for item in records]}
 
 
+@router.put("/cookiecloud/sources/{uuid}")
+def configure_cookiecloud(uuid: str, data: CookieCloudSourceInput, request: Request) -> dict[str, Any]:
+    if uuid != data.uuid:
+        raise HTTPException(status_code=422, detail="path UUID and body UUID must match")
+    try:
+        source = request.app.state.cookiecloud.configure(uuid, data.password, data.auto_import)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"uuid": source.uuid, "auto_import": source.auto_import,
+            "last_import_at": source.last_import_at, "last_error": source.last_error}
+
+
+@router.post("/cookiecloud/sources/{uuid}/import")
+def import_cookiecloud(uuid: str, data: CookieCloudImportInput, request: Request) -> dict[str, Any]:
+    try:
+        return request.app.state.cookiecloud.import_credentials(uuid, data.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def credential_view(record: CredentialRecord) -> dict[str, Any]:
     return {"id": record.id, "name": record.name, "domain": record.domain, "provider": record.provider,
             "version": record.version, "updated_at": record.updated_at}
@@ -119,7 +157,12 @@ def cookiecloud_update(payload: dict[str, Any], request: Request) -> dict[str, A
         uuid = request.app.state.cookiecloud.put(payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"action": "done", "uuid": uuid}
+    imported = None
+    try:
+        imported = request.app.state.cookiecloud.auto_import_if_configured(uuid)
+    except ValueError:
+        pass
+    return {"action": "done", "uuid": uuid, "imported": len(imported["credentials"]) if imported else 0}
 
 
 @cookiecloud_router.get("/get/{uuid}")
@@ -129,4 +172,3 @@ def cookiecloud_get(uuid: str, request: Request) -> dict[str, Any]:
     if payload is None:
         raise HTTPException(status_code=404, detail="CookieCloud key not found")
     return payload
-
