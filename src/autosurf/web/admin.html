@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoSurf 管理</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/admin.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/app" aria-label="AutoSurf">
+        <span class="brand-mark">A</span>
+        <span>AutoSurf</span>
+      </a>
+      <nav class="nav" aria-label="管理导航">
+        <a class="nav-item active" href="/app" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">C</span>
+          <span>CookieCloud</span>
+        </a>
+        <a class="nav-item" href="/docs">
+          <span class="nav-icon" aria-hidden="true">A</span>
+          <span>API 文档</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>服务运行中</span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="page-header">
+        <div>
+          <h1>CookieCloud</h1>
+          <p>管理浏览器 Cookie 同步与内部凭据导入</p>
+        </div>
+        <button class="icon-button" id="refresh-button" type="button" title="刷新" aria-label="刷新">
+          <span aria-hidden="true">↻</span>
+        </button>
+      </header>
+
+      <section class="summary-strip" aria-label="同步概况">
+        <div class="summary-item">
+          <span class="summary-label">配置源</span>
+          <strong id="source-count">0</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">已导入凭据</span>
+          <strong id="credential-count">0</strong>
+        </div>
+        <div class="summary-item status-summary">
+          <span class="summary-label">同步状态</span>
+          <strong id="sync-state">等待配置</strong>
+        </div>
+      </section>
+
+      <div class="content-grid">
+        <section class="panel config-panel" aria-labelledby="config-title">
+          <div class="panel-heading">
+            <div>
+              <h2 id="config-title">连接配置</h2>
+              <p>密码加密保存，页面不会回显。</p>
+            </div>
+            <select id="source-selector" aria-label="选择已有配置">
+              <option value="">新建配置</option>
+            </select>
+          </div>
+
+          <form id="source-form">
+            <label class="field">
+              <span>UUID</span>
+              <input id="uuid" name="uuid" maxlength="128" autocomplete="off" required>
+            </label>
+            <label class="field">
+              <span>CookieCloud 密码</span>
+              <input id="password" name="password" type="password" maxlength="1024" autocomplete="new-password">
+              <small id="password-hint">新配置必须填写密码</small>
+            </label>
+            <label class="toggle-row">
+              <span>
+                <strong>自动导入</strong>
+                <small>浏览器上传后自动更新内部凭据</small>
+              </span>
+              <input id="auto-import" name="auto_import" type="checkbox" checked>
+              <span class="toggle" aria-hidden="true"></span>
+            </label>
+            <div class="form-actions">
+              <button class="button primary" id="save-button" type="submit">保存配置</button>
+              <button class="button secondary" id="import-button" type="button" disabled>立即导入</button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="side-column">
+          <section class="panel endpoint-panel" aria-labelledby="endpoint-title">
+            <div class="panel-heading compact">
+              <h2 id="endpoint-title">浏览器连接地址</h2>
+            </div>
+            <div class="copy-field">
+              <code id="endpoint-url"></code>
+              <button class="icon-button small" id="copy-button" type="button" title="复制地址" aria-label="复制地址">⧉</button>
+            </div>
+          </section>
+
+          <section class="panel status-panel" aria-labelledby="status-title">
+            <div class="panel-heading compact">
+              <h2 id="status-title">当前状态</h2>
+            </div>
+            <dl class="status-list">
+              <div><dt>UUID</dt><dd id="status-uuid">未选择</dd></div>
+              <div><dt>最近上传</dt><dd id="last-upload">暂无</dd></div>
+              <div><dt>最近导入</dt><dd id="last-import">暂无</dd></div>
+              <div><dt>自动导入</dt><dd id="auto-import-state">未配置</dd></div>
+            </dl>
+            <div class="error-box" id="error-box" hidden></div>
+          </section>
+        </aside>
+      </div>
+
+      <section class="table-section" aria-labelledby="credentials-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="credentials-title">已导入凭据</h2>
+            <p>Cookie 内容保持加密，仅显示域名和版本。</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>域名</th><th>来源</th><th>版本</th><th>更新时间</th></tr>
+            </thead>
+            <tbody id="credential-rows">
+              <tr><td class="empty" colspan="4">暂无已导入凭据</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

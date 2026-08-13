@@ -9,7 +9,13 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
+from autosurf.infrastructure.database import (
+    AutomationRecord,
+    CookieCloudBlob,
+    CookieCloudSource,
+    CredentialRecord,
+    ExecutionRecord,
+)
 
 
 class CredentialInput(BaseModel):
@@ -28,12 +34,16 @@ class AutomationInput(BaseModel):
 
 class CookieCloudSourceInput(BaseModel):
     uuid: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=1, max_length=1024)
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
     auto_import: bool = True
 
 
 class CookieCloudImportInput(BaseModel):
     password: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class CookieCloudSourceSettingsInput(BaseModel):
+    auto_import: bool
 
 
 basic_auth = HTTPBasic()
@@ -112,8 +122,48 @@ def configure_cookiecloud(uuid: str, data: CookieCloudSourceInput, request: Requ
         source = request.app.state.cookiecloud.configure(uuid, data.password, data.auto_import)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"uuid": source.uuid, "auto_import": source.auto_import,
-            "last_import_at": source.last_import_at, "last_error": source.last_error}
+    return _cookiecloud_source_view(request, source.uuid)
+
+
+@router.get("/cookiecloud/sources")
+def list_cookiecloud_sources(request: Request) -> dict[str, Any]:
+    with request.app.state.sessions() as session:
+        sources = {item.uuid: item for item in session.scalars(
+            select(CookieCloudSource).order_by(CookieCloudSource.uuid)
+        ).all()}
+        blobs = {item.uuid: item for item in session.scalars(
+            select(CookieCloudBlob).order_by(CookieCloudBlob.uuid)
+        ).all()}
+        credentials = session.scalars(
+            select(CredentialRecord).where(CredentialRecord.provider == "cookiecloud")
+        ).all()
+
+        items = []
+        for uuid in sorted(sources.keys() | blobs.keys()):
+            source = sources.get(uuid)
+            blob = blobs.get(uuid)
+            prefix = f"cookiecloud:{uuid}:"
+            items.append({
+                "uuid": uuid,
+                "configured": source is not None,
+                "password_configured": bool(source and source.encrypted_password),
+                "auto_import": bool(source and source.auto_import),
+                "last_import_at": source.last_import_at if source else None,
+                "last_error": source.last_error if source else None,
+                "blob_updated_at": blob.updated_at if blob else None,
+                "credential_count": sum(item.name.startswith(prefix) for item in credentials),
+            })
+        return {"items": items}
+
+
+@router.patch("/cookiecloud/sources/{uuid}/settings")
+def update_cookiecloud_source_settings(uuid: str, data: CookieCloudSourceSettingsInput,
+                                       request: Request) -> dict[str, Any]:
+    try:
+        request.app.state.cookiecloud.set_auto_import(uuid, data.auto_import)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _cookiecloud_source_view(request, uuid)
 
 
 @router.post("/cookiecloud/sources/{uuid}/import")
@@ -122,6 +172,11 @@ def import_cookiecloud(uuid: str, data: CookieCloudImportInput, request: Request
         return request.app.state.cookiecloud.import_credentials(uuid, data.password)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _cookiecloud_source_view(request: Request, uuid: str) -> dict[str, Any]:
+    items = list_cookiecloud_sources(request)["items"]
+    return next(item for item in items if item["uuid"] == uuid)
 
 
 def credential_view(record: CredentialRecord) -> dict[str, Any]:

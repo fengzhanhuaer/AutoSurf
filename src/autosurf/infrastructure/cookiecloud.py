@@ -34,15 +34,28 @@ class CookieCloudStore:
                 blob.updated_at = utc_now()
         return uuid
 
-    def configure(self, uuid: str, password: str, auto_import: bool = True) -> CookieCloudSource:
+    def configure(self, uuid: str, password: str | None, auto_import: bool = True) -> CookieCloudSource:
         if not uuid or len(uuid) > 128:
             raise ValueError("invalid CookieCloud UUID")
         with self.sessions.begin() as session:
             source = session.get(CookieCloudSource, uuid)
             if source is None:
+                if password is None:
+                    raise ValueError("CookieCloud password is required for a new source")
                 source = CookieCloudSource(uuid=uuid, encrypted_password="", auto_import=auto_import)
                 session.add(source)
-            source.encrypted_password = self.secrets.encrypt_json(password)
+            if password is not None:
+                source.encrypted_password = self.secrets.encrypt_json(password)
+            source.auto_import = auto_import
+            source.last_error = None
+            session.flush()
+            return source
+
+    def set_auto_import(self, uuid: str, auto_import: bool) -> CookieCloudSource:
+        with self.sessions.begin() as session:
+            source = session.get(CookieCloudSource, uuid)
+            if source is None:
+                raise ValueError("CookieCloud source has not been configured")
             source.auto_import = auto_import
             source.last_error = None
             session.flush()

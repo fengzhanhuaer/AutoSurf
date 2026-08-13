@@ -6,10 +6,12 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from autosurf import __version__
-from autosurf.api import cookiecloud_router, router
+from autosurf.api import cookiecloud_router, require_login, router
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import AutomationService, CredentialService, ExecutionService, QueueService
 from autosurf.automations.http_signin import HttpSignInHandler
@@ -20,6 +22,7 @@ from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import create_session_factory
 from autosurf.infrastructure.gzip_request import GZipRequestMiddleware
 from autosurf.infrastructure.migrations import upgrade_database
+from autosurf.management import management_router
 from autosurf.upgrade import upgrade
 
 
@@ -58,7 +61,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await task
 
-    app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(GZipRequestMiddleware)
     app.state.settings = settings
     app.state.sessions = sessions
@@ -69,6 +73,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
     app.include_router(router)
     app.include_router(cookiecloud_router)
+    app.include_router(management_router)
+
+    management_login = [Depends(require_login)]
+
+    @app.get("/", include_in_schema=False, dependencies=management_login)
+    def root() -> RedirectResponse:
+        return RedirectResponse(url="/app")
+
+    @app.get("/docs", include_in_schema=False, dependencies=management_login)
+    def docs() -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} management")
+
+    @app.get("/openapi.json", include_in_schema=False, dependencies=management_login)
+    def openapi_schema() -> JSONResponse:
+        return JSONResponse(app.openapi())
 
     @app.get("/health")
     def health() -> dict[str, str]:

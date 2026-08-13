@@ -89,3 +89,48 @@ async def test_upload_auto_imports_configured_source(tmp_path):
         assert credential.name == "cookiecloud:test-id:example.com"
         assert "secret-session" not in credential.encrypted_payload
         assert app.state.credentials.cookies_for(credential) == {"sid": "secret-session", "theme": "dark"}
+
+
+@pytest.mark.asyncio
+async def test_cookiecloud_source_list_hides_password_and_preserves_it_on_update(tmp_path):
+    settings = Settings(data_dir=tmp_path, secret_key="s" * 32, username="admin", password="password123")
+    app = create_app(settings)
+    auth = (settings.username, settings.password)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.put("/api/v1/cookiecloud/sources/test-id", auth=auth, json={
+            "uuid": "test-id", "password": "password", "auto_import": True,
+        })
+        assert created.status_code == 200
+        assert created.json()["password_configured"] is True
+        assert set(created.json()) == {
+            "uuid", "configured", "password_configured", "auto_import", "last_import_at",
+            "last_error", "blob_updated_at", "credential_count",
+        }
+        assert "\"password\":\"password\"" not in created.text
+
+        updated = await client.patch("/api/v1/cookiecloud/sources/test-id/settings", auth=auth, json={
+            "auto_import": False,
+        })
+        assert updated.status_code == 200
+        assert updated.json()["auto_import"] is False
+        assert updated.json()["password_configured"] is True
+
+        sources = await client.get("/api/v1/cookiecloud/sources", auth=auth)
+        assert sources.status_code == 200
+        assert sources.json()["items"] == [updated.json()]
+        assert "\"password\":\"password\"" not in sources.text
+
+
+@pytest.mark.asyncio
+async def test_new_cookiecloud_source_requires_password(tmp_path):
+    settings = Settings(data_dir=tmp_path, secret_key="s" * 32, username="admin", password="password123")
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put("/api/v1/cookiecloud/sources/test-id",
+                                    auth=(settings.username, settings.password), json={
+            "uuid": "test-id", "password": None, "auto_import": True,
+        })
+    assert response.status_code == 422
+    assert response.json()["detail"] == "CookieCloud password is required for a new source"

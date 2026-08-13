@@ -93,6 +93,8 @@ docker pull ghcr.io/fengzhanhuaer/autosurf:latest
 
 Health endpoint: `http://localhost:18980/health`
 
+Management interface: `http://localhost:18980/`
+
 OpenAPI: `http://localhost:18980/docs`
 
 CookieCloud-compatible base URL: `http://localhost:18980/cookiecloud`
@@ -151,7 +153,7 @@ Failed and timed-out browser runs save a screenshot under `data/browser-artifact
 
 ## Management API
 
-All `/api/v1` endpoints use HTTP Basic authentication with the username and password configured in `compose.yaml`. Swagger `/docs` provides a standard **Authorize** dialog.
+The management root, Swagger `/docs`, its OpenAPI schema, and all `/api/v1` endpoints use HTTP Basic authentication with the username and password configured in `compose.yaml`. Opening the management URL prompts for those credentials in the browser. CookieCloud compatibility endpoints remain outside management authentication because clients identify encrypted payloads by UUID.
 
 Create an encrypted cookie credential:
 
@@ -209,5 +211,5 @@ The command requires a clean Git working tree, creates a timestamped SQLite back
 
 - HTTP handlers support GET/POST and response-pattern matching.
 - CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
-- Chromium runs in the stable Docker shell; no graphical management UI is included yet.
+- The authenticated management interface configures CookieCloud sources, triggers imports, and shows imported credential metadata without exposing cookie values.
 - Database upgrades run automatically through Alembic at application startup.

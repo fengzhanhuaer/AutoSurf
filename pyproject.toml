@@ -30,7 +30,7 @@ autosurf = "autosurf.main:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/autosurf"]
-artifacts = ["src/autosurf/migrations/versions/*.py"]
+artifacts = ["src/autosurf/migrations/versions/*.py", "src/autosurf/web/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

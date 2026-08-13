@@ -37,6 +37,43 @@ async def test_api_creates_and_runs_automation(settings):
         assert queued.status_code == 202
 
 
+@pytest.mark.asyncio
+async def test_management_docs_require_login(settings):
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for path in ("/", "/app", "/assets/admin.css", "/assets/admin.js", "/docs", "/openapi.json"):
+            response = await client.get(path)
+            assert response.status_code == 401
+            assert response.headers["www-authenticate"] == "Basic"
+
+        root = await client.get("/", auth=(settings.username, settings.password))
+        docs = await client.get("/docs", auth=(settings.username, settings.password))
+        schema = await client.get("/openapi.json", auth=(settings.username, settings.password))
+
+    assert root.status_code == 307
+    assert root.headers["location"] == "/app"
+    assert docs.status_code == 200
+    assert schema.status_code == 200
+    assert schema.json()["info"]["title"] == "AutoSurf"
+
+
+@pytest.mark.asyncio
+async def test_management_app_is_available_after_login(settings):
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        page = await client.get("/app", auth=auth)
+        css = await client.get("/assets/admin.css", auth=auth)
+        javascript = await client.get("/assets/admin.js", auth=auth)
+
+    assert page.status_code == 200
+    assert "CookieCloud" in page.text
+    assert css.headers["content-type"].startswith("text/css")
+    assert javascript.headers["content-type"].startswith("text/javascript")
+
+
 def test_secret_box_does_not_store_plaintext():
     box = SecretBox("x" * 32)
     encrypted = box.encrypt_json({"sid": "top-secret"})
