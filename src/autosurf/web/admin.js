@@ -15,11 +15,6 @@ const elements = {
   endpoint: document.querySelector("#endpoint-url"),
   toast: document.querySelector("#toast"),
   rows: document.querySelector("#credential-rows"),
-  loginForm: document.querySelector("#login-form"),
-  loginUsername: document.querySelector("#login-username"),
-  loginPassword: document.querySelector("#login-password"),
-  loginButton: document.querySelector("#login-button"),
-  loginError: document.querySelector("#login-error"),
   logoutButton: document.querySelector("#logout-button"),
 };
 
@@ -66,19 +61,9 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => { elements.toast.hidden = true; }, 3200);
 }
 
-function showLogin(error = "") {
-  elements.body.classList.remove("auth-pending", "authenticated");
-  elements.body.classList.add("login-required");
-  elements.loginError.textContent = error;
-  elements.loginError.hidden = !error;
-  elements.loginPassword.value = "";
-  requestAnimationFrame(() => elements.loginUsername.focus());
-}
-
-function showApp() {
-  elements.body.classList.remove("auth-pending", "login-required");
-  elements.body.classList.add("authenticated");
-  elements.loginError.hidden = true;
+function goToLogin() {
+  const next = `${location.pathname}${location.search}`;
+  location.replace(`/login?next=${encodeURIComponent(next)}`);
 }
 
 function setBusy(busy) {
@@ -178,7 +163,7 @@ async function refresh({ quiet = false } = {}) {
     render();
     if (!quiet) showToast("状态已刷新");
   } catch (error) {
-    if (error.status === 401) showLogin("登录已过期，请重新登录");
+    if (error.status === 401) goToLogin();
     else showToast(error.message, true);
   } finally {
     setBusy(false);
@@ -248,36 +233,8 @@ elements.copyButton.addEventListener("click", async () => {
   }
 });
 
-elements.loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  elements.loginButton.disabled = true;
-  elements.loginError.hidden = true;
-  try {
-    await api("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username: elements.loginUsername.value, password: elements.loginPassword.value }),
-    });
-    showApp();
-    await refresh({ quiet: true });
-  } catch (error) {
-    showLogin(error.status === 401 ? "用户名或密码错误" : error.message);
-  } finally {
-    elements.loginButton.disabled = false;
-  }
-});
-
 elements.logoutButton.addEventListener("click", async () => {
-  try { await fetch("/api/auth/logout", { method: "POST" }); } finally { showLogin(); }
+  try { await fetch("/api/auth/logout", { method: "POST" }); } finally { location.replace("/login"); }
 });
 
-async function initialize() {
-  try {
-    await api("/api/auth/session");
-    showApp();
-    await refresh({ quiet: true });
-  } catch (_) {
-    showLogin();
-  }
-}
-
-initialize();
+refresh({ quiet: true });

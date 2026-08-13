@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 - AutoSurf</title>
+  <link rel="stylesheet" href="/assets/login.css">
+  <script src="/assets/login.js" defer></script>
+</head>
+<body>
+  <main class="login-page">
+    <section class="login-panel" aria-labelledby="login-title">
+      <div class="brand" aria-label="AutoSurf">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span>AutoSurf</span>
+      </div>
+
+      <header class="login-heading">
+        <h1 id="login-title">登录管理控制台</h1>
+        <p>使用管理员账号继续</p>
+      </header>
+
+      <form id="login-form">
+        <label class="field">
+          <span>用户名</span>
+          <input id="username" name="username" maxlength="128" autocomplete="username" required autofocus>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="password" name="password" type="password" maxlength="1024" autocomplete="current-password" required>
+        </label>
+        <p class="login-error" id="login-error" role="alert" hidden></p>
+        <button class="login-button" id="login-button" type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

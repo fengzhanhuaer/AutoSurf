@@ -38,7 +38,7 @@ async def test_api_creates_and_runs_automation(settings):
 
 
 @pytest.mark.asyncio
-async def test_management_page_loads_login_ui_and_docs_require_session(settings):
+async def test_management_uses_dedicated_login_page_and_docs_require_session(settings):
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -47,16 +47,24 @@ async def test_management_page_loads_login_ui_and_docs_require_session(settings)
             assert response.status_code == 401
 
         root = await client.get("/")
-        page = await client.get("/app")
+        page = await client.get("/app", follow_redirects=False)
+        login_page = await client.get("/login")
         css = await client.get("/assets/admin.css")
         javascript = await client.get("/assets/admin.js")
+        login_css = await client.get("/assets/login.css")
+        login_javascript = await client.get("/assets/login.js")
 
     assert root.status_code == 307
     assert root.headers["location"] == "/app"
-    assert page.status_code == 200
-    assert "登录 AutoSurf" in page.text
+    assert page.status_code == 307
+    assert page.headers["location"] == "/login?next=/app"
+    assert login_page.status_code == 200
+    assert "登录管理控制台" in login_page.text
+    assert "CookieCloud" not in login_page.text
     assert css.status_code == 200
     assert javascript.status_code == 200
+    assert login_css.status_code == 200
+    assert login_javascript.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -78,10 +86,17 @@ async def test_management_session_login_and_logout(settings):
         assert settings.password not in cookie
 
         session = await client.get("/api/auth/session")
+        app_page = await client.get("/app", follow_redirects=False)
+        login_page = await client.get("/login", follow_redirects=False)
         credentials = await client.get("/api/v1/credentials")
         docs = await client.get("/docs")
         schema = await client.get("/openapi.json")
         assert session.json() == {"username": settings.username}
+        assert app_page.status_code == 200
+        assert "CookieCloud" in app_page.text
+        assert "login-form" not in app_page.text
+        assert login_page.status_code == 307
+        assert login_page.headers["location"] == "/app"
         assert credentials.status_code == 200
         assert docs.status_code == 200
         assert schema.json()["info"]["title"] == "AutoSurf"

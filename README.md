@@ -153,7 +153,7 @@ Failed and timed-out browser runs save a screenshot under `data/browser-artifact
 
 ## Management API
 
-The management page presents an in-app login using the username and password configured in `compose.yaml`. A successful login creates a signed HttpOnly session cookie. Swagger `/docs`, its OpenAPI schema, and all `/api/v1` endpoints accept that session; API clients may continue using HTTP Basic authentication. CookieCloud compatibility endpoints remain outside management authentication because clients identify encrypted payloads by UUID.
+The dedicated `/login` page uses the username and password configured in `compose.yaml`. Unauthenticated visits to `/app` are redirected there; a successful login creates a signed HttpOnly session cookie and opens the management console. Swagger `/docs`, its OpenAPI schema, and all `/api/v1` endpoints accept that session; API clients may continue using HTTP Basic authentication. CookieCloud compatibility endpoints remain outside management authentication because clients identify encrypted payloads by UUID.
 
 Create an encrypted cookie credential:
 
