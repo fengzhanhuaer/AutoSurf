@@ -4,7 +4,12 @@ import json
 import base64
 import hashlib
 import hmac
+from importlib.metadata import PackageNotFoundError, version
+import os
+from pathlib import Path
 import secrets
+import shutil
+import subprocess
 import time
 from typing import Any
 
@@ -138,6 +143,101 @@ def logout(response: Response) -> None:
 
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_login)])
+
+
+def _program_repository() -> Path:
+    configured = os.environ.get("AUTOSURF_PROGRAM_DIR")
+    return Path(configured).resolve() if configured else Path(__file__).resolve().parents[2]
+
+
+def _upgrade_command() -> list[str] | None:
+    configured = os.environ.get("AUTOSURF_UPGRADE_SCRIPT")
+    if configured and Path(configured).is_file():
+        return ["/bin/sh", configured]
+    executable = shutil.which("autosurf-upgrade")
+    return [executable] if executable else None
+
+
+def _program_revision(repository: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-c", f"safe.directory={repository}", "rev-parse", "--short=12", "HEAD"],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _upgrade_running(request: Request) -> bool:
+    process = getattr(request.app.state, "upgrade_process", None)
+    process_running = process is not None and process.poll() is None
+    return process_running or Path("/tmp/autosurf-upgrade-in-progress").exists()
+
+
+def _last_upgrade(request: Request) -> dict[str, str] | None:
+    status_file = request.app.state.settings.data_dir / "upgrade-status.json"
+    try:
+        result = json.loads(status_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(result, dict) or result.get("state") not in {"running", "complete", "failed"}:
+        return None
+    return {key: str(result[key]) for key in ("state", "updated_at") if key in result}
+
+
+def _browser_runtime() -> dict[str, Any]:
+    browser_path = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")).resolve()
+    try:
+        playwright_version = version("playwright")
+    except PackageNotFoundError:
+        playwright_version = None
+    installed = bool(browser_path.name and browser_path.is_dir() and any(browser_path.glob("chromium-*")))
+    return {
+        "installed": installed,
+        "playwright_version": playwright_version,
+        "persistent": bool(os.environ.get("PLAYWRIGHT_BROWSERS_PATH")),
+    }
+
+
+def _upgrade_status(request: Request) -> dict[str, Any]:
+    repository = _program_repository()
+    command = _upgrade_command()
+    return {
+        "available": command is not None and repository.joinpath(".git").is_dir(),
+        "running": _upgrade_running(request),
+        "revision": _program_revision(repository),
+        "branch": os.environ.get("AUTOSURF_BRANCH", "main"),
+        "browser": _browser_runtime(),
+        "last_upgrade": _last_upgrade(request),
+    }
+
+
+@router.get("/system/upgrade")
+def upgrade_status(request: Request) -> dict[str, Any]:
+    return _upgrade_status(request)
+
+
+@router.post("/system/upgrade", status_code=202)
+def start_upgrade(request: Request) -> dict[str, Any]:
+    repository = _program_repository()
+    command = _upgrade_command()
+    with request.app.state.upgrade_guard:
+        if command is None or not repository.joinpath(".git").is_dir():
+            raise HTTPException(status_code=409, detail="当前运行环境不支持网页升级")
+        if _upgrade_running(request):
+            raise HTTPException(status_code=409, detail="升级正在进行")
+
+        if os.name != "nt":
+            command = ["/bin/sh", "-c", 'sleep 1; exec "$@"', "autosurf-upgrade", *command]
+        request.app.state.upgrade_process = subprocess.Popen(
+            command,
+            cwd=repository,
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=os.name != "nt",
+        )
+    return {**_upgrade_status(request), "accepted": True}
 
 
 @router.get("/handlers")

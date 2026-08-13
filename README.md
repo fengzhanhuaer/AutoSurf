@@ -44,9 +44,9 @@ docker compose up -d
 
 The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin a release by replacing the image tag in `compose.yaml`.
 
-The Docker image is a stable runtime shell. Application source and its Linux Python environment live in the host directory `./autosurf_program`, mounted at `/app/program`. On first start, the shell clones the AutoSurf `main` branch into that directory. Normal program upgrades do not replace the container. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
+The Docker image is a stable runtime shell. Application source and its Linux Python environment live in `./autosurf_program`, while Playwright's Chromium runtime lives in `./browser`. Both directories are mounted from the host and can be upgraded without replacing the container. On first start, the shell initializes any missing program or browser files. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
 
-The shell also contains the pinned Chromium runtime and its operating-system libraries. AutoSurf pins the matching Playwright Python package. Site adapters and application logic can still be upgraded independently with `autosurf-upgrade`; rebuild the shell only when Chromium, Playwright, Python, or required operating-system libraries change.
+AutoSurf pins the matching Playwright Python package and installs Chromium into the persistent browser mount. The Web upgrade action updates application code, Python dependencies, and that matching Chromium runtime together. Rebuild the shell only when Python itself or Chromium's required operating-system libraries change.
 
 For a host-only deployment, change the port mapping to `127.0.0.1:18980:8080`. This is recommended when a reverse proxy on the same machine provides HTTPS.
 
@@ -67,13 +67,15 @@ docker image prune -f
 
 AutoSurf applies pending Alembic database migrations during startup. The application starts only after the migration succeeds. Existing pre-migration databases are inspected and adopted at the matching schema revision before pending migrations run.
 
-For normal program-only upgrades, keep the Docker shell running and execute:
+For normal upgrades, use the authenticated management page or keep the Docker shell running and execute:
 
 ```powershell
 docker exec autosurf autosurf-upgrade
 ```
 
-The helper gracefully stops only the AutoSurf application process, backs up SQLite, fast-forward pulls `./autosurf_program`, updates its isolated Python environment, applies migrations, and asks the shell to start the new version. The container, `data`, and `autosurf_program` directories remain in place.
+The helper gracefully stops only the AutoSurf application process, backs up SQLite, fast-forward pulls `./autosurf_program`, updates its isolated Python environment, installs the matching browser into `./browser`, applies migrations, and asks the shell to start the new version. The container and all mounted directories remain in place.
+
+In the management page, open **系统升级** from the sidebar, review the program and browser versions, then choose **开始升级**. The page follows the application restart and reports the persisted result. Only one upgrade can run at a time.
 
 Only pull and recreate the container when the runtime shell itself changes, such as a Python or operating-system dependency update. `docker compose pull && docker compose up -d` is the separate shell-upgrade path.
 

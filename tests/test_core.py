@@ -94,6 +94,7 @@ async def test_management_session_login_and_logout(settings):
         assert session.json() == {"username": settings.username}
         assert app_page.status_code == 200
         assert "CookieCloud" in app_page.text
+        assert "系统升级" in app_page.text
         assert "login-form" not in app_page.text
         assert login_page.status_code == 307
         assert login_page.headers["location"] == "/app"
@@ -110,6 +111,45 @@ async def test_management_session_login_and_logout(settings):
         assert (await client.get("/api/auth/session")).status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tmp_path, monkeypatch):
+    repository = tmp_path / "program"
+    repository.joinpath(".git").mkdir(parents=True)
+    captured = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        captured.append((command, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr("autosurf.api._program_repository", lambda: repository)
+    monkeypatch.setattr("autosurf.api._upgrade_command", lambda: ["fixed-upgrade-helper"])
+    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: "abc123")
+    monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {
+        "installed": True, "playwright_version": "1.61.0", "persistent": True,
+    })
+    monkeypatch.setattr("autosurf.api.subprocess.Popen", fake_popen)
+
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get("/api/v1/system/upgrade")).status_code == 401
+        auth = (settings.username, settings.password)
+        status_response = await client.get("/api/v1/system/upgrade", auth=auth)
+        started = await client.post("/api/v1/system/upgrade", auth=auth)
+        duplicate = await client.post("/api/v1/system/upgrade", auth=auth)
+
+    assert status_response.json()["revision"] == "abc123"
+    assert status_response.json()["browser"]["persistent"] is True
+    assert started.status_code == 202
+    assert started.json()["running"] is True
+    assert duplicate.status_code == 409
+    assert len(captured) == 1
+    assert "fixed-upgrade-helper" in captured[0][0]
+    assert captured[0][1]["stdin"] is not None
 
 def test_secret_box_does_not_store_plaintext():
     box = SecretBox("x" * 32)

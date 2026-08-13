@@ -2,25 +2,25 @@ FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_BROWSERS_PATH=/app/browser \
     AUTOSURF_REPOSITORY=https://github.com/fengzhanhuaer/AutoSurf.git \
     AUTOSURF_BRANCH=main
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y git tini \
     && pip install --no-cache-dir playwright==1.61.0 \
-    && python -m playwright install --with-deps chromium \
+    && python -m playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 autosurf
 WORKDIR /app
 COPY docker/entrypoint.sh /usr/local/bin/autosurf-entrypoint
 COPY docker/autosurf-upgrade /usr/local/bin/autosurf-upgrade
 RUN chmod 755 /usr/local/bin/autosurf-entrypoint /usr/local/bin/autosurf-upgrade \
-    && mkdir /app/data /app/program \
+    && mkdir /app/data /app/program /app/browser \
     && chown -R autosurf:autosurf /app
 USER autosurf
 
-VOLUME ["/app/data", "/app/program"]
+VOLUME ["/app/data", "/app/program", "/app/browser"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"

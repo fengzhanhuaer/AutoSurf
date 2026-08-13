@@ -3,6 +3,7 @@ set -eu
 
 program_dir=/app/program
 venv_dir="$program_dir/.venv"
+browser_dir=${PLAYWRIGHT_BROWSERS_PATH:-/app/browser}
 pid_file=/tmp/autosurf-app.pid
 restart_file=/tmp/autosurf-restart-requested
 upgrade_lock=/tmp/autosurf-upgrade-in-progress
@@ -27,6 +28,17 @@ if [ ! -x "$venv_dir/bin/autosurf" ]; then
     fi
     python -m venv "$venv_dir"
     "$venv_dir/bin/python" -m pip install --disable-pip-version-check --no-cache-dir -e "$program_dir"
+fi
+
+mkdir -p "$browser_dir"
+chromium_executable=$("$venv_dir/bin/python" - <<'PY'
+from playwright.sync_api import sync_playwright
+with sync_playwright() as playwright:
+    print(playwright.chromium.executable_path)
+PY
+)
+if [ ! -x "$chromium_executable" ]; then
+    "$venv_dir/bin/python" -m playwright install chromium
 fi
 
 terminate_child() {

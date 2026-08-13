@@ -23,6 +23,10 @@
           <span class="nav-icon" aria-hidden="true">A</span>
           <span>API 文档</span>
         </a>
+        <button class="nav-item nav-button" id="upgrade-open-button" type="button">
+          <span class="nav-icon" aria-hidden="true">↑</span>
+          <span>系统升级</span>
+        </button>
       </nav>
       <div class="sidebar-footer">
         <span class="service-state"><span class="status-dot" aria-hidden="true"></span>服务运行中</span>
@@ -141,6 +145,35 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog class="upgrade-dialog" id="upgrade-dialog" aria-labelledby="upgrade-title">
+    <div class="dialog-heading">
+      <div>
+        <h2 id="upgrade-title">系统升级</h2>
+        <p>升级程序、Python 依赖与浏览器运行时</p>
+      </div>
+      <button class="dialog-close" id="upgrade-close-button" type="button" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <div class="upgrade-components">
+      <div>
+        <span>程序版本</span>
+        <strong id="upgrade-revision">读取中</strong>
+      </div>
+      <div>
+        <span>浏览器运行时</span>
+        <strong id="upgrade-browser">读取中</strong>
+      </div>
+      <div>
+        <span>升级状态</span>
+        <strong id="upgrade-state">检查中</strong>
+      </div>
+    </div>
+    <p class="upgrade-boundary">Docker 基础系统库保持不变。</p>
+    <div class="dialog-actions">
+      <button class="button secondary" id="upgrade-cancel-button" type="button">取消</button>
+      <button class="button primary" id="upgrade-start-button" type="button" disabled>开始升级</button>
+    </div>
+  </dialog>
 
 </body>
 </html>

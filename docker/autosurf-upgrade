@@ -5,6 +5,14 @@ program_dir=/app/program
 venv_dir="$program_dir/.venv"
 pid_file=/tmp/autosurf-app.pid
 upgrade_lock=/tmp/autosurf-upgrade-in-progress
+status_file=/app/data/upgrade-status.json
+log_file=/app/data/upgrade.log
+upgrade_state=failed
+
+write_status() {
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '{"state":"%s","updated_at":"%s"}\n' "$1" "$updated_at" > "$status_file"
+}
 
 if [ ! -d "$program_dir/.git" ] || [ ! -x "$venv_dir/bin/autosurf" ]; then
     echo "AutoSurf program volume is not initialized" >&2
@@ -16,7 +24,12 @@ if [ -e "$upgrade_lock" ]; then
     exit 1
 fi
 touch "$upgrade_lock"
+write_status running
 cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ "$upgrade_state" != complete ]; then
+        write_status failed
+    fi
     rm -f "$upgrade_lock"
 }
 trap cleanup EXIT INT TERM
@@ -30,4 +43,10 @@ if [ -f "$pid_file" ]; then
     done
 fi
 
-"$venv_dir/bin/autosurf" upgrade --repository "$program_dir"
+{
+    "$venv_dir/bin/autosurf" upgrade --repository "$program_dir"
+    "$venv_dir/bin/python" -m playwright install chromium
+} >> "$log_file" 2>&1
+
+upgrade_state=complete
+write_status complete

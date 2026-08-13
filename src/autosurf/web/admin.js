@@ -16,6 +16,14 @@ const elements = {
   toast: document.querySelector("#toast"),
   rows: document.querySelector("#credential-rows"),
   logoutButton: document.querySelector("#logout-button"),
+  upgradeOpenButton: document.querySelector("#upgrade-open-button"),
+  upgradeDialog: document.querySelector("#upgrade-dialog"),
+  upgradeCloseButton: document.querySelector("#upgrade-close-button"),
+  upgradeCancelButton: document.querySelector("#upgrade-cancel-button"),
+  upgradeStartButton: document.querySelector("#upgrade-start-button"),
+  upgradeRevision: document.querySelector("#upgrade-revision"),
+  upgradeBrowser: document.querySelector("#upgrade-browser"),
+  upgradeState: document.querySelector("#upgrade-state"),
 };
 
 elements.endpoint.textContent = `${location.origin}/cookiecloud`;
@@ -70,6 +78,60 @@ function setBusy(busy) {
   elements.body.classList.toggle("loading", busy);
   elements.saveButton.disabled = busy;
   elements.refreshButton.disabled = busy;
+}
+
+function renderUpgradeStatus(status) {
+  elements.upgradeRevision.textContent = status.revision
+    ? `${status.branch}@${status.revision}`
+    : "未知";
+  const browser = status.browser || {};
+  elements.upgradeBrowser.textContent = browser.installed
+    ? `Playwright ${browser.playwright_version || "已安装"}`
+    : "未安装";
+  const lastState = status.last_upgrade?.state;
+  elements.upgradeState.textContent = status.running
+    ? "升级中"
+    : lastState === "complete"
+      ? "上次升级成功"
+      : lastState === "failed" ? "上次升级失败" : "就绪";
+  elements.upgradeStartButton.disabled = !status.available || status.running;
+  elements.upgradeStartButton.textContent = status.running ? "升级中..." : "开始升级";
+}
+
+async function loadUpgradeStatus() {
+  try {
+    const status = await api("/api/v1/system/upgrade");
+    renderUpgradeStatus(status);
+    return status;
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+    elements.upgradeState.textContent = "状态读取失败";
+    elements.upgradeStartButton.disabled = true;
+    return null;
+  }
+}
+
+async function waitForUpgrade() {
+  const deadline = Date.now() + 15 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      const status = await api("/api/v1/system/upgrade", { cache: "no-store" });
+      renderUpgradeStatus(status);
+      if (!status.running && status.last_upgrade?.state === "complete") {
+        showToast("程序与浏览器运行时升级完成");
+        return;
+      }
+      if (!status.running && status.last_upgrade?.state === "failed") {
+        showToast("升级失败，请查看服务日志", true);
+        return;
+      }
+    } catch (_) {
+      elements.upgradeState.textContent = "服务重启中";
+    }
+  }
+  elements.upgradeState.textContent = "升级超时";
+  showToast("升级状态等待超时，请查看服务日志", true);
 }
 
 function renderSelector() {
@@ -235,6 +297,28 @@ elements.copyButton.addEventListener("click", async () => {
 
 elements.logoutButton.addEventListener("click", async () => {
   try { await fetch("/api/auth/logout", { method: "POST" }); } finally { location.replace("/login"); }
+});
+
+elements.upgradeOpenButton.addEventListener("click", async () => {
+  elements.upgradeDialog.showModal();
+  await loadUpgradeStatus();
+});
+elements.upgradeCloseButton.addEventListener("click", () => elements.upgradeDialog.close());
+elements.upgradeCancelButton.addEventListener("click", () => elements.upgradeDialog.close());
+elements.upgradeDialog.addEventListener("click", (event) => {
+  if (event.target === elements.upgradeDialog) elements.upgradeDialog.close();
+});
+elements.upgradeStartButton.addEventListener("click", async () => {
+  elements.upgradeStartButton.disabled = true;
+  elements.upgradeStartButton.textContent = "正在启动...";
+  try {
+    const status = await api("/api/v1/system/upgrade", { method: "POST", body: "{}" });
+    renderUpgradeStatus(status);
+    waitForUpgrade();
+  } catch (error) {
+    showToast(error.message, true);
+    await loadUpgradeStatus();
+  }
 });
 
 refresh({ quiet: true });

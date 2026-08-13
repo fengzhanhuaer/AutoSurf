@@ -4,6 +4,7 @@ import asyncio
 import argparse
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+import threading
 
 import uvicorn
 from fastapi import Depends, FastAPI
@@ -71,6 +72,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.automations = automations
     app.state.queue = queue
     app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
+    app.state.upgrade_guard = threading.Lock()
+    app.state.upgrade_process = None
     app.include_router(router)
     app.include_router(cookiecloud_router)
     app.include_router(auth_router)
