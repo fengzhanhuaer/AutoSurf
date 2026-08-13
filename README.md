@@ -46,6 +46,8 @@ The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin 
 
 The Docker image is a stable runtime shell. Application source and its Linux Python environment live in the host directory `./autosurf_program`, mounted at `/app/program`. On first start, the shell clones the AutoSurf `main` branch into that directory. Normal program upgrades do not replace the container. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
 
+The shell also contains the pinned Chromium runtime and its operating-system libraries. AutoSurf pins the matching Playwright Python package. Site adapters and application logic can still be upgraded independently with `autosurf-upgrade`; rebuild the shell only when Chromium, Playwright, Python, or required operating-system libraries change.
+
 For a host-only deployment, change the port mapping to `127.0.0.1:18980:8080`. This is recommended when a reverse proxy on the same machine provides HTTPS.
 
 Check service state and logs:
@@ -124,6 +126,29 @@ Invoke-RestMethod -Method Post `
 
 Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported. Imported credential names use `cookiecloud:<uuid>:<domain>`.
 
+### Browser sign-in
+
+Use the `browser_signin` handler for sites that require JavaScript or an actual Chromium page. It launches an isolated headless Chromium context, injects the selected credential cookies, loads the page, optionally waits for and clicks an element, and evaluates success text after the interaction.
+
+```json
+{
+  "name": "Browser daily sign-in",
+  "handler_type": "browser_signin",
+  "interval_seconds": 86400,
+  "credential_id": "<credential-id>",
+  "config": {
+    "url": "https://example.com/attendance.php",
+    "wait_for_selector": "button.checkin",
+    "click_selector": "button.checkin",
+    "wait_after_click_ms": 1500,
+    "success_patterns": ["签到成功"],
+    "already_patterns": ["已经签到"]
+  }
+}
+```
+
+Failed and timed-out browser runs save a screenshot under `data/browser-artifacts`. Chromium runs headless but uses the full Playwright Chromium browser engine and executes page JavaScript.
+
 ## Management API
 
 All `/api/v1` endpoints use HTTP Basic authentication with the username and password configured in `compose.yaml`. Swagger `/docs` provides a standard **Authorize** dialog.
@@ -184,5 +209,5 @@ The command requires a clean Git working tree, creates a timestamped SQLite back
 
 - HTTP handlers support GET/POST and response-pattern matching.
 - CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
-- No browser worker or UI is included yet.
+- Chromium runs in the stable Docker shell; no graphical management UI is included yet.
 - Database upgrades run automatically through Alembic at application startup.

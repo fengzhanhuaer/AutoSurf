@@ -4,6 +4,7 @@ services:
     pull_policy: always
     container_name: autosurf
     init: true
+    ipc: host
     ports:
       - "0.0.0.0:18980:8080"
     volumes:
@@ -14,6 +15,7 @@ services:
     environment:
       HOME: /tmp/home
       TZ: Asia/Taipei
+      AUTOSURF_DATA_DIR: /app/data
       AUTOSURF_SECRET_KEY: "CHANGE-ME-random-encryption-key-at-least-32-characters"
       AUTOSURF_USERNAME: "admin"
       AUTOSURF_PASSWORD: "CHANGE-ME-strong-management-password"

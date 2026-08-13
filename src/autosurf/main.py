@@ -13,6 +13,7 @@ from autosurf.api import cookiecloud_router, router
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import AutomationService, CredentialService, ExecutionService, QueueService
 from autosurf.automations.http_signin import HttpSignInHandler
+from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.config import Settings, get_settings
 from autosurf.infrastructure.cookiecloud import CookieCloudStore
 from autosurf.infrastructure.crypto import SecretBox
@@ -29,6 +30,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sessions = create_session_factory(settings.database_url)
     registry = HandlerRegistry()
     registry.register(HttpSignInHandler())
+    registry.register(BrowserSignInHandler())
     secrets = SecretBox(settings.secret_key)
     credentials = CredentialService(sessions, secrets)
     automations = AutomationService(sessions, registry)

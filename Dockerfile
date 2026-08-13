@@ -2,11 +2,14 @@ FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     AUTOSURF_REPOSITORY=https://github.com/fengzhanhuaer/AutoSurf.git \
     AUTOSURF_BRANCH=main
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y git tini \
+    && pip install --no-cache-dir playwright==1.61.0 \
+    && python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 autosurf
 WORKDIR /app
