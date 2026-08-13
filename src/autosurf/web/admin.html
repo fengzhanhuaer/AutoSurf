@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/admin.js" defer></script>
 </head>
-<body>
+<body class="auth-pending">
   <div class="app-shell">
     <aside class="sidebar">
       <a class="brand" href="/app" aria-label="AutoSurf">
@@ -25,8 +25,8 @@
         </a>
       </nav>
       <div class="sidebar-footer">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span>服务运行中</span>
+        <span class="service-state"><span class="status-dot" aria-hidden="true"></span>服务运行中</span>
+        <button class="logout-button" id="logout-button" type="button">退出</button>
       </div>
     </aside>
 
@@ -141,5 +141,25 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <div class="login-layer" id="login-layer" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <form class="login-dialog" id="login-form">
+      <div class="login-brand" aria-hidden="true">A</div>
+      <div class="login-heading">
+        <h2 id="login-title">登录 AutoSurf</h2>
+        <p>输入管理账号以继续</p>
+      </div>
+      <label class="field login-field">
+        <span>用户名</span>
+        <input id="login-username" name="username" maxlength="128" autocomplete="username" required autofocus>
+      </label>
+      <label class="field login-field">
+        <span>密码</span>
+        <input id="login-password" name="password" type="password" maxlength="1024" autocomplete="current-password" required>
+      </label>
+      <p class="login-error" id="login-error" role="alert" hidden></p>
+      <button class="button primary login-button" id="login-button" type="submit">登录</button>
+    </form>
+  </div>
 </body>
 </html>

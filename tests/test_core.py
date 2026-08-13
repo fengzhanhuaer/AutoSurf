@@ -38,40 +38,62 @@ async def test_api_creates_and_runs_automation(settings):
 
 
 @pytest.mark.asyncio
-async def test_management_docs_require_login(settings):
+async def test_management_page_loads_login_ui_and_docs_require_session(settings):
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        for path in ("/", "/app", "/assets/admin.css", "/assets/admin.js", "/docs", "/openapi.json"):
+        for path in ("/docs", "/openapi.json"):
             response = await client.get(path)
             assert response.status_code == 401
-            assert response.headers["www-authenticate"] == "Basic"
 
-        root = await client.get("/", auth=(settings.username, settings.password))
-        docs = await client.get("/docs", auth=(settings.username, settings.password))
-        schema = await client.get("/openapi.json", auth=(settings.username, settings.password))
+        root = await client.get("/")
+        page = await client.get("/app")
+        css = await client.get("/assets/admin.css")
+        javascript = await client.get("/assets/admin.js")
 
     assert root.status_code == 307
     assert root.headers["location"] == "/app"
-    assert docs.status_code == 200
-    assert schema.status_code == 200
-    assert schema.json()["info"]["title"] == "AutoSurf"
+    assert page.status_code == 200
+    assert "登录 AutoSurf" in page.text
+    assert css.status_code == 200
+    assert javascript.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_management_app_is_available_after_login(settings):
+async def test_management_session_login_and_logout(settings):
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
-    auth = (settings.username, settings.password)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        page = await client.get("/app", auth=auth)
-        css = await client.get("/assets/admin.css", auth=auth)
-        javascript = await client.get("/assets/admin.js", auth=auth)
+        wrong = await client.post("/api/auth/login", json={"username": settings.username, "password": "wrong"})
+        assert wrong.status_code == 401
+        assert (await client.get("/api/auth/session", auth=(settings.username, settings.password))).status_code == 401
 
-    assert page.status_code == 200
-    assert "CookieCloud" in page.text
-    assert css.headers["content-type"].startswith("text/css")
-    assert javascript.headers["content-type"].startswith("text/javascript")
+        logged_in = await client.post("/api/auth/login", json={
+            "username": settings.username, "password": settings.password,
+        })
+        assert logged_in.status_code == 200
+        cookie = logged_in.headers["set-cookie"]
+        assert "HttpOnly" in cookie
+        assert "SameSite=strict" in cookie
+        assert settings.password not in cookie
+
+        session = await client.get("/api/auth/session")
+        credentials = await client.get("/api/v1/credentials")
+        docs = await client.get("/docs")
+        schema = await client.get("/openapi.json")
+        assert session.json() == {"username": settings.username}
+        assert credentials.status_code == 200
+        assert docs.status_code == 200
+        assert schema.json()["info"]["title"] == "AutoSurf"
+
+        client.cookies.set("autosurf_session", client.cookies["autosurf_session"] + "tampered")
+        assert (await client.get("/api/auth/session")).status_code == 401
+
+        await client.post("/api/auth/login", json={"username": settings.username, "password": settings.password})
+        logged_out = await client.post("/api/auth/logout")
+        assert logged_out.status_code == 204
+        assert (await client.get("/api/auth/session")).status_code == 401
+
 
 
 def test_secret_box_does_not_store_plaintext():

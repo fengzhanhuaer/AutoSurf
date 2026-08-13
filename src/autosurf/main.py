@@ -11,7 +11,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from autosurf import __version__
-from autosurf.api import cookiecloud_router, require_login, router
+from autosurf.api import auth_router, cookiecloud_router, require_login, router
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import AutomationService, CredentialService, ExecutionService, QueueService
 from autosurf.automations.http_signin import HttpSignInHandler
@@ -73,11 +73,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
     app.include_router(router)
     app.include_router(cookiecloud_router)
+    app.include_router(auth_router)
     app.include_router(management_router)
 
     management_login = [Depends(require_login)]
 
-    @app.get("/", include_in_schema=False, dependencies=management_login)
+    @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse(url="/app")
 

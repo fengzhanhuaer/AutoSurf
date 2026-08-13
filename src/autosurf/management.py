@@ -1,12 +1,9 @@
 from importlib.resources import files
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, Response
 
-from autosurf.api import require_login
-
-
-management_router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=False)
+management_router = APIRouter(include_in_schema=False)
 
 
 def _asset(name: str) -> str:

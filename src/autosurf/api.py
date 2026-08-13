@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import secrets
+import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -46,17 +50,91 @@ class CookieCloudSourceSettingsInput(BaseModel):
     auto_import: bool
 
 
-basic_auth = HTTPBasic()
+class LoginInput(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
 
 
-def require_login(request: Request, credentials: HTTPBasicCredentials = Depends(basic_auth)) -> str:
+SESSION_COOKIE = "autosurf_session"
+SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+basic_auth = HTTPBasic(auto_error=False)
+
+
+def _valid_credentials(settings: Any, username: str, password: str) -> bool:
+    username_ok = secrets.compare_digest(username.encode(), settings.username.encode())
+    password_ok = secrets.compare_digest(password.encode(), settings.password.encode())
+    return username_ok and password_ok
+
+
+def _session_token(settings: Any, username: str, expires_at: int) -> str:
+    payload = f"{username}\n{expires_at}".encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    signature = hmac.new(settings.secret_key.encode(), encoded.encode(), hashlib.sha256).digest()
+    return f"{encoded}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+
+
+def _session_username(settings: Any, token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        encoded, supplied_signature = token.split(".", 1)
+        expected_signature = hmac.new(settings.secret_key.encode(), encoded.encode(), hashlib.sha256).digest()
+        supplied = base64.urlsafe_b64decode(supplied_signature + "=" * (-len(supplied_signature) % 4))
+        if not hmac.compare_digest(supplied, expected_signature):
+            return None
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        username, expires_at = payload.rsplit("\n", 1)
+        if int(expires_at) < int(time.time()) or username != settings.username:
+            return None
+        return username
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def require_login(request: Request, credentials: HTTPBasicCredentials | None = Depends(basic_auth)) -> str:
     settings = request.app.state.settings
-    username_ok = secrets.compare_digest(credentials.username.encode(), settings.username.encode())
-    password_ok = secrets.compare_digest(credentials.password.encode(), settings.password.encode())
-    if not username_ok or not password_ok:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid username or password",
-                            headers={"WWW-Authenticate": "Basic"})
-    return credentials.username
+    if credentials:
+        if _valid_credentials(settings, credentials.username, credentials.password):
+            return credentials.username
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid username or password")
+    username = _session_username(settings, request.cookies.get(SESSION_COOKIE))
+    if username:
+        return username
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
+
+
+auth_router = APIRouter(prefix="/api/auth")
+
+
+@auth_router.post("/login")
+def login(data: LoginInput, request: Request, response: Response) -> dict[str, str]:
+    settings = request.app.state.settings
+    if not _valid_credentials(settings, data.username, data.password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+    expires_at = int(time.time()) + SESSION_MAX_AGE_SECONDS
+    response.set_cookie(
+        SESSION_COOKIE,
+        _session_token(settings, data.username, expires_at),
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return {"username": data.username}
+
+
+@auth_router.get("/session")
+def current_session(request: Request) -> dict[str, str]:
+    username = _session_username(request.app.state.settings, request.cookies.get(SESSION_COOKIE))
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
+    return {"username": username}
+
+
+@auth_router.post("/logout", status_code=204)
+def logout(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
 
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_login)])
