@@ -55,7 +55,7 @@ def _backup_database(data_dir: Path) -> Path | None:
 
 
 def _git(repository: Path, *args: str) -> str:
-    return _run(repository, "git", *args).stdout
+    return _run(repository, "git", "-c", f"safe.directory={repository}", *args).stdout
 
 
 def _run(repository: Path, *args: str) -> subprocess.CompletedProcess[str]:

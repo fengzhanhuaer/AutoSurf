@@ -17,7 +17,14 @@ if [ ! -d "$program_dir/.git" ]; then
     git clone --branch "$AUTOSURF_BRANCH" --single-branch "$AUTOSURF_REPOSITORY" "$program_dir"
 fi
 
-if [ ! -x "$venv_dir/bin/python" ]; then
+# Windows bind mounts can report the checkout as root-owned to the container user.
+git config --global --replace-all safe.directory "$program_dir"
+
+if [ ! -x "$venv_dir/bin/autosurf" ]; then
+    if [ -d "$venv_dir" ]; then
+        echo "Removing incomplete AutoSurf virtual environment"
+        rm -rf "$venv_dir"
+    fi
     python -m venv "$venv_dir"
     "$venv_dir/bin/python" -m pip install --disable-pip-version-check --no-cache-dir -e "$program_dir"
 fi

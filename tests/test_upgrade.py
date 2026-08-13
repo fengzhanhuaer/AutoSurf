@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from autosurf.config import Settings
-from autosurf.upgrade import _backup_database, upgrade
+from autosurf.upgrade import _backup_database, _git, upgrade
 
 
 def settings(tmp_path: Path) -> Settings:
@@ -44,3 +44,20 @@ def test_upgrade_rejects_dirty_worktree_before_backup(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="uncommitted changes"):
         upgrade(settings(tmp_path), tmp_path)
     assert not (tmp_path / "data" / "backups").exists()
+
+
+def test_git_allows_the_selected_repository_as_a_safe_directory(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(repository, *args):
+        captured["repository"] = repository
+        captured["args"] = args
+        return type("Result", (), {"stdout": "true\n"})()
+
+    monkeypatch.setattr("autosurf.upgrade._run", fake_run)
+
+    assert _git(tmp_path, "status", "--porcelain") == "true\n"
+    assert captured == {
+        "repository": tmp_path,
+        "args": ("git", "-c", f"safe.directory={tmp_path}", "status", "--porcelain"),
+    }

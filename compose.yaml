@@ -1,9 +1,9 @@
 services:
   autosurf:
     image: ghcr.io/fengzhanhuaer/autosurf:latest
-    pull_policy: always
+    # Keep the browser shell stable; update the mounted program with autosurf-upgrade.
+    pull_policy: missing
     container_name: autosurf
-    init: true
     ipc: host
     ports:
       - "0.0.0.0:18980:8080"
@@ -11,7 +11,8 @@ services:
       - ./data:/app/data
       - ./autosurf_program:/app/program
     tmpfs:
-      - /tmp:size=64m,mode=1777
+      # First-run dependency installation and Chromium both need writable temp space.
+      - /tmp:size=512m,mode=1777
     environment:
       HOME: /tmp/home
       TZ: Asia/Taipei
@@ -31,7 +32,8 @@ services:
         - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)
       interval: 30s
       timeout: 3s
-      start_period: 10s
+      # A new program volume installs its Python environment before the API starts.
+      start_period: 20m
       retries: 3
     logging:
       driver: json-file
