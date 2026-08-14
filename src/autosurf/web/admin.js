@@ -22,6 +22,7 @@ const elements = {
   upgradeCancelButton: document.querySelector("#upgrade-cancel-button"),
   upgradeStartButton: document.querySelector("#upgrade-start-button"),
   upgradeRevision: document.querySelector("#upgrade-revision"),
+  upgradeRemoteRevision: document.querySelector("#upgrade-remote-revision"),
   upgradeBrowser: document.querySelector("#upgrade-browser"),
   upgradeState: document.querySelector("#upgrade-state"),
 };
@@ -81,21 +82,31 @@ function setBusy(busy) {
 }
 
 function renderUpgradeStatus(status) {
-  elements.upgradeRevision.textContent = status.revision
-    ? `${status.branch}@${status.revision}`
+  const localRevision = status.local_revision || status.revision;
+  elements.upgradeRevision.textContent = localRevision
+    ? `${status.branch}@${localRevision.slice(0, 12)}`
     : "未知";
+  elements.upgradeRemoteRevision.textContent = status.version_check_error
+    ? "检查失败"
+    : status.remote_revision ? `${status.branch}@${status.remote_revision.slice(0, 12)}` : "未知";
   const browser = status.browser || {};
   elements.upgradeBrowser.textContent = browser.installed
-    ? `Playwright ${browser.playwright_version || "已安装"}`
+    ? `Chromium ${browser.chromium_version || browser.chromium_revision || "已安装"}`
     : "未安装";
   const lastState = status.last_upgrade?.state;
   elements.upgradeState.textContent = status.running
     ? "升级中"
-    : lastState === "complete"
-      ? "上次升级成功"
-      : lastState === "failed" ? "上次升级失败" : "就绪";
-  elements.upgradeStartButton.disabled = !status.available || status.running;
-  elements.upgradeStartButton.textContent = status.running ? "升级中..." : "开始升级";
+    : status.version_check_error
+      ? status.version_check_error
+      : status.update_available
+        ? "发现新版本"
+        : !browser.installed
+          ? "浏览器运行时缺失"
+          : lastState === "failed" ? "上次升级失败，当前已是最新版本" : "已是最新版本";
+  elements.upgradeStartButton.disabled = !status.can_upgrade || status.running;
+  elements.upgradeStartButton.textContent = status.running
+    ? "升级中..."
+    : status.update_available ? "升级到新版本" : !browser.installed ? "安装浏览器运行时" : "已是最新版本";
 }
 
 async function loadUpgradeStatus() {

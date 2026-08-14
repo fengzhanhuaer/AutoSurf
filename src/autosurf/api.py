@@ -160,13 +160,34 @@ def _upgrade_command() -> list[str] | None:
 
 def _program_revision(repository: Path) -> str | None:
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={repository}", "rev-parse", "--short=12", "HEAD"],
+        ["git", "-c", f"safe.directory={repository}", "rev-parse", "HEAD"],
         cwd=repository,
         text=True,
         capture_output=True,
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _remote_revision(repository: Path, branch: str) -> tuple[str | None, str | None]:
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={repository}", "ls-remote", "--exit-code",
+             "origin", f"refs/heads/{branch}"],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "远端版本检查超时"
+    if result.returncode != 0 or not result.stdout.strip():
+        return None, "无法读取远端版本"
+    revision = result.stdout.split()[0]
+    if len(revision) != 40:
+        return None, "远端返回了无效版本"
+    return revision, None
 
 
 def _upgrade_running(request: Request) -> bool:
@@ -187,28 +208,57 @@ def _last_upgrade(request: Request) -> dict[str, str] | None:
 
 
 def _browser_runtime() -> dict[str, Any]:
-    browser_path = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")).resolve()
+    browser_root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""))
     try:
         playwright_version = version("playwright")
     except PackageNotFoundError:
         playwright_version = None
-    installed = bool(browser_path.name and browser_path.is_dir() and any(browser_path.glob("chromium-*")))
+    chromium_revision = None
+    chromium_version = None
+    try:
+        from importlib.resources import files
+
+        manifest = json.loads(files("playwright").joinpath("driver/package/browsers.json").read_text(encoding="utf-8"))
+        chromium = next(item for item in manifest["browsers"] if item["name"] == "chromium")
+        chromium_revision = str(chromium["revision"])
+        chromium_version = str(chromium.get("browserVersion") or "") or None
+    except (ImportError, KeyError, OSError, StopIteration, TypeError, ValueError):
+        pass
+    installed = bool(
+        browser_root.name and chromium_revision
+        and browser_root.joinpath(f"chromium-{chromium_revision}", "chrome-linux64", "chrome").is_file()
+    )
     return {
         "installed": installed,
         "playwright_version": playwright_version,
         "persistent": bool(os.environ.get("PLAYWRIGHT_BROWSERS_PATH")),
+        "chromium_revision": chromium_revision,
+        "chromium_version": chromium_version,
     }
 
 
 def _upgrade_status(request: Request) -> dict[str, Any]:
     repository = _program_repository()
     command = _upgrade_command()
+    branch = os.environ.get("AUTOSURF_BRANCH", "main")
+    local_revision = _program_revision(repository)
+    running = _upgrade_running(request)
+    remote_revision, check_error = (None, None) if running else _remote_revision(repository, branch)
+    browser = _browser_runtime()
+    environment_available = command is not None and repository.joinpath(".git").is_dir()
+    update_available = bool(local_revision and remote_revision and local_revision != remote_revision)
+    browser_missing = not browser["installed"]
     return {
-        "available": command is not None and repository.joinpath(".git").is_dir(),
-        "running": _upgrade_running(request),
-        "revision": _program_revision(repository),
-        "branch": os.environ.get("AUTOSURF_BRANCH", "main"),
-        "browser": _browser_runtime(),
+        "available": environment_available,
+        "can_upgrade": environment_available and check_error is None and (update_available or browser_missing),
+        "running": running,
+        "revision": local_revision,
+        "local_revision": local_revision,
+        "remote_revision": remote_revision,
+        "update_available": update_available,
+        "version_check_error": check_error,
+        "branch": branch,
+        "browser": browser,
         "last_upgrade": _last_upgrade(request),
     }
 
@@ -227,6 +277,11 @@ def start_upgrade(request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=409, detail="当前运行环境不支持网页升级")
         if _upgrade_running(request):
             raise HTTPException(status_code=409, detail="升级正在进行")
+        current = _upgrade_status(request)
+        if current["version_check_error"]:
+            raise HTTPException(status_code=503, detail=current["version_check_error"])
+        if not current["can_upgrade"]:
+            raise HTTPException(status_code=409, detail="当前已是最新版本")
 
         if os.name != "nt":
             command = ["/bin/sh", "-c", 'sleep 1; exec "$@"', "autosurf-upgrade", *command]
@@ -237,7 +292,7 @@ def start_upgrade(request: Request) -> dict[str, Any]:
             close_fds=True,
             start_new_session=os.name != "nt",
         )
-    return {**_upgrade_status(request), "accepted": True}
+    return {**current, "running": True, "accepted": True}
 
 
 @router.get("/handlers")

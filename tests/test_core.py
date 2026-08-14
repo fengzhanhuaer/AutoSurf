@@ -127,7 +127,8 @@ async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tm
 
     monkeypatch.setattr("autosurf.api._program_repository", lambda: repository)
     monkeypatch.setattr("autosurf.api._upgrade_command", lambda: ["fixed-upgrade-helper"])
-    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: "abc123")
+    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: "a" * 40)
+    monkeypatch.setattr("autosurf.api._remote_revision", lambda _repository, _branch: ("b" * 40, None))
     monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {
         "installed": True, "playwright_version": "1.61.0", "persistent": True,
     })
@@ -142,7 +143,10 @@ async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tm
         started = await client.post("/api/v1/system/upgrade", auth=auth)
         duplicate = await client.post("/api/v1/system/upgrade", auth=auth)
 
-    assert status_response.json()["revision"] == "abc123"
+    assert status_response.json()["local_revision"] == "a" * 40
+    assert status_response.json()["remote_revision"] == "b" * 40
+    assert status_response.json()["update_available"] is True
+    assert status_response.json()["can_upgrade"] is True
     assert status_response.json()["browser"]["persistent"] is True
     assert started.status_code == 202
     assert started.json()["running"] is True
@@ -150,6 +154,39 @@ async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tm
     assert len(captured) == 1
     assert "fixed-upgrade-helper" in captured[0][0]
     assert captured[0][1]["stdin"] is not None
+
+
+@pytest.mark.asyncio
+async def test_web_upgrade_rejects_current_version_and_remote_check_failure(settings, tmp_path, monkeypatch):
+    repository = tmp_path / "program"
+    repository.joinpath(".git").mkdir(parents=True)
+    revision = "a" * 40
+    monkeypatch.setattr("autosurf.api._program_repository", lambda: repository)
+    monkeypatch.setattr("autosurf.api._upgrade_command", lambda: ["fixed-upgrade-helper"])
+    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: revision)
+    monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {
+        "installed": True, "playwright_version": "1.61.0", "persistent": True,
+    })
+
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    monkeypatch.setattr("autosurf.api._remote_revision", lambda _repository, _branch: (revision, None))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        current = await client.get("/api/v1/system/upgrade", auth=auth)
+        rejected = await client.post("/api/v1/system/upgrade", auth=auth)
+    assert current.json()["update_available"] is False
+    assert current.json()["can_upgrade"] is False
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "当前已是最新版本"
+
+    monkeypatch.setattr("autosurf.api._remote_revision", lambda _repository, _branch: (None, "远端版本检查超时"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        failed = await client.get("/api/v1/system/upgrade", auth=auth)
+        unavailable = await client.post("/api/v1/system/upgrade", auth=auth)
+    assert failed.json()["can_upgrade"] is False
+    assert failed.json()["version_check_error"] == "远端版本检查超时"
+    assert unavailable.status_code == 503
 
 def test_secret_box_does_not_store_plaintext():
     box = SecretBox("x" * 32)
