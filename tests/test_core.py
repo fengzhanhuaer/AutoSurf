@@ -132,6 +132,9 @@ async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tm
     monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {
         "installed": True, "playwright_version": "1.61.0", "persistent": True,
     })
+    monkeypatch.setattr("autosurf.api._python_dependencies", lambda _repository: {
+        "checked": True, "satisfied": True, "total": 9, "issue_count": 0, "issues": [], "error": None,
+    })
     monkeypatch.setattr("autosurf.api.subprocess.Popen", fake_popen)
 
     app = create_app(settings)
@@ -167,6 +170,10 @@ async def test_web_upgrade_rejects_current_version_and_remote_check_failure(sett
     monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {
         "installed": True, "playwright_version": "1.61.0", "persistent": True,
     })
+    dependency_status = {
+        "checked": True, "satisfied": True, "total": 9, "issue_count": 0, "issues": [], "error": None,
+    }
+    monkeypatch.setattr("autosurf.api._python_dependencies", lambda _repository: dependency_status)
 
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
@@ -187,6 +194,75 @@ async def test_web_upgrade_rejects_current_version_and_remote_check_failure(sett
     assert failed.json()["can_upgrade"] is False
     assert failed.json()["version_check_error"] == "远端版本检查超时"
     assert unavailable.status_code == 503
+
+
+def test_python_dependency_status_checks_declared_constraints(tmp_path, monkeypatch):
+    from autosurf.api import _python_dependencies
+
+    tmp_path.joinpath("pyproject.toml").write_text(
+        """[project]
+dependencies = [
+  "present>=1,<2",
+  "wrong>=2,<3",
+  "missing==1.0",
+  "ignored>=1; python_version < '2'",
+]
+""",
+        encoding="utf-8",
+    )
+
+    def installed_version(name):
+        if name == "present":
+            return "1.5"
+        if name == "wrong":
+            return "3.0"
+        raise __import__("importlib.metadata").metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("autosurf.api.version", installed_version)
+    result = _python_dependencies(tmp_path)
+
+    assert result["checked"] is True
+    assert result["satisfied"] is False
+    assert result["total"] == 3
+    assert result["issue_count"] == 2
+    assert result["issues"] == [
+        {"name": "wrong", "required": "<3,>=2", "installed": "3.0", "status": "incompatible"},
+        {"name": "missing", "required": "==1.0", "installed": None, "status": "missing"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_current_program_can_repair_python_dependencies(settings, tmp_path, monkeypatch):
+    repository = tmp_path / "program"
+    repository.joinpath(".git").mkdir(parents=True)
+    revision = "a" * 40
+    monkeypatch.setattr("autosurf.api._program_repository", lambda: repository)
+    monkeypatch.setattr("autosurf.api._upgrade_command", lambda: ["fixed-upgrade-helper"])
+    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: revision)
+    monkeypatch.setattr("autosurf.api._remote_revision", lambda _repository, _branch: (revision, None))
+    monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {"installed": True})
+    monkeypatch.setattr("autosurf.api._python_dependencies", lambda _repository: {
+        "checked": True,
+        "satisfied": False,
+        "total": 9,
+        "issue_count": 1,
+        "issues": [{
+            "name": "httpx", "required": "<1,>=0.28", "installed": "0.27.0", "status": "incompatible",
+        }],
+        "error": None,
+    })
+
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/system/upgrade", auth=(settings.username, settings.password),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["update_available"] is False
+    assert response.json()["can_upgrade"] is True
+    assert response.json()["python_dependencies"]["issues"][0]["name"] == "httpx"
 
 def test_secret_box_does_not_store_plaintext():
     box = SecretBox("x" * 32)

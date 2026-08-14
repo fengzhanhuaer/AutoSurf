@@ -23,6 +23,7 @@ const elements = {
   upgradeStartButton: document.querySelector("#upgrade-start-button"),
   upgradeRevision: document.querySelector("#upgrade-revision"),
   upgradeRemoteRevision: document.querySelector("#upgrade-remote-revision"),
+  upgradeDependencies: document.querySelector("#upgrade-dependencies"),
   upgradeBrowser: document.querySelector("#upgrade-browser"),
   upgradeState: document.querySelector("#upgrade-state"),
 };
@@ -89,6 +90,17 @@ function renderUpgradeStatus(status) {
   elements.upgradeRemoteRevision.textContent = status.version_check_error
     ? "检查失败"
     : status.remote_revision ? `${status.branch}@${status.remote_revision.slice(0, 12)}` : "未知";
+  const dependencies = status.python_dependencies || {};
+  const dependencyIssues = Array.isArray(dependencies.issues) ? dependencies.issues : [];
+  elements.upgradeDependencies.textContent = !dependencies.checked
+    ? "检查失败"
+    : dependencies.satisfied
+      ? `已满足 (${dependencies.total || 0} 项)`
+      : `需修复 (${dependencies.issue_count || dependencyIssues.length} 项)`;
+  elements.upgradeDependencies.title = dependencies.error
+    || dependencyIssues.map((item) => item.status === "missing"
+      ? `${item.name}: 未安装，要求 ${item.required}`
+      : `${item.name}: 已安装 ${item.installed}，要求 ${item.required}`).join("\n");
   const browser = status.browser || {};
   elements.upgradeBrowser.textContent = browser.installed
     ? `Chromium ${browser.chromium_version || browser.chromium_revision || "已安装"}`
@@ -100,13 +112,21 @@ function renderUpgradeStatus(status) {
       ? status.version_check_error
       : status.update_available
         ? "发现新版本"
+        : dependencies.checked && !dependencies.satisfied
+          ? "Python 依赖需要修复"
         : !browser.installed
-          ? "浏览器运行时缺失"
-          : lastState === "failed" ? "上次升级失败，当前已是最新版本" : "已是最新版本";
+            ? "浏览器运行时缺失"
+            : !dependencies.checked
+              ? dependencies.error || "Python 依赖检查失败"
+              : lastState === "failed" ? "上次升级失败，当前已是最新版本" : "已是最新版本";
   elements.upgradeStartButton.disabled = !status.can_upgrade || status.running;
   elements.upgradeStartButton.textContent = status.running
     ? "升级中..."
-    : status.update_available ? "升级到新版本" : !browser.installed ? "安装浏览器运行时" : "已是最新版本";
+    : status.update_available
+      ? "升级到新版本"
+      : dependencies.checked && !dependencies.satisfied
+        ? "修复 Python 依赖"
+        : !browser.installed ? "安装浏览器运行时" : "已是最新版本";
 }
 
 async function loadUpgradeStatus() {

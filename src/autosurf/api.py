@@ -237,6 +237,66 @@ def _browser_runtime() -> dict[str, Any]:
     }
 
 
+def _python_dependencies(repository: Path) -> dict[str, Any]:
+    try:
+        import tomllib
+
+        try:
+            from packaging.requirements import Requirement
+        except ImportError:
+            # pip vendors packaging, which keeps the checker usable while an old
+            # installation is repairing a missing direct packaging dependency.
+            from pip._vendor.packaging.requirements import Requirement
+
+        project = tomllib.loads(repository.joinpath("pyproject.toml").read_text(encoding="utf-8"))
+        declared = project.get("project", {}).get("dependencies", [])
+        if not isinstance(declared, list):
+            raise ValueError("project.dependencies must be a list")
+
+        issues: list[dict[str, str | None]] = []
+        checked = 0
+        for value in declared:
+            requirement = Requirement(str(value))
+            if requirement.marker and not requirement.marker.evaluate():
+                continue
+            checked += 1
+            required = str(requirement.specifier) or "任意版本"
+            try:
+                installed = version(requirement.name)
+            except PackageNotFoundError:
+                issues.append({
+                    "name": requirement.name,
+                    "required": required,
+                    "installed": None,
+                    "status": "missing",
+                })
+                continue
+            if requirement.specifier and not requirement.specifier.contains(installed, prereleases=True):
+                issues.append({
+                    "name": requirement.name,
+                    "required": required,
+                    "installed": installed,
+                    "status": "incompatible",
+                })
+        return {
+            "checked": True,
+            "satisfied": not issues,
+            "total": checked,
+            "issue_count": len(issues),
+            "issues": issues,
+            "error": None,
+        }
+    except (ImportError, OSError, TypeError, ValueError) as exc:
+        return {
+            "checked": False,
+            "satisfied": False,
+            "total": 0,
+            "issue_count": 0,
+            "issues": [],
+            "error": f"依赖版本检查失败: {exc}",
+        }
+
+
 def _upgrade_status(request: Request) -> dict[str, Any]:
     repository = _program_repository()
     command = _upgrade_command()
@@ -245,12 +305,16 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
     running = _upgrade_running(request)
     remote_revision, check_error = (None, None) if running else _remote_revision(repository, branch)
     browser = _browser_runtime()
+    python_dependencies = _python_dependencies(repository)
     environment_available = command is not None and repository.joinpath(".git").is_dir()
     update_available = bool(local_revision and remote_revision and local_revision != remote_revision)
     browser_missing = not browser["installed"]
+    dependency_repair_needed = python_dependencies["checked"] and not python_dependencies["satisfied"]
     return {
         "available": environment_available,
-        "can_upgrade": environment_available and check_error is None and (update_available or browser_missing),
+        "can_upgrade": environment_available and check_error is None and (
+            update_available or browser_missing or dependency_repair_needed
+        ),
         "running": running,
         "revision": local_revision,
         "local_revision": local_revision,
@@ -259,6 +323,7 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
         "version_check_error": check_error,
         "branch": branch,
         "browser": browser,
+        "python_dependencies": python_dependencies,
         "last_upgrade": _last_upgrade(request),
     }
 
