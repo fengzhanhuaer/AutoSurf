@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from autosurf.config import Settings
-from autosurf.domain.models import ExecutionStatus, utc_now
+from autosurf.domain.models import ExecutionStatus, RunOutcome, RunResult, utc_now
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import ExecutionRecord
 from autosurf.main import create_app
@@ -94,6 +94,7 @@ async def test_management_session_login_and_logout(settings):
         assert session.json() == {"username": settings.username}
         assert app_page.status_code == 200
         assert "CookieCloud" in app_page.text
+        assert "PT 站签到" in app_page.text
         assert "系统升级" in app_page.text
         assert "系统设置" in app_page.text
         assert 'id="settings-tab-cookiecloud"' in app_page.text
@@ -307,3 +308,25 @@ def test_execution_keeps_credential_snapshot(settings):
     with app.state.sessions() as session:
         row = session.get(ExecutionRecord, execution.id)
         assert app.state.credentials.cookies_from_payload(row.credential_payload) == {"sid": "old"}
+
+
+@pytest.mark.asyncio
+async def test_failed_handler_outcome_is_not_recorded_as_success(settings):
+    class FailedHandler:
+        type = "test_failed"
+
+        async def run(self, _context):
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Cookie expired")
+
+    app = create_app(settings)
+    app.state.registry.register(FailedHandler())
+    automation = app.state.automations.create("failure", "test_failed", 3600, {})
+    execution = app.state.queue.enqueue_now(automation.id)
+
+    assert await app.state.execution.run_one() is True
+    with app.state.sessions() as session:
+        record = session.get(ExecutionRecord, execution.id)
+        assert record.status == ExecutionStatus.RETRY_WAIT
+        assert record.error == "Cookie expired"
+        assert record.result_json is not None
+        assert __import__("json").loads(record.result_json)["outcome"] == "auth_expired"

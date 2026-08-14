@@ -17,6 +17,7 @@ from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import AutomationService, CredentialService, ExecutionService, QueueService
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
+from autosurf.automations.pt_signin import PtSignInHandler
 from autosurf.config import Settings, get_settings
 from autosurf.infrastructure.cookiecloud import CookieCloudStore
 from autosurf.infrastructure.crypto import SecretBox
@@ -35,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry = HandlerRegistry()
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
+    registry.register(PtSignInHandler())
     secrets = SecretBox(settings.secret_key)
     credentials = CredentialService(sessions, secrets)
     automations = AutomationService(sessions, registry)
@@ -71,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.credentials = credentials
     app.state.automations = automations
     app.state.queue = queue
+    app.state.execution = execution
     app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
     app.state.upgrade_guard = threading.Lock()
     app.state.upgrade_process = None

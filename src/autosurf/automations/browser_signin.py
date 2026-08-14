@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
 import os
+import re
 from pathlib import Path
-from urllib.parse import urlparse
 
+from autosurf.automations.browser_session import playwright_cookies, validated_http_url
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
 
 
@@ -14,9 +14,7 @@ class BrowserSignInHandler:
     async def run(self, context: RunContext) -> RunResult:
         config = context.config
         url = str(config["url"])
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("url must be an absolute HTTP(S) URL")
+        validated_http_url(url)
 
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
@@ -33,11 +31,7 @@ class BrowserSignInHandler:
                 user_agent=config.get("user_agent"),
                 viewport={"width": 1365, "height": 768},
             )
-            await browser_context.add_cookies([
-                {"name": name, "value": value, "domain": parsed.hostname, "path": "/",
-                 "secure": parsed.scheme == "https"}
-                for name, value in context.cookies.items()
-            ])
+            await browser_context.add_cookies(playwright_cookies(context, url))
             page = await browser_context.new_page()
             page.set_default_timeout(timeout_ms)
             try:

@@ -12,12 +12,14 @@ import shutil
 import subprocess
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
+from autosurf.domain.models import utc_now
 from autosurf.infrastructure.database import (
     AutomationRecord,
     CookieCloudBlob,
@@ -53,6 +55,21 @@ class CookieCloudImportInput(BaseModel):
 
 class CookieCloudSourceSettingsInput(BaseModel):
     auto_import: bool
+
+
+class PtSignInInput(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    credential_id: str = Field(min_length=1, max_length=36)
+    url: str = Field(min_length=8, max_length=2048)
+    interval_hours: int = Field(default=24, ge=1, le=720)
+    timeout_seconds: int = Field(default=60, ge=5, le=180)
+    click_selector: str | None = Field(default=None, max_length=1024)
+    success_patterns: list[str] = Field(default_factory=list, max_length=20)
+    already_patterns: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PtSignInEnabledInput(BaseModel):
+    enabled: bool
 
 
 class LoginInput(BaseModel):
@@ -410,6 +427,142 @@ def list_executions(request: Request, limit: int = 50) -> dict[str, Any]:
     with request.app.state.sessions() as session:
         records = session.scalars(select(ExecutionRecord).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
         return {"items": [execution_view(item) for item in records]}
+
+
+@router.post("/pt-signin/sites", status_code=201)
+def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, Any]:
+    with request.app.state.sessions() as session:
+        credential = session.get(CredentialRecord, data.credential_id)
+        if credential is None or credential.provider != "cookiecloud":
+            raise HTTPException(status_code=422, detail="请选择 CookieCloud 导入的凭据")
+        _validate_pt_url(data.url, credential.domain)
+        credential_domain = credential.domain
+    config = {
+        "url": data.url,
+        "credential_domain": credential_domain,
+        "timeout_seconds": data.timeout_seconds,
+        "click_selector": data.click_selector or None,
+        "success_patterns": data.success_patterns,
+        "already_patterns": data.already_patterns,
+    }
+    try:
+        record = request.app.state.automations.create(
+            data.name, "pt_signin", data.interval_hours * 3600, config, data.credential_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with request.app.state.sessions() as session:
+        return _pt_signin_site_view(session.get(AutomationRecord, record.id), None)
+
+
+@router.get("/pt-signin/sites")
+def list_pt_signin_sites(request: Request) -> dict[str, Any]:
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(AutomationRecord.name)).all()
+        ids = [record.id for record in records]
+        latest: dict[str, ExecutionRecord] = {}
+        if ids:
+            executions = session.scalars(select(ExecutionRecord).where(
+                ExecutionRecord.automation_id.in_(ids)
+            ).order_by(ExecutionRecord.scheduled_at.desc())).all()
+            for execution in executions:
+                latest.setdefault(execution.automation_id, execution)
+        return {"items": [_pt_signin_site_view(record, latest.get(record.id)) for record in records]}
+
+
+@router.patch("/pt-signin/sites/{automation_id}/enabled")
+def set_pt_signin_site_enabled(automation_id: str, data: PtSignInEnabledInput,
+                               request: Request) -> dict[str, Any]:
+    with request.app.state.sessions.begin() as session:
+        record = session.get(AutomationRecord, automation_id)
+        _require_pt_automation(record)
+        record.enabled = data.enabled
+        if data.enabled:
+            record.next_run_at = utc_now()
+        session.flush()
+        return _pt_signin_site_view(record, None)
+
+
+@router.delete("/pt-signin/sites/{automation_id}", status_code=204)
+def delete_pt_signin_site(automation_id: str, request: Request) -> None:
+    with request.app.state.sessions.begin() as session:
+        record = session.get(AutomationRecord, automation_id)
+        _require_pt_automation(record)
+        session.execute(delete(ExecutionRecord).where(ExecutionRecord.automation_id == automation_id))
+        session.delete(record)
+
+
+@router.post("/pt-signin/sites/{automation_id}/run", status_code=202)
+def run_pt_signin_site(automation_id: str, request: Request) -> dict[str, str]:
+    with request.app.state.sessions() as session:
+        _require_pt_automation(session.get(AutomationRecord, automation_id))
+    execution = request.app.state.queue.enqueue_now(automation_id)
+    return {"execution_id": execution.id, "status": execution.status}
+
+
+@router.get("/pt-signin/executions")
+def list_pt_signin_executions(request: Request, limit: int = 50) -> dict[str, Any]:
+    limit = min(max(limit, 1), 200)
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(ExecutionRecord).join(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
+        return {"items": [_pt_execution_view(item) for item in records]}
+
+
+def _validate_pt_url(url: str, credential_domain: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(status_code=422, detail="签到地址必须是有效的 HTTP(S) URL")
+    hostname = parsed.hostname.lower().rstrip(".")
+    domain = credential_domain.lower().lstrip(".").rstrip(".")
+    if hostname != domain and not hostname.endswith(f".{domain}"):
+        raise HTTPException(status_code=422, detail="签到地址必须属于所选 CookieCloud 凭据域名")
+
+
+def _require_pt_automation(record: AutomationRecord | None) -> AutomationRecord:
+    if record is None or record.handler_type != "pt_signin":
+        raise HTTPException(status_code=404, detail="PT 签到任务不存在")
+    return record
+
+
+def _pt_signin_site_view(record: AutomationRecord | None,
+                         latest: ExecutionRecord | None) -> dict[str, Any]:
+    record = _require_pt_automation(record)
+    config = json.loads(record.config_json)
+    credential = record.credential
+    return {
+        "id": record.id,
+        "name": record.name,
+        "enabled": record.enabled,
+        "interval_hours": record.interval_seconds // 3600,
+        "next_run_at": record.next_run_at,
+        "url": config.get("url"),
+        "credential": {
+            "id": credential.id,
+            "name": credential.name,
+            "domain": credential.domain,
+            "version": credential.version,
+        } if credential else None,
+        "config": {
+            "timeout_seconds": config.get("timeout_seconds", 60),
+            "click_selector": config.get("click_selector"),
+            "success_patterns": config.get("success_patterns", []),
+            "already_patterns": config.get("already_patterns", []),
+        },
+        "last_execution": execution_view(latest) if latest else None,
+    }
+
+
+def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
+    result = execution_view(record)
+    result.update({
+        "automation_name": record.automation.name,
+        "domain": record.automation.credential.domain if record.automation.credential else None,
+    })
+    return result
 
 
 @router.put("/cookiecloud/sources/{uuid}")

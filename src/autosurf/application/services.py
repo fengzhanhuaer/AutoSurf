@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from autosurf.application.registry import HandlerRegistry
-from autosurf.domain.models import ExecutionStatus, RunContext, utc_now
+from autosurf.domain.models import ExecutionStatus, RunContext, RunOutcome, utc_now
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
 
@@ -19,6 +20,18 @@ class CredentialService:
         self.secrets = secrets
 
     def upsert(self, name: str, domain: str, cookies: dict[str, str], provider: str = "manual") -> CredentialRecord:
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in cookies.items()):
+            raise ValueError("cookies must be a string mapping")
+        return self._upsert_payload(name, domain, cookies, provider)
+
+    def upsert_cookie_records(self, name: str, domain: str, cookies: list[dict[str, Any]],
+                              provider: str = "cookiecloud") -> CredentialRecord:
+        if not cookies:
+            raise ValueError("cookie records cannot be empty")
+        payload = {"format": "cookie_records_v1", "cookies": cookies}
+        return self._upsert_payload(name, domain, payload, provider)
+
+    def _upsert_payload(self, name: str, domain: str, payload: Any, provider: str) -> CredentialRecord:
         now = utc_now()
         with self.sessions.begin() as session:
             record = session.scalar(select(CredentialRecord).where(CredentialRecord.name == name))
@@ -29,7 +42,7 @@ class CredentialService:
             record.domain = domain.lower().lstrip(".")
             record.provider = provider
             record.version += 1
-            record.encrypted_payload = self.secrets.encrypt_json(cookies)
+            record.encrypted_payload = self.secrets.encrypt_json(payload)
             record.updated_at = now
             session.flush()
             return record
@@ -40,12 +53,33 @@ class CredentialService:
         return self.cookies_from_payload(record.encrypted_payload)
 
     def cookies_from_payload(self, payload: str | None) -> dict[str, str]:
+        cookies, _ = self.credential_values_from_payload(payload)
+        return cookies
+
+    def browser_cookies_from_payload(self, payload: str | None) -> list[dict[str, Any]] | None:
+        _, cookies = self.credential_values_from_payload(payload)
+        return cookies
+
+    def credential_values_from_payload(self, payload: str | None) -> tuple[dict[str, str], list[dict[str, Any]] | None]:
         if payload is None:
-            return {}
+            return {}, None
         value = self.secrets.decrypt_json(payload)
+        if isinstance(value, dict) and value.get("format") == "cookie_records_v1":
+            records = value.get("cookies")
+            if not isinstance(records, list):
+                raise ValueError("credential cookie records are invalid")
+            browser_cookies = [dict(item) for item in records if isinstance(item, dict)]
+            cookies = {
+                str(item["name"]): str(item["value"])
+                for item in browser_cookies
+                if item.get("name") is not None and item.get("value") is not None
+            }
+            if not cookies:
+                raise ValueError("credential cookie records are empty")
+            return cookies, browser_cookies
         if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
             raise ValueError("credential payload is not a cookie mapping")
-        return value
+        return value, None
 
 
 class AutomationService:
@@ -135,13 +169,15 @@ class QueueService:
                 record.finished_at = utc_now()
                 record.lease_until = None
 
-    def fail(self, execution_id: str, error: str, max_attempts: int = 3) -> None:
+    def fail(self, execution_id: str, error: str, max_attempts: int = 3,
+             result: dict[str, Any] | None = None) -> None:
         now = utc_now()
         with self.sessions.begin() as session:
             record = session.get(ExecutionRecord, execution_id)
             if record is None:
                 return
             record.error = error[:4000]
+            record.result_json = json.dumps(result, ensure_ascii=False) if result else None
             record.lease_until = None
             if record.attempts < max_attempts:
                 record.status = ExecutionStatus.RETRY_WAIT
@@ -169,12 +205,18 @@ class ExecutionService:
                 if execution is None:
                     raise RuntimeError("claimed execution disappeared")
                 automation = execution.automation
-                cookies = self.credentials.cookies_from_payload(execution.credential_payload)
-                context = RunContext(execution_id=execution.id, config=json.loads(automation.config_json), cookies=cookies)
+                cookies, browser_cookies = self.credentials.credential_values_from_payload(
+                    execution.credential_payload
+                )
+                context = RunContext(execution_id=execution.id, config=json.loads(automation.config_json),
+                                     cookies=cookies, browser_cookies=browser_cookies)
                 handler = self.registry.get(automation.handler_type)
             result = await handler.run(context)
-            self.queue.succeed(claimed.id, {"outcome": result.outcome, "message": result.message,
-                                            "details": result.details})
+            result_payload = {"outcome": result.outcome, "message": result.message, "details": result.details}
+            if result.outcome in {RunOutcome.SUCCESS, RunOutcome.ALREADY_DONE}:
+                self.queue.succeed(claimed.id, result_payload)
+            else:
+                self.queue.fail(claimed.id, result.message, result=result_payload)
         except Exception as exc:
             self.queue.fail(claimed.id, f"{type(exc).__name__}: {exc}")
         return True

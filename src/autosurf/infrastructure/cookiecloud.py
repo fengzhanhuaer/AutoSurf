@@ -80,14 +80,18 @@ class CookieCloudStore:
             if not isinstance(entries, list):
                 continue
             domain = _canonical_domain(str(bucket), entries)
-            cookies = {
-                str(cookie["name"]): str(cookie["value"])
+            cookies = [
+                normalized
                 for cookie in entries
-                if isinstance(cookie, dict) and cookie.get("name") is not None and cookie.get("value") is not None
-            }
+                if isinstance(cookie, dict)
+                for normalized in [_cookie_record(cookie, domain)]
+                if normalized is not None
+            ]
             if not domain or not cookies:
                 continue
-            record = self.credentials.upsert(f"cookiecloud:{uuid}:{domain}", domain, cookies, "cookiecloud")
+            record = self.credentials.upsert_cookie_records(
+                f"cookiecloud:{uuid}:{domain}", domain, cookies, "cookiecloud"
+            )
             imported.append({"id": record.id, "domain": domain, "version": record.version,
                              "cookie_count": len(cookies)})
 
@@ -127,3 +131,24 @@ def _canonical_domain(bucket: str, entries: list[Any]) -> str:
             domain = str(cookie["domain"])
             break
     return domain.lower().strip().lstrip(".")
+
+
+def _cookie_record(cookie: dict[str, Any], fallback_domain: str) -> dict[str, Any] | None:
+    if cookie.get("name") is None or cookie.get("value") is None:
+        return None
+    record: dict[str, Any] = {
+        "name": str(cookie["name"]),
+        "value": str(cookie["value"]),
+        "domain": str(cookie.get("domain") or fallback_domain).lower().strip(),
+        "path": str(cookie.get("path") or "/"),
+        "secure": bool(cookie.get("secure", False)),
+        "httpOnly": bool(cookie.get("httpOnly", False)),
+    }
+    same_site = str(cookie.get("sameSite") or "").lower()
+    same_site_values = {"strict": "Strict", "lax": "Lax", "none": "None", "no_restriction": "None"}
+    if same_site in same_site_values:
+        record["sameSite"] = same_site_values[same_site]
+    expires = cookie.get("expirationDate", cookie.get("expires"))
+    if isinstance(expires, (int, float)) and not isinstance(expires, bool) and expires > 0:
+        record["expires"] = float(expires)
+    return record

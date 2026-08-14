@@ -89,6 +89,12 @@ async def test_upload_auto_imports_configured_source(tmp_path):
         assert credential.name == "cookiecloud:test-id:example.com"
         assert "secret-session" not in credential.encrypted_payload
         assert app.state.credentials.cookies_for(credential) == {"sid": "secret-session", "theme": "dark"}
+        assert app.state.credentials.browser_cookies_from_payload(credential.encrypted_payload) == [
+            {"name": "sid", "value": "secret-session", "domain": ".example.com", "path": "/",
+             "secure": False, "httpOnly": False},
+            {"name": "theme", "value": "dark", "domain": ".example.com", "path": "/",
+             "secure": False, "httpOnly": False},
+        ]
 
 
 @pytest.mark.asyncio

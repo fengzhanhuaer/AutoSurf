@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/fengzhanhuaer/AutoSurf/actions/workflows/ci.yml/badge.svg)](https://github.com/fengzhanhuaer/AutoSurf/actions/workflows/ci.yml)
 
-AutoSurf is a small, Docker-first web automation service. The first release focuses on CookieCloud-compatible storage and durable HTTP sign-in jobs, while keeping the execution model open for future browser and script workers.
+AutoSurf is a small, Docker-first web automation service. The first release focuses on CookieCloud-compatible storage and durable PT sign-in jobs, while keeping the execution model open for future automation workers.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ AutoSurf is a small, Docker-first web automation service. The first release focu
 - Durable queue: schedules create persisted executions in SQLite instead of running work in scheduler memory.
 - Lease-based worker: interrupted executions can be reclaimed after their lease expires.
 - Credential hub: cookies are encrypted at rest and versioned independently from CookieCloud transport blobs.
-- Replaceable handlers: `http_signin` is the first registered automation type.
+- Replaceable handlers: PT, browser, and HTTP runners share one durable execution contract.
 
 SQLite runs in WAL mode. A single application replica is supported in v0.1; PostgreSQL should be introduced before running multiple replicas.
 
@@ -75,7 +75,7 @@ docker exec autosurf autosurf-upgrade
 
 The helper gracefully stops only the AutoSurf application process, backs up SQLite, fast-forward pulls `./autosurf_program`, updates its isolated Python environment, installs the matching browser into `./browser`, applies migrations, and asks the shell to start the new version. The container and all mounted directories remain in place.
 
-In the management page, open **系统升级** from the sidebar, review the program and browser versions, then choose **开始升级**. The page follows the application restart and reports the persisted result. Only one upgrade can run at a time.
+In the management page, open **系统设置 > 系统升级**, review the program and browser versions, then choose **开始升级**. The page follows the application restart and reports the persisted result. Only one upgrade can run at a time.
 
 Only pull and recreate the container when the runtime shell itself changes, such as a Python or operating-system dependency update. `docker compose pull && docker compose up -d` is the separate shell-upgrade path.
 
@@ -128,7 +128,22 @@ Invoke-RestMethod -Method Post `
   -Headers $headers -ContentType application/json -Body '{}'
 ```
 
-Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported. Imported credential names use `cookiecloud:<uuid>:<domain>`.
+Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported. Imported credential names use `cookiecloud:<uuid>:<domain>`. Browser cookie attributes including domain, path, expiry, Secure, HttpOnly, and SameSite are retained in the encrypted credential payload.
+
+### PT sign-in
+
+Open **PT 站签到** in the management interface and choose a CookieCloud credential. AutoSurf suggests `https://<credential-domain>/attendance.php`; adjust it when the tracker uses a different sign-in page. The URL must remain on the selected credential domain or one of its subdomains.
+
+Each run starts an isolated headless Playwright Chromium browser, injects only cookies applicable to the target host, executes the page JavaScript, and checks for already-signed, successful, expired-login, and challenge states. A common sign-in control is clicked automatically. Site-specific CSS selectors and result text can be configured under the advanced settings. Unknown, blocked, and timed-out results are not recorded as successful, and failed runs retain a screenshot under `data/browser-artifacts`.
+
+The PT management API is available at:
+
+- `POST /api/v1/pt-signin/sites`
+- `GET /api/v1/pt-signin/sites`
+- `PATCH /api/v1/pt-signin/sites/{id}/enabled`
+- `POST /api/v1/pt-signin/sites/{id}/run`
+- `DELETE /api/v1/pt-signin/sites/{id}`
+- `GET /api/v1/pt-signin/executions`
 
 ### Browser sign-in
 
@@ -213,5 +228,7 @@ The command requires a clean Git working tree, creates a timestamped SQLite back
 
 - HTTP handlers support GET/POST and response-pattern matching.
 - CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
-- The authenticated management interface configures CookieCloud sources, triggers imports, and shows imported credential metadata without exposing cookie values.
+- CookieCloud imports retain complete browser cookie attributes in the encrypted credential store.
+- PT sign-in uses a real Playwright Chromium session and keeps site-specific behavior extensible through adapters.
+- The authenticated management interface configures CookieCloud sources and PT sign-in tasks without exposing cookie values.
 - Database upgrades run automatically through Alembic at application startup.

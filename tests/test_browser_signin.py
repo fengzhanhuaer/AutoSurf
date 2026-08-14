@@ -1,6 +1,7 @@
 import pytest
 
 from autosurf.automations.browser_signin import BrowserSignInHandler
+from autosurf.automations.browser_session import playwright_cookies
 from autosurf.domain.models import RunContext
 
 
@@ -18,3 +19,27 @@ def test_browser_handler_is_registered(tmp_path):
     app = create_app(Settings(data_dir=tmp_path, secret_key="s" * 32,
                               username="admin", password="password123"))
     assert "browser_signin" in app.state.registry.types()
+
+
+def test_browser_cookie_records_keep_scope_and_filter_other_domains():
+    context = RunContext(
+        execution_id="test",
+        config={},
+        cookies={"sid": "fallback"},
+        browser_cookies=[
+            {"name": "sid", "value": "scoped", "domain": ".example.com", "path": "/tracker",
+             "secure": True, "httpOnly": True, "sameSite": "Lax", "expires": 2_000_000_000},
+            {"name": "other", "value": "secret", "domain": ".other.test", "path": "/"},
+        ],
+    )
+
+    assert playwright_cookies(context, "https://pt.example.com/attendance.php") == [{
+        "name": "sid",
+        "value": "scoped",
+        "domain": ".example.com",
+        "path": "/tracker",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Lax",
+        "expires": 2_000_000_000.0,
+    }]

@@ -15,7 +15,11 @@
         <span>AutoSurf</span>
       </a>
       <nav class="nav" aria-label="管理导航">
-        <a class="nav-item active" href="/app#cookiecloud" aria-current="page">
+        <a class="nav-item active" href="/app#pt-signin" data-view="pt-signin" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">P</span>
+          <span>PT 站签到</span>
+        </a>
+        <a class="nav-item" href="/app#cookiecloud" data-view="cookiecloud">
           <span class="nav-icon" aria-hidden="true">S</span>
           <span>系统设置</span>
         </a>
@@ -33,15 +37,15 @@
     <main class="workspace">
       <header class="page-header">
         <div>
-          <h1>系统设置</h1>
-          <p>管理 Cookie 同步、内部凭据与程序升级</p>
+          <h1 id="page-title">PT 站签到</h1>
+          <p id="page-description">PT 站点与执行记录</p>
         </div>
         <button class="icon-button" id="refresh-button" type="button" title="刷新" aria-label="刷新">
           <span aria-hidden="true">↻</span>
         </button>
       </header>
 
-      <div class="settings-tabs" role="tablist" aria-label="系统设置">
+      <div class="settings-tabs" id="settings-tabs" role="tablist" aria-label="系统设置" hidden>
         <button class="settings-tab active" id="settings-tab-cookiecloud" type="button" role="tab"
                 aria-selected="true" aria-controls="cookiecloud-settings-panel" data-settings-tab="cookiecloud">
           CookieCloud
@@ -52,8 +56,118 @@
         </button>
       </div>
 
+      <section class="settings-panel" id="pt-signin-panel">
+        <section class="summary-strip" aria-label="签到概况">
+          <div class="summary-item">
+            <span class="summary-label">签到任务</span>
+            <strong id="pt-task-count">0</strong>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">已启用</span>
+            <strong id="pt-enabled-count">0</strong>
+          </div>
+          <div class="summary-item status-summary">
+            <span class="summary-label">最近执行</span>
+            <strong id="pt-recent-state">暂无记录</strong>
+          </div>
+        </section>
+
+        <div class="content-grid pt-content-grid">
+          <section class="panel config-panel" aria-labelledby="pt-config-title">
+            <div class="panel-heading">
+              <div>
+                <h2 id="pt-config-title">新增签到任务</h2>
+                <p>执行引擎：Playwright Chromium</p>
+              </div>
+            </div>
+            <form id="pt-site-form">
+              <label class="field">
+                <span>任务名称</span>
+                <input id="pt-name" name="name" maxlength="128" autocomplete="off" required>
+              </label>
+              <label class="field">
+                <span>CookieCloud 凭据</span>
+                <select id="pt-credential" name="credential_id" required>
+                  <option value="">请选择凭据</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>签到地址</span>
+                <input id="pt-url" name="url" type="url" maxlength="2048" autocomplete="url" required>
+              </label>
+              <div class="form-grid">
+                <label class="field">
+                  <span>执行周期（小时）</span>
+                  <input id="pt-interval" name="interval_hours" type="number" min="1" max="720" value="24" required>
+                </label>
+                <label class="field">
+                  <span>超时（秒）</span>
+                  <input id="pt-timeout" name="timeout_seconds" type="number" min="5" max="180" value="60" required>
+                </label>
+              </div>
+              <details class="advanced-settings">
+                <summary>高级识别设置</summary>
+                <label class="field">
+                  <span>签到按钮 CSS 选择器</span>
+                  <input id="pt-click-selector" name="click_selector" maxlength="1024" autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>成功识别文本（每行一项）</span>
+                  <textarea id="pt-success-patterns" name="success_patterns" rows="3"></textarea>
+                </label>
+                <label class="field">
+                  <span>已签到识别文本（每行一项）</span>
+                  <textarea id="pt-already-patterns" name="already_patterns" rows="3"></textarea>
+                </label>
+              </details>
+              <div class="form-actions">
+                <button class="button primary" id="pt-save-button" type="submit">创建任务</button>
+              </div>
+            </form>
+          </section>
+
+          <aside class="side-column">
+            <section class="panel status-panel" aria-labelledby="pt-runtime-title">
+              <div class="panel-heading compact">
+                <h2 id="pt-runtime-title">执行状态</h2>
+              </div>
+              <dl class="status-list">
+                <div><dt>浏览器</dt><dd>Chromium</dd></div>
+                <div><dt>运行方式</dt><dd>无界面真实浏览器</dd></div>
+                <div><dt>Cookie 来源</dt><dd>CookieCloud</dd></div>
+                <div><dt>失败证据</dt><dd>页面截图</dd></div>
+              </dl>
+            </section>
+          </aside>
+        </div>
+
+        <section class="table-section" aria-labelledby="pt-sites-title">
+          <div class="section-heading">
+            <div><h2 id="pt-sites-title">签到任务</h2></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>任务</th><th>凭据域名</th><th>周期</th><th>下次执行</th><th>最近状态</th><th>操作</th></tr></thead>
+              <tbody id="pt-site-rows"><tr><td class="empty" colspan="6">暂无签到任务</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" aria-labelledby="pt-history-title">
+          <div class="section-heading">
+            <div><h2 id="pt-history-title">执行记录</h2></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>任务</th><th>域名</th><th>计划时间</th><th>状态</th><th>结果</th></tr></thead>
+              <tbody id="pt-history-rows"><tr><td class="empty" colspan="5">暂无执行记录</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
       <section class="settings-panel" id="cookiecloud-settings-panel" role="tabpanel"
-               aria-labelledby="settings-tab-cookiecloud">
+               aria-labelledby="settings-tab-cookiecloud" hidden>
         <section class="summary-strip" aria-label="同步概况">
         <div class="summary-item">
           <span class="summary-label">配置源</span>
