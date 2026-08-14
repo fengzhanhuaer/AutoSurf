@@ -1,4 +1,4 @@
-const state = { sources: [], credentials: [], selected: "" };
+const state = { sources: [], credentials: [], selected: "", activeTab: "cookiecloud" };
 
 const elements = {
   body: document.body,
@@ -16,10 +16,9 @@ const elements = {
   toast: document.querySelector("#toast"),
   rows: document.querySelector("#credential-rows"),
   logoutButton: document.querySelector("#logout-button"),
-  upgradeOpenButton: document.querySelector("#upgrade-open-button"),
-  upgradeDialog: document.querySelector("#upgrade-dialog"),
-  upgradeCloseButton: document.querySelector("#upgrade-close-button"),
-  upgradeCancelButton: document.querySelector("#upgrade-cancel-button"),
+  settingsTabs: document.querySelectorAll("[data-settings-tab]"),
+  cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
+  upgradePanel: document.querySelector("#upgrade-settings-panel"),
   upgradeStartButton: document.querySelector("#upgrade-start-button"),
   upgradeRevision: document.querySelector("#upgrade-revision"),
   upgradeRemoteRevision: document.querySelector("#upgrade-remote-revision"),
@@ -74,6 +73,26 @@ function showToast(message, error = false) {
 function goToLogin() {
   const next = `${location.pathname}${location.search}`;
   location.replace(`/login?next=${encodeURIComponent(next)}`);
+}
+
+async function setActiveSettingsTab(value, { syncHash = true } = {}) {
+  const activeTab = value === "upgrade" ? "upgrade" : "cookiecloud";
+  state.activeTab = activeTab;
+  for (const button of elements.settingsTabs) {
+    const active = button.dataset.settingsTab === activeTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
+  elements.cookieCloudPanel.hidden = activeTab !== "cookiecloud";
+  elements.upgradePanel.hidden = activeTab !== "upgrade";
+  const refreshLabel = activeTab === "upgrade" ? "刷新升级状态" : "刷新 CookieCloud 状态";
+  elements.refreshButton.title = refreshLabel;
+  elements.refreshButton.setAttribute("aria-label", refreshLabel);
+  if (syncHash && location.hash !== `#${activeTab}`) {
+    history.replaceState(null, "", `${location.pathname}${location.search}#${activeTab}`);
+  }
+  if (activeTab === "upgrade") await loadUpgradeStatus();
 }
 
 function setBusy(busy) {
@@ -316,7 +335,10 @@ elements.importButton.addEventListener("click", async () => {
   }
 });
 
-elements.refreshButton.addEventListener("click", () => refresh());
+elements.refreshButton.addEventListener("click", () => {
+  if (state.activeTab === "upgrade") loadUpgradeStatus();
+  else refresh();
+});
 elements.copyButton.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(elements.endpoint.textContent);
@@ -330,15 +352,6 @@ elements.logoutButton.addEventListener("click", async () => {
   try { await fetch("/api/auth/logout", { method: "POST" }); } finally { location.replace("/login"); }
 });
 
-elements.upgradeOpenButton.addEventListener("click", async () => {
-  elements.upgradeDialog.showModal();
-  await loadUpgradeStatus();
-});
-elements.upgradeCloseButton.addEventListener("click", () => elements.upgradeDialog.close());
-elements.upgradeCancelButton.addEventListener("click", () => elements.upgradeDialog.close());
-elements.upgradeDialog.addEventListener("click", (event) => {
-  if (event.target === elements.upgradeDialog) elements.upgradeDialog.close();
-});
 elements.upgradeStartButton.addEventListener("click", async () => {
   elements.upgradeStartButton.disabled = true;
   elements.upgradeStartButton.textContent = "正在启动...";
@@ -352,4 +365,22 @@ elements.upgradeStartButton.addEventListener("click", async () => {
   }
 });
 
+const settingsTabs = [...elements.settingsTabs];
+settingsTabs.forEach((button, index) => {
+  button.addEventListener("click", () => setActiveSettingsTab(button.dataset.settingsTab));
+  button.addEventListener("keydown", (event) => {
+    let nextIndex = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % settingsTabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + settingsTabs.length) % settingsTabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = settingsTabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    settingsTabs[nextIndex].focus();
+    setActiveSettingsTab(settingsTabs[nextIndex].dataset.settingsTab);
+  });
+});
+window.addEventListener("hashchange", () => setActiveSettingsTab(location.hash.slice(1), { syncHash: false }));
+
 refresh({ quiet: true });
+setActiveSettingsTab(location.hash.slice(1));

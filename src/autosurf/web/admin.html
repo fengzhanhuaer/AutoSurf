@@ -15,18 +15,14 @@
         <span>AutoSurf</span>
       </a>
       <nav class="nav" aria-label="管理导航">
-        <a class="nav-item active" href="/app" aria-current="page">
-          <span class="nav-icon" aria-hidden="true">C</span>
-          <span>CookieCloud</span>
+        <a class="nav-item active" href="/app#cookiecloud" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">S</span>
+          <span>系统设置</span>
         </a>
         <a class="nav-item" href="/docs">
           <span class="nav-icon" aria-hidden="true">A</span>
           <span>API 文档</span>
         </a>
-        <button class="nav-item nav-button" id="upgrade-open-button" type="button">
-          <span class="nav-icon" aria-hidden="true">↑</span>
-          <span>系统升级</span>
-        </button>
       </nav>
       <div class="sidebar-footer">
         <span class="service-state"><span class="status-dot" aria-hidden="true"></span>服务运行中</span>
@@ -37,15 +33,28 @@
     <main class="workspace">
       <header class="page-header">
         <div>
-          <h1>CookieCloud</h1>
-          <p>管理浏览器 Cookie 同步与内部凭据导入</p>
+          <h1>系统设置</h1>
+          <p>管理 Cookie 同步、内部凭据与程序升级</p>
         </div>
         <button class="icon-button" id="refresh-button" type="button" title="刷新" aria-label="刷新">
           <span aria-hidden="true">↻</span>
         </button>
       </header>
 
-      <section class="summary-strip" aria-label="同步概况">
+      <div class="settings-tabs" role="tablist" aria-label="系统设置">
+        <button class="settings-tab active" id="settings-tab-cookiecloud" type="button" role="tab"
+                aria-selected="true" aria-controls="cookiecloud-settings-panel" data-settings-tab="cookiecloud">
+          CookieCloud
+        </button>
+        <button class="settings-tab" id="settings-tab-upgrade" type="button" role="tab"
+                aria-selected="false" aria-controls="upgrade-settings-panel" data-settings-tab="upgrade" tabindex="-1">
+          系统升级
+        </button>
+      </div>
+
+      <section class="settings-panel" id="cookiecloud-settings-panel" role="tabpanel"
+               aria-labelledby="settings-tab-cookiecloud">
+        <section class="summary-strip" aria-label="同步概况">
         <div class="summary-item">
           <span class="summary-label">配置源</span>
           <strong id="source-count">0</strong>
@@ -58,9 +67,9 @@
           <span class="summary-label">同步状态</span>
           <strong id="sync-state">等待配置</strong>
         </div>
-      </section>
+        </section>
 
-      <div class="content-grid">
+        <div class="content-grid">
         <section class="panel config-panel" aria-labelledby="config-title">
           <div class="panel-heading">
             <div>
@@ -121,9 +130,9 @@
             <div class="error-box" id="error-box" hidden></div>
           </section>
         </aside>
-      </div>
+        </div>
 
-      <section class="table-section" aria-labelledby="credentials-title">
+        <section class="table-section" aria-labelledby="credentials-title">
         <div class="section-heading">
           <div>
             <h2 id="credentials-title">已导入凭据</h2>
@@ -140,48 +149,50 @@
             </tbody>
           </table>
         </div>
+        </section>
+      </section>
+
+      <section class="settings-panel" id="upgrade-settings-panel" role="tabpanel"
+               aria-labelledby="settings-tab-upgrade" hidden>
+        <section class="panel upgrade-panel" aria-labelledby="upgrade-title">
+          <div class="upgrade-heading">
+            <div>
+              <h2 id="upgrade-title">系统升级</h2>
+              <p>升级程序、Python 依赖与浏览器运行时</p>
+            </div>
+          </div>
+          <div class="upgrade-components">
+            <div>
+              <span>程序版本</span>
+              <strong id="upgrade-revision">读取中</strong>
+            </div>
+            <div>
+              <span>远端版本</span>
+              <strong id="upgrade-remote-revision">检查中</strong>
+            </div>
+            <div>
+              <span>Python 依赖</span>
+              <strong id="upgrade-dependencies">检查中</strong>
+            </div>
+            <div>
+              <span>浏览器运行时</span>
+              <strong id="upgrade-browser">读取中</strong>
+            </div>
+            <div>
+              <span>升级状态</span>
+              <strong id="upgrade-state" aria-live="polite">检查中</strong>
+            </div>
+          </div>
+          <p class="upgrade-boundary">Docker 基础系统库保持不变。</p>
+          <div class="upgrade-actions">
+            <button class="button primary" id="upgrade-start-button" type="button" disabled>开始升级</button>
+          </div>
+        </section>
       </section>
     </main>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-
-  <dialog class="upgrade-dialog" id="upgrade-dialog" aria-labelledby="upgrade-title">
-    <div class="dialog-heading">
-      <div>
-        <h2 id="upgrade-title">系统升级</h2>
-        <p>升级程序、Python 依赖与浏览器运行时</p>
-      </div>
-      <button class="dialog-close" id="upgrade-close-button" type="button" title="关闭" aria-label="关闭">×</button>
-    </div>
-    <div class="upgrade-components">
-      <div>
-        <span>程序版本</span>
-        <strong id="upgrade-revision">读取中</strong>
-      </div>
-      <div>
-        <span>远端版本</span>
-        <strong id="upgrade-remote-revision">检查中</strong>
-      </div>
-      <div>
-        <span>Python 依赖</span>
-        <strong id="upgrade-dependencies">检查中</strong>
-      </div>
-      <div>
-        <span>浏览器运行时</span>
-        <strong id="upgrade-browser">读取中</strong>
-      </div>
-      <div>
-        <span>升级状态</span>
-        <strong id="upgrade-state">检查中</strong>
-      </div>
-    </div>
-    <p class="upgrade-boundary">Docker 基础系统库保持不变。</p>
-    <div class="dialog-actions">
-      <button class="button secondary" id="upgrade-cancel-button" type="button">取消</button>
-      <button class="button primary" id="upgrade-start-button" type="button" disabled>开始升级</button>
-    </div>
-  </dialog>
 
 </body>
 </html>

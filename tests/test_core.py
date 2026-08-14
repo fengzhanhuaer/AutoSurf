@@ -95,6 +95,10 @@ async def test_management_session_login_and_logout(settings):
         assert app_page.status_code == 200
         assert "CookieCloud" in app_page.text
         assert "系统升级" in app_page.text
+        assert "系统设置" in app_page.text
+        assert 'id="settings-tab-cookiecloud"' in app_page.text
+        assert 'id="settings-tab-upgrade"' in app_page.text
+        assert 'id="upgrade-dialog"' not in app_page.text
         assert "login-form" not in app_page.text
         assert login_page.status_code == 307
         assert login_page.headers["location"] == "/app"
