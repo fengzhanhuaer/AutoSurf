@@ -14,7 +14,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from autosurf import __version__
 from autosurf.api import auth_router, cookiecloud_router, require_login, router
 from autosurf.application.registry import HandlerRegistry
-from autosurf.application.services import AutomationService, CredentialService, ExecutionService, QueueService
+from autosurf.application.services import (
+    AutomationService,
+    CredentialService,
+    ExecutionService,
+    QueueService,
+    reconcile_pt_site_aliases,
+)
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.pt_signin import PtSignInHandler
@@ -40,8 +46,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     secrets = SecretBox(settings.secret_key)
     credentials = CredentialService(sessions, secrets)
     automations = AutomationService(sessions, registry)
-    queue = QueueService(sessions, settings.execution_lease_seconds)
+    queue = QueueService(sessions, settings.execution_lease_seconds, credentials)
     execution = ExecutionService(sessions, queue, credentials, registry)
+    reconcile_pt_site_aliases(sessions, credentials)
 
     async def scheduler_loop() -> None:
         while True:

@@ -4,9 +4,11 @@ const state = {
   ptCandidates: [],
   ptSites: [],
   ptHistory: { today: null, days: [], items: [], latest_execution: null },
+  ptStats: [],
   ptSelection: new Set(),
   selected: "",
   activeView: "pt-signin",
+  activePtTab: "signin",
 };
 
 const elements = {
@@ -17,13 +19,18 @@ const elements = {
   settingsTabList: document.querySelector("#settings-tabs"),
   ptTabList: document.querySelector("#pt-tabs"),
   settingsTabs: document.querySelectorAll("[data-settings-tab]"),
+  ptTabs: document.querySelectorAll("[data-pt-tab]"),
   ptPanel: document.querySelector("#pt-signin-panel"),
+  ptStatsPanel: document.querySelector("#pt-stats-panel"),
+  ptStatsRows: document.querySelector("#pt-stats-rows"),
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
   upgradePanel: document.querySelector("#upgrade-settings-panel"),
   form: document.querySelector("#source-form"),
   selector: document.querySelector("#source-selector"),
   uuid: document.querySelector("#uuid"),
   password: document.querySelector("#password"),
+  copyUuidButton: document.querySelector("#copy-uuid-button"),
+  copyPasswordButton: document.querySelector("#copy-password-button"),
   passwordHint: document.querySelector("#password-hint"),
   autoImport: document.querySelector("#auto-import"),
   importButton: document.querySelector("#import-button"),
@@ -134,7 +141,8 @@ async function setActiveView(value, { syncHash = true } = {}) {
   const activeView = ["cookiecloud", "upgrade"].includes(value) ? value : "pt-signin";
   state.activeView = activeView;
   const systemView = activeView !== "pt-signin";
-  elements.ptPanel.hidden = systemView;
+  elements.ptPanel.hidden = systemView || state.activePtTab !== "signin";
+  elements.ptStatsPanel.hidden = systemView || state.activePtTab !== "stats";
   elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
   elements.upgradePanel.hidden = activeView !== "upgrade";
   elements.settingsTabList.hidden = !systemView;
@@ -171,6 +179,19 @@ async function setActiveView(value, { syncHash = true } = {}) {
     history.replaceState(null, "", `${location.pathname}${location.search}#${activeView}`);
   }
   if (activeView === "upgrade") await loadUpgradeStatus();
+}
+
+function setActivePtTab(value) {
+  state.activePtTab = value === "stats" ? "stats" : "signin";
+  const systemView = state.activeView !== "pt-signin";
+  elements.ptPanel.hidden = systemView || state.activePtTab !== "signin";
+  elements.ptStatsPanel.hidden = systemView || state.activePtTab !== "stats";
+  for (const button of elements.ptTabs) {
+    const active = button.dataset.ptTab === state.activePtTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
 }
 
 function setBusy(busy) {
@@ -311,13 +332,37 @@ function renderPtCandidates() {
 function renderPtSites() {
   elements.ptSiteRows.replaceChildren();
   if (!state.ptSites.length) {
-    elements.ptSiteRows.innerHTML = '<tr><td class="empty" colspan="6">暂无签到任务</td></tr>';
+    elements.ptSiteRows.innerHTML = '<tr><td class="empty" colspan="7">暂无签到任务</td></tr>';
     return;
   }
   for (const site of state.ptSites) {
     const row = document.createElement("tr");
-    const values = [site.name, site.credential?.domain || "凭据已删除", `${site.interval_hours} 小时`, formatDate(site.next_run_at)];
-    for (const value of values) {
+    for (const value of [site.name, site.credential?.domain || "凭据已删除"]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    const featureCell = document.createElement("td");
+    const featureToggles = document.createElement("div");
+    featureToggles.className = "site-action-toggles";
+    for (const [key, label, title] of [
+      ["sign_in_enabled", "签到", "执行站点签到"],
+      ["profile_refresh_enabled", "刷新", "刷新个人信息页"],
+    ]) {
+      const toggleLabel = document.createElement("label");
+      toggleLabel.className = "row-toggle";
+      toggleLabel.title = title;
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = Boolean(site.config[key]);
+      checkbox.setAttribute("aria-label", `${site.name} ${title}`);
+      checkbox.addEventListener("change", () => setPtSiteAction(site, key, checkbox.checked));
+      toggleLabel.append(checkbox, document.createTextNode(label));
+      featureToggles.append(toggleLabel);
+    }
+    featureCell.append(featureToggles);
+    row.append(featureCell);
+    for (const value of [`${site.interval_hours} 小时`, formatDate(site.next_run_at)]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -330,14 +375,6 @@ function renderPtSites() {
     const actionsCell = document.createElement("td");
     const actions = document.createElement("div");
     actions.className = "table-actions";
-    const enabledLabel = document.createElement("label");
-    enabledLabel.className = "row-toggle";
-    const enabled = document.createElement("input");
-    enabled.type = "checkbox";
-    enabled.checked = site.enabled;
-    enabled.setAttribute("aria-label", `${site.name} 启用`);
-    enabled.addEventListener("change", () => setPtSiteEnabled(site.id, enabled.checked));
-    enabledLabel.append(enabled, document.createTextNode("启用"));
     const settings = document.createElement("button");
     settings.type = "button";
     settings.className = "table-button";
@@ -353,7 +390,7 @@ function renderPtSites() {
     remove.className = "table-button danger";
     remove.textContent = "删除";
     remove.addEventListener("click", () => deletePtSite(site));
-    actions.append(enabledLabel, settings, run, remove);
+    actions.append(settings, run, remove);
     actionsCell.append(actions);
     row.append(actionsCell);
     elements.ptSiteRows.append(row);
@@ -362,6 +399,7 @@ function renderPtSites() {
 
 function historyState(execution) {
   if (!execution) return { key: "empty", icon: "−", label: "未记录" };
+  if (execution.site_reported) return { key: "success", icon: "✓", label: "站点已签到" };
   const outcome = execution.result?.outcome;
   if (outcome === "success") return { key: "success", icon: "✓", label: "签到成功" };
   if (outcome === "already_done") return { key: "success", icon: "✓", label: "今日已签到" };
@@ -372,6 +410,19 @@ function historyState(execution) {
   if (execution.status === "retry_wait") return { key: "warning", icon: "↻", label: "等待重试" };
   if (execution.status === "succeeded") return { key: "success", icon: "✓", label: "成功" };
   return { key: "failed", icon: "×", label: statusLabel(execution.status) };
+}
+
+function historyExecution(site, date) {
+  const execution = site.executions?.[date];
+  if (execution) return execution;
+  const reported = site.site_history?.[date];
+  if (!reported) return null;
+  const reward = reported.reward ? ` · 奖励 ${reported.reward}` : "";
+  return {
+    status: "succeeded",
+    site_reported: true,
+    result: { outcome: "success", message: `站点历史签到${reward}` },
+  };
 }
 
 function historyTitle(date, execution) {
@@ -405,15 +456,40 @@ function renderPtHistory() {
     const siteCell = document.createElement("td");
     const siteDetails = document.createElement("div");
     siteDetails.className = "history-site";
+    const siteHeading = document.createElement("div");
+    siteHeading.className = "history-site-heading";
     const siteName = document.createElement("strong");
     siteName.textContent = site.name;
+    siteHeading.append(siteName);
+    if (site.url) {
+      const siteLink = document.createElement("a");
+      siteLink.className = "site-link";
+      siteLink.href = site.url;
+      siteLink.target = "_blank";
+      siteLink.rel = "noopener noreferrer";
+      siteLink.title = `打开 ${site.name}`;
+      siteLink.setAttribute("aria-label", `打开 ${site.name}`);
+      siteLink.textContent = "↗";
+      siteHeading.append(siteLink);
+    }
+    const retryButton = document.createElement("button");
+    retryButton.type = "button";
+    retryButton.className = "site-link";
+    retryButton.title = `立即重试 ${site.name}`;
+    retryButton.setAttribute("aria-label", `立即重试 ${site.name}`);
+    retryButton.textContent = "↻";
+    retryButton.addEventListener("click", () => runPtSite(site.automation_id));
+    siteHeading.append(retryButton);
     const count = document.createElement("small");
-    count.textContent = `${site.record_count} 条记录`;
-    siteDetails.append(siteName, count);
+    const reportedCount = Object.keys(site.site_history || {}).length;
+    count.textContent = reportedCount
+      ? `${site.record_count} 条执行 · ${reportedCount} 天站点历史`
+      : `${site.record_count} 条执行`;
+    siteDetails.append(siteHeading, count);
     siteCell.append(siteDetails);
     row.append(siteCell);
 
-    const todayExecution = site.executions[state.ptHistory.today];
+    const todayExecution = historyExecution(site, state.ptHistory.today);
     const todayState = historyState(todayExecution);
     const todayCell = document.createElement("td");
     const todayBadge = document.createElement("span");
@@ -424,7 +500,7 @@ function renderPtHistory() {
     row.append(todayCell);
 
     for (const day of days) {
-      const execution = site.executions[day.date];
+      const execution = historyExecution(site, day.date);
       const itemState = historyState(execution);
       const cell = document.createElement("td");
       const dot = document.createElement("span");
@@ -436,6 +512,39 @@ function renderPtHistory() {
       row.append(cell);
     }
     elements.ptHistoryRows.append(row);
+  }
+}
+
+function renderPtStats() {
+  elements.ptStatsRows.replaceChildren();
+  if (!state.ptStats.length) {
+    elements.ptStatsRows.innerHTML = '<tr><td class="empty" colspan="9">暂无站点信息统计</td></tr>';
+    return;
+  }
+  for (const item of state.ptStats) {
+    const row = document.createElement("tr");
+    row.title = item.updated_at ? `更新时间：${formatDate(item.updated_at)}` : "等待首次刷新";
+    const stats = item.stats || {};
+    const values = [
+      item.name,
+      stats.username || "-",
+      stats.user_level || "-",
+      stats.uploaded || "-",
+      stats.downloaded || "-",
+      stats.ratio || "-",
+      stats.bonus || "-",
+      stats.seeding_count || "-",
+      stats.seeding_size || "-",
+    ];
+    values.forEach((value, index) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      if (index === 0) cell.title = item.domain || item.name;
+      if (index === 3) cell.className = "stat-uploaded";
+      if (index === 4) cell.className = "stat-downloaded";
+      row.append(cell);
+    });
+    elements.ptStatsRows.append(row);
   }
 }
 
@@ -456,15 +565,22 @@ function renderPt() {
   renderPtCandidates();
   renderPtSites();
   renderPtHistory();
+  renderPtStats();
 }
 
-async function setPtSiteEnabled(id, enabled) {
+async function setPtSiteAction(site, key, checked) {
+  const payload = {
+    sign_in_enabled: Boolean(site.config.sign_in_enabled),
+    profile_refresh_enabled: Boolean(site.config.profile_refresh_enabled),
+  };
+  payload[key] = checked;
   try {
-    await api(`/api/v1/pt-signin/sites/${encodeURIComponent(id)}/enabled`, {
-      method: "PATCH", body: JSON.stringify({ enabled }),
+    await api(`/api/v1/pt-signin/sites/${encodeURIComponent(site.id)}/actions`, {
+      method: "PATCH", body: JSON.stringify(payload),
     });
     await refresh({ quiet: true });
-    showToast(enabled ? "签到任务已启用" : "签到任务已停用");
+    const action = key === "sign_in_enabled" ? "签到" : "个人信息刷新";
+    showToast(`${action}已${checked ? "启用" : "停用"}`);
   } catch (error) {
     showToast(error.message, true);
     await refresh({ quiet: true });
@@ -585,6 +701,7 @@ function renderSelected() {
   elements.password.value = "";
   elements.password.required = !source?.password_configured;
   elements.passwordHint.textContent = source?.password_configured ? "已设置；留空将保留当前密码" : "新配置必须填写密码";
+  updateCredentialCopyControls();
   elements.autoImport.checked = source ? source.auto_import : true;
   elements.importButton.disabled = !source?.configured || !source?.password_configured || !source?.blob_updated_at;
   document.querySelector("#status-uuid").textContent = uuid || "未选择";
@@ -594,6 +711,20 @@ function renderSelected() {
   const errorBox = document.querySelector("#error-box");
   errorBox.hidden = !source?.last_error;
   errorBox.textContent = source?.last_error || "";
+}
+
+function updateCredentialCopyControls() {
+  elements.copyUuidButton.disabled = !elements.uuid.value.trim();
+  elements.copyPasswordButton.disabled = !elements.password.value;
+}
+
+async function copyCredentialValue(value, successMessage) {
+  try {
+    await navigator.clipboard.writeText(value);
+    showToast(successMessage);
+  } catch (_) {
+    showToast("浏览器未允许复制，请手动选择内容", true);
+  }
 }
 
 function renderSummary() {
@@ -638,18 +769,20 @@ async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [sources, credentials, ptCandidates, ptSites, ptHistory] = await Promise.all([
+    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
+      api("/api/v1/pt-signin/stats"),
     ]);
     state.sources = sources.items;
     state.credentials = credentials.items;
     state.ptCandidates = ptCandidates.items;
     state.ptSites = ptSites.items;
     state.ptHistory = ptHistory;
+    state.ptStats = ptStats.items;
     if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
     if (!state.selected && state.sources.length === 1) state.selected = state.sources[0].uuid;
     renderCookieCloud();
@@ -825,6 +958,14 @@ elements.copyButton.addEventListener("click", async () => {
     showToast("浏览器未允许复制，请手动选择地址", true);
   }
 });
+elements.uuid.addEventListener("input", updateCredentialCopyControls);
+elements.password.addEventListener("input", updateCredentialCopyControls);
+elements.copyUuidButton.addEventListener("click", () => (
+  copyCredentialValue(elements.uuid.value.trim(), "UUID 已复制")
+));
+elements.copyPasswordButton.addEventListener("click", () => (
+  copyCredentialValue(elements.password.value, "CookieCloud 密码已复制")
+));
 elements.logoutButton.addEventListener("click", async () => {
   try { await fetch("/api/auth/logout", { method: "POST" }); } finally { location.replace("/login"); }
 });
@@ -854,6 +995,21 @@ settingsTabs.forEach((button, index) => {
     event.preventDefault();
     settingsTabs[nextIndex].focus();
     setActiveView(settingsTabs[nextIndex].dataset.settingsTab);
+  });
+});
+const ptTabs = [...elements.ptTabs];
+ptTabs.forEach((button, index) => {
+  button.addEventListener("click", () => setActivePtTab(button.dataset.ptTab));
+  button.addEventListener("keydown", (event) => {
+    let nextIndex = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % ptTabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + ptTabs.length) % ptTabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = ptTabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    ptTabs[nextIndex].focus();
+    setActivePtTab(ptTabs[nextIndex].dataset.ptTab);
   });
 });
 window.addEventListener("hashchange", () => setActiveView(location.hash.slice(1), { syncHash: false }));

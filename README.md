@@ -132,13 +132,13 @@ Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported
 
 ### PT sign-in
 
-Open **PT 站点** and select the **站点签到** tab in the management interface. AutoSurf discovers PT candidates from its built-in site catalog and high-confidence PT cookie signatures, then lets you select and add all supported sites in one operation. Cookie names and values are never returned by the discovery API. The candidate list and credential selector only show high-confidence PT sites that have not already been added, so unrelated CookieCloud domains such as search engines do not appear. Sites that require a dedicated API adapter are shown but cannot be bulk-added.
+Open **PT 站点** and select the **站点签到** tab in the management interface. AutoSurf discovers PT candidates from its built-in site catalog and high-confidence PT cookie signatures, then lets you select and add all supported sites in one operation. Cookie names and values are never returned by the discovery API. The candidate list and credential selector only show high-confidence PT sites that have not already been added, so unrelated CookieCloud domains such as search engines do not appear. Root and `www` credentials for the same tracker are grouped into one candidate; their CookieCloud records are merged into the immutable execution snapshot so host-only login cookies and root-domain challenge cookies remain available together. Sites that require a dedicated API adapter, including Rousi and M-Team, are recognized and shown but cannot be bulk-added.
 
 Use **手动添加自定义站点** to adjust the URL or recognition rules for an available PT credential. AutoSurf suggests `https://<credential-domain>/attendance.php`; the URL must remain on the selected credential domain or one of its subdomains.
 
-Each run starts an isolated headless Playwright Chromium browser, injects only cookies applicable to the target host, executes the page JavaScript, and checks for already-signed, successful, expired-login, and challenge states. A common sign-in control is clicked automatically. Site-specific CSS selectors and result text can be configured under the advanced settings. Unknown, blocked, and timed-out results are not recorded as successful, and failed runs retain a screenshot under `data/browser-artifacts`.
+Each run starts an isolated headless Playwright Chromium browser, injects only cookies applicable to the target host, executes the page JavaScript, and checks for already-signed, successful, expired-login, challenge, and manual make-up-sign-in states. A common sign-in control is clicked automatically. Rule descriptions such as "signing in can earn bonus points" are not treated as successful results. Site-specific CSS selectors and result text can be configured under the advanced settings. Unknown, blocked, and timed-out results are not recorded as successful, and failed runs retain a screenshot under `data/browser-artifacts`.
 
-Scheduled PT runs start at a random point within the configured delay window, which defaults to 30 minutes. Failed runs retry at a fixed interval that defaults to two hours, with five retries after the initial attempt. These values can be set when adding sites and changed later from each task's **设置** dialog. Immediate runs reuse an active or just-created execution instead of inserting a duplicate. The execution history groups the latest result for each site and local calendar day into a seven-day matrix.
+Scheduled PT runs start at a random point within the configured delay window, which defaults to 30 minutes. Failed runs retry at a fixed interval that defaults to two hours, with five retries after the initial attempt. These values can be set when adding sites and changed later from each task's **设置** dialog. Each site has independent **签到** and **刷新** switches; profile refresh reuses the authenticated browser, visits the user details page, and records username, level, traffic, ratio, bonus, and seeding statistics for the **信息统计** tab. Turning off both switches disables the task. Immediate runs and history retries reuse an active or just-created execution instead of inserting a duplicate. The execution history groups the latest result for each site and local calendar day into a seven-day matrix, with buttons to open the configured site URL or retry the task. Successful runs also read FullCalendar-style calendars and plain-text PTTime history when present, overlaying site-reported dates and reward text without creating fake execution records.
 
 The PT management API is available at:
 
@@ -147,11 +147,13 @@ The PT management API is available at:
 - `GET /api/v1/pt-signin/candidates`
 - `POST /api/v1/pt-signin/sites/collect`
 - `PATCH /api/v1/pt-signin/sites/{id}/schedule`
+- `PATCH /api/v1/pt-signin/sites/{id}/actions`
 - `PATCH /api/v1/pt-signin/sites/{id}/enabled`
 - `POST /api/v1/pt-signin/sites/{id}/run`
 - `DELETE /api/v1/pt-signin/sites/{id}`
 - `GET /api/v1/pt-signin/executions`
 - `GET /api/v1/pt-signin/history`
+- `GET /api/v1/pt-signin/stats`
 
 ### Browser sign-in
 

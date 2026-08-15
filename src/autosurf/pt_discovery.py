@@ -41,6 +41,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("hdcity.city", "HDCity"),
     PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
     PtSiteDefinition("rousi.pro", "Rousi", "/", "custom_required"),
+    PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "custom_required"),
     PtSiteDefinition("totheglory.im", "TTG"),
     PtSiteDefinition("zhuque.in", "Zhuque", "/", "custom_required"),
     PtSiteDefinition("yemapt.org", "YemaPT"),
@@ -53,6 +54,7 @@ PT_SITE_CATALOG = (
 
 @dataclass(frozen=True)
 class PtDiscovery:
+    site_key: str
     name: str
     url: str
     reason: str
@@ -78,6 +80,7 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
             else normalized_domain
         )
         return PtDiscovery(
+            site_key=definition.domain,
             name=definition.name,
             url=urljoin(f"https://{target_domain}/", definition.signin_path.lstrip("/")),
             reason="site_catalog",
@@ -85,12 +88,23 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
         )
     if markers:
         return PtDiscovery(
+            site_key=canonical_pt_site_domain(normalized_domain),
             name=normalized_domain,
             url=f"https://{normalized_domain}/attendance.php",
             reason="cookie_signature",
             strategy="generic_browser",
         )
     return None
+
+
+def canonical_pt_site_domain(domain: str) -> str:
+    normalized = domain.lower().lstrip(".").rstrip(".")
+    return normalized[4:] if normalized.startswith("www.") else normalized
+
+
+def pt_site_domain_aliases(domain: str) -> tuple[str, str]:
+    canonical = canonical_pt_site_domain(domain)
+    return canonical, f"www.{canonical}"
 
 
 def _domain_matches(credential_domain: str, catalog_domain: str) -> bool:

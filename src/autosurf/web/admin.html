@@ -61,6 +61,10 @@
                 aria-selected="true" aria-controls="pt-signin-panel" data-pt-tab="signin">
           站点签到
         </button>
+        <button class="settings-tab" id="pt-tab-stats" type="button" role="tab"
+                aria-selected="false" aria-controls="pt-stats-panel" data-pt-tab="stats" tabindex="-1">
+          信息统计
+        </button>
       </div>
 
       <section class="settings-panel" id="pt-signin-panel" role="tabpanel" aria-labelledby="pt-tab-signin">
@@ -206,8 +210,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>任务</th><th>凭据域名</th><th>周期</th><th>下次执行</th><th>最近状态</th><th>操作</th></tr></thead>
-              <tbody id="pt-site-rows"><tr><td class="empty" colspan="6">暂无签到任务</td></tr></tbody>
+              <thead><tr><th>任务</th><th>凭据域名</th><th>功能</th><th>周期</th><th>下次执行</th><th>最近状态</th><th>操作</th></tr></thead>
+              <tbody id="pt-site-rows"><tr><td class="empty" colspan="7">暂无签到任务</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -220,6 +224,21 @@
             <table class="history-table">
               <thead><tr id="pt-history-head"><th>站点</th><th>今日</th></tr></thead>
               <tbody id="pt-history-rows"><tr><td class="empty" colspan="9">暂无签到任务</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="settings-panel" id="pt-stats-panel" role="tabpanel"
+               aria-labelledby="pt-tab-stats" hidden>
+        <section class="table-section" aria-labelledby="pt-stats-title">
+          <div class="section-heading">
+            <div><h2 id="pt-stats-title">站点信息统计</h2></div>
+          </div>
+          <div class="table-wrap">
+            <table class="stats-table">
+              <thead><tr><th>站点</th><th>用户名</th><th>用户等级</th><th>上传量</th><th>下载量</th><th>分享率</th><th>魔力值</th><th>做种数</th><th>做种体积</th></tr></thead>
+              <tbody id="pt-stats-rows"><tr><td class="empty" colspan="9">暂无站点信息统计</td></tr></tbody>
             </table>
           </div>
         </section>
@@ -280,11 +299,19 @@
           <form id="source-form">
             <label class="field">
               <span>UUID</span>
-              <input id="uuid" name="uuid" maxlength="128" autocomplete="off" required>
+              <span class="field-with-action">
+                <input id="uuid" name="uuid" maxlength="128" autocomplete="off" required>
+                <button class="icon-button small" id="copy-uuid-button" type="button"
+                        title="复制 UUID" aria-label="复制 UUID" disabled>⧉</button>
+              </span>
             </label>
             <label class="field">
               <span>CookieCloud 密码</span>
-              <input id="password" name="password" type="password" maxlength="1024" autocomplete="new-password">
+              <span class="field-with-action">
+                <input id="password" name="password" type="password" maxlength="1024" autocomplete="new-password">
+                <button class="icon-button small" id="copy-password-button" type="button"
+                        title="复制当前输入的密码" aria-label="复制当前输入的 CookieCloud 密码" disabled>⧉</button>
+              </span>
               <small id="password-hint">新配置必须填写密码</small>
             </label>
             <label class="toggle-row">

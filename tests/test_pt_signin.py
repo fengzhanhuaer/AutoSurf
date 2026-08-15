@@ -4,12 +4,22 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import select
 
-from autosurf.automations.pt_signin import PtSignInHandler, classify_pt_page
+from autosurf.automations.pt_signin import (
+    PtSignInHandler,
+    classify_pt_page,
+    combine_pt_action_results,
+    extract_text_signin_history,
+    normalize_site_signin_history,
+    normalize_pt_profile_stats,
+    profile_url_from_cookies,
+)
 from autosurf.config import Settings
-from autosurf.domain.models import RunContext, RunOutcome
+from autosurf.application.services import reconcile_pt_site_aliases
+from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.domain.models import utc_now
-from autosurf.infrastructure.database import ExecutionRecord
+from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
 from autosurf.main import create_app
 from autosurf.pt_discovery import discover_pt_site
 
@@ -37,11 +47,139 @@ def test_pt_page_classification_distinguishes_common_results():
         "https://tracker.test/attendance.php", 200, "签到成功，本次签到获得 10 积分"
     ) == RunOutcome.SUCCESS
     assert classify_pt_page(
+        "https://tracker.test/attendance.php", 200, "今天签到您获得81点魔力值"
+    ) == RunOutcome.SUCCESS
+    assert classify_pt_page(
+        "https://pttime.org/attendance.php", 200, "今天已签到，请勿重复刷新。已刷次数：2次。"
+    ) == RunOutcome.ALREADY_DONE
+    interrupted = (
+        "已断签2天，当前可补签天数为113天，请点击选择补签弥补连续天数，"
+        "或放弃补签重新开始签到。首次签到或重新开始签到可获得100个魔力值"
+    )
+    assert classify_pt_page(
+        "https://tjupt.org/attendance.php", 200, interrupted
+    ) == RunOutcome.FAILED
+
+
+def test_pt_profile_url_and_combined_action_results():
+    assert profile_url_from_cookies(
+        "https://tracker.test/attendance.php", {"c_secure_uid": "735"}
+    ) == "https://tracker.test/userdetails.php?id=735"
+    assert profile_url_from_cookies(
+        "https://tracker.test/attendance.php", {"c_secure_uid": "encrypted"}
+    ) is None
+
+    sign_in = RunResult(RunOutcome.ALREADY_DONE, "今日已经签到", {
+        "site_history": [{"date": "2026-08-15", "reward": "81"}],
+    })
+    refreshed = RunResult(RunOutcome.SUCCESS, "个人信息页刷新成功", {
+        "url": "https://tracker.test/userdetails.php?id=735",
+    })
+    result = combine_pt_action_results(sign_in, refreshed)
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    assert result.details["actions"]["sign_in"]["enabled"] is True
+    assert result.details["actions"]["profile_refresh"]["outcome"] == RunOutcome.SUCCESS
+    assert result.details["site_history"][0]["reward"] == "81"
+
+
+def test_pt_profile_stats_normalization_supports_nexusphp_labels():
+    stats = normalize_pt_profile_stats({
+        "pairs": [
+            ["用户名", "mapleren"],
+            ["用户等级", "POWER USER"],
+            ["上传量", "32.77 TiB"],
+            ["下载量", "60.66 GiB"],
+            ["分享率", "553.157"],
+            ["魔力值", "3,193,396.1"],
+            ["当前做种", "8"],
+            ["做种体积", "4.2 TiB"],
+        ],
+        "body": "",
+        "title": "",
+    })
+    assert stats == {
+        "username": "mapleren",
+        "user_level": "POWER USER",
+        "uploaded": "32.77 TiB",
+        "downloaded": "60.66 GiB",
+        "ratio": "553.157",
+        "bonus": "3,193,396.1",
+        "seeding_count": "8",
+        "seeding_size": "4.2 TiB",
+    }
+
+
+@pytest.mark.asyncio
+async def test_pt_stats_api_returns_latest_profile_snapshot(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:tracker.test", "tracker.test", {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    automation = app.state.automations.create(
+        "Tracker", "pt_signin", 86400, {
+            "url": "https://tracker.test/attendance.php",
+            "credential_domain": "tracker.test",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+        }, credential.id,
+    )
+    execution = app.state.queue.enqueue_now(automation.id)
+    with app.state.sessions.begin() as session:
+        record = session.get(ExecutionRecord, execution.id)
+        record.status = "succeeded"
+        record.finished_at = utc_now()
+        record.result_json = json.dumps({
+            "outcome": "success",
+            "message": "done",
+            "details": {"actions": {"profile_refresh": {"details": {
+                "profile_stats": {"username": "mapleren", "uploaded": "32.77 TiB"},
+            }}}},
+        })
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/pt-signin/stats", auth=(settings.username, settings.password)
+        )
+    assert response.status_code == 200
+    assert response.json()["items"][0]["stats"] == {
+        "username": "mapleren", "uploaded": "32.77 TiB",
+    }
+
+
+def test_site_signin_history_normalization_rejects_invalid_entries():
+    assert normalize_site_signin_history([
+        {"date": "2026-08-14", "reward": " 160 "},
+        {"date": "invalid", "reward": "ignored"},
+        {"date": "2026-08-15T12:00:00", "reward": 165},
+        "invalid",
+    ]) == [
+        {"date": "2026-08-14", "reward": "160"},
+        {"date": "2026-08-15", "reward": "165"},
+    ]
+    assert classify_pt_page(
         "https://tracker.test/login.php", 200, "欢迎"
     ) == RunOutcome.AUTH_EXPIRED
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "获得 [10]", {"success_patterns": ["获得 [10]"]}
     ) == RunOutcome.SUCCESS
+
+
+def test_text_signin_history_supports_pttime_records():
+    text = """
+    7天签到记录（补签卡剩余：29）
+    时间：2026-08-15 15:15:33 获得魔力值：600 连续天数：31天
+    时间：2026-08-14 16:00:23 获得魔力值：600 连续天数：30天
+    前30天签到记录
+    连续天数：31 签到日：20260815
+    连续天数：29 签到日：20260813
+    """
+    assert extract_text_signin_history(text) == [
+        {"date": "2026-08-13", "reward": ""},
+        {"date": "2026-08-14", "reward": "600"},
+        {"date": "2026-08-15", "reward": "600"},
+    ]
 
 
 def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknown_sites():
@@ -60,10 +198,18 @@ def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknow
 
 def test_pt_discovery_marks_api_only_sites_for_a_dedicated_adapter():
     discovery = discover_pt_site("zhuque.in", {"c_secure_uid"})
+    rousi = discover_pt_site("rousi.pro", {"sid"})
+    mteam = discover_pt_site("kp.m-team.cc", {"token"})
 
     assert discovery is not None
     assert discovery.strategy == "custom_required"
     assert discovery.supported is False
+    assert rousi is not None
+    assert rousi.name == "Rousi"
+    assert rousi.strategy == "custom_required"
+    assert mteam is not None
+    assert mteam.name == "M-Team"
+    assert mteam.strategy == "custom_required"
 
 
 @pytest.mark.asyncio
@@ -136,6 +282,12 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
         disabled = await client.patch(
             f"/api/v1/pt-signin/sites/{site_id}/enabled", auth=auth, json={"enabled": False}
         )
+        refreshed_only = await client.patch(
+            f"/api/v1/pt-signin/sites/{site_id}/actions", auth=auth, json={
+                "sign_in_enabled": False,
+                "profile_refresh_enabled": True,
+            },
+        )
         queued = await client.post(f"/api/v1/pt-signin/sites/{site_id}/run", auth=auth)
         history = await client.get("/api/v1/pt-signin/executions", auth=auth)
         deleted = await client.delete(f"/api/v1/pt-signin/sites/{site_id}", auth=auth)
@@ -149,6 +301,9 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     assert scheduled.json()["config"]["retry_interval_hours"] == 2
     assert scheduled.json()["config"]["max_retries"] == 5
     assert disabled.json()["enabled"] is False
+    assert refreshed_only.json()["enabled"] is True
+    assert refreshed_only.json()["config"]["sign_in_enabled"] is False
+    assert refreshed_only.json()["config"]["profile_refresh_enabled"] is True
     assert queued.status_code == 202
     assert history.json()["items"][0]["automation_name"] == "Tracker"
     assert history.json()["items"][0]["status"] == "pending"
@@ -183,6 +338,18 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
         {"sid": "secret"},
         provider="cookiecloud",
     )
+    pttime_root = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:pttime.org", "pttime.org", [{
+            "name": "cf_clearance", "value": "clear", "domain": ".pttime.org", "path": "/",
+        }], provider="cookiecloud",
+    )
+    pttime_www = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:www.pttime.org", "www.pttime.org", [{
+            "name": "c_secure_uid", "value": "1", "domain": "www.pttime.org", "path": "/",
+        }, {
+            "name": "c_secure_pass", "value": "pass", "domain": "www.pttime.org", "path": "/",
+        }], provider="cookiecloud",
+    )
     app.state.credentials.upsert("manual", "manual.test", {"passkey": "secret"}, provider="manual")
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
@@ -199,7 +366,7 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
             "credential_ids": [unsupported.id],
         })
         collected = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
-            "credential_ids": [recognized.id, recognized.id, catalog.id],
+            "credential_ids": [recognized.id, recognized.id, catalog.id, pttime_root.id, pttime_www.id],
             "interval_hours": 12,
             "timeout_seconds": 45,
         })
@@ -210,26 +377,84 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
 
     items = candidates.json()["items"]
     by_id = {item["credential"]["id"]: item for item in items}
-    assert set(by_id) == {recognized.id, catalog.id, unknown.id, unsupported.id}
+    assert set(by_id) == {recognized.id, catalog.id, unknown.id, unsupported.id, pttime_www.id}
     assert by_id[recognized.id]["reason"] == "cookie_signature"
     assert by_id[catalog.id]["name"] == "TJUPT"
     assert by_id[unknown.id]["recognized"] is False
     assert by_id[unsupported.id]["supported"] is False
+    assert by_id[pttime_www.id]["name"] == "PTTime"
+    assert by_id[pttime_www.id]["url"] == "https://www.pttime.org/attendance.php"
+    assert set(by_id[pttime_www.id]["credential_ids"]) == {pttime_root.id, pttime_www.id}
     assert "c_secure_uid" not in candidates.text
     assert "secret" not in candidates.text
     assert {item["credential"]["id"] for item in recognized_only.json()["items"]} == {
-        recognized.id, catalog.id, unsupported.id,
+        recognized.id, catalog.id, unsupported.id, pttime_www.id,
     }
     assert rejected.status_code == 422
     assert unsupported_result.status_code == 422
     assert "尚需专用适配" in unsupported_result.json()["detail"]
     assert collected.status_code == 201
-    assert len(collected.json()["created"]) == 2
+    assert len(collected.json()["created"]) == 3
     assert {item["interval_hours"] for item in collected.json()["created"]} == {12}
     assert {item["config"]["timeout_seconds"] for item in collected.json()["created"]} == {45}
     assert collected_again.json()["created"] == []
     assert len(collected_again.json()["skipped"]) == 2
-    assert sum(item["configured"] for item in refreshed.json()["items"]) == 2
+    assert sum(item["configured"] for item in refreshed.json()["items"]) == 3
+
+    pttime_site = next(item for item in collected.json()["created"] if item["name"] == "PTTime")
+    execution = app.state.queue.enqueue_now(pttime_site["id"])
+    with app.state.sessions() as session:
+        snapshot = session.get(ExecutionRecord, execution.id).credential_payload
+    _, browser_cookies = app.state.credentials.credential_values_from_payload(snapshot)
+    assert {(cookie["name"], cookie["domain"]) for cookie in browser_cookies} == {
+        ("cf_clearance", ".pttime.org"),
+        ("c_secure_uid", "www.pttime.org"),
+        ("c_secure_pass", "www.pttime.org"),
+    }
+
+
+def test_pt_alias_reconciliation_merges_tasks_history_and_active_executions(settings):
+    app = create_app(settings)
+    root = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:pttime.org", "pttime.org", [{
+            "name": "cf_clearance", "value": "clear", "domain": ".pttime.org", "path": "/",
+        }], provider="cookiecloud",
+    )
+    www = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:www.pttime.org", "www.pttime.org", [{
+            "name": "c_secure_uid", "value": "1", "domain": "www.pttime.org", "path": "/",
+        }], provider="cookiecloud",
+    )
+    root_task = app.state.automations.create(
+        "PTTime", "pt_signin", 86400,
+        {"url": "https://pttime.org/attendance.php", "credential_domain": "pttime.org"}, root.id,
+    )
+    www_task = app.state.automations.create(
+        "PTTime", "pt_signin", 86400,
+        {"url": "https://www.pttime.org/attendance.php", "credential_domain": "www.pttime.org"}, www.id,
+    )
+    root_execution = app.state.queue.enqueue_now(root_task.id)
+    www_execution = app.state.queue.enqueue_now(www_task.id)
+
+    assert reconcile_pt_site_aliases(app.state.sessions, app.state.credentials) == 1
+
+    with app.state.sessions() as session:
+        tasks = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        )).all()
+        executions = session.scalars(select(ExecutionRecord).order_by(ExecutionRecord.id)).all()
+        assert len(tasks) == 1
+        assert tasks[0].id == www_task.id
+        assert tasks[0].credential_id == www.id
+        assert {execution.id for execution in executions} == {root_execution.id, www_execution.id}
+        assert {execution.automation_id for execution in executions} == {www_task.id}
+        assert sorted(execution.status for execution in executions) == ["cancelled", "pending"]
+        pending = next(execution for execution in executions if execution.status == "pending")
+        _, browser_cookies = app.state.credentials.credential_values_from_payload(
+            pending.credential_payload
+        )
+        assert {cookie["name"] for cookie in browser_cookies} == {"cf_clearance", "c_secure_uid"}
+        assert json.loads(tasks[0].config_json)["credential_aliases_merged"] is True
 
 
 @pytest.mark.asyncio
@@ -253,11 +478,14 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     today_start_utc = datetime.combine(local_today, datetime.min.time()) - offset
     yesterday_start_utc = today_start_utc - timedelta(days=1)
 
-    def execution(scheduled_at, status, message=None):
+    def execution(scheduled_at, status, message=None, site_history=None):
+        result = {"outcome": "success", "message": message}
+        if site_history:
+            result["details"] = {"site_history": site_history}
         return ExecutionRecord(
             id=str(uuid4()), automation_id=site.id, scheduled_at=scheduled_at,
             status=status, attempts=1, available_at=scheduled_at,
-            result_json=json.dumps({"outcome": "success", "message": message}) if message else None,
+            result_json=json.dumps(result) if message else None,
             error=None if message else "temporary failure",
         )
 
@@ -265,7 +493,10 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
         session.add_all([
             execution(yesterday_start_utc + timedelta(hours=3), "retry_wait"),
             execution(today_start_utc + timedelta(hours=1), "failed"),
-            execution(today_start_utc + timedelta(hours=2), "succeeded", "签到成功"),
+            execution(today_start_utc + timedelta(hours=2), "succeeded", "签到成功", [
+                {"date": local_today.isoformat(), "reward": "165"},
+                {"date": (local_today - timedelta(days=1)).isoformat(), "reward": "160"},
+            ]),
         ])
 
     transport = httpx.ASGITransport(app=app)
@@ -287,6 +518,12 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     assert by_id[site.id]["record_count"] == 3
     assert by_id[site.id]["executions"][local_today.isoformat()]["status"] == "succeeded"
     assert by_id[site.id]["executions"][local_today.isoformat()]["result"]["message"] == "签到成功"
+    assert by_id[site.id]["site_history"] == {
+        local_today.isoformat(): {"date": local_today.isoformat(), "reward": "165"},
+        (local_today - timedelta(days=1)).isoformat(): {
+            "date": (local_today - timedelta(days=1)).isoformat(), "reward": "160",
+        },
+    }
     assert by_id[empty_site.id]["record_count"] == 0
     assert by_id[empty_site.id]["executions"] == {}
     assert payload["latest_execution"]["automation_name"] == "Tracker"

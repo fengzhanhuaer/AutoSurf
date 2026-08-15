@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+from contextlib import suppress
 from datetime import datetime, timedelta
 import hashlib
 import hmac
@@ -28,7 +29,7 @@ from autosurf.infrastructure.database import (
     CredentialRecord,
     ExecutionRecord,
 )
-from autosurf.pt_discovery import discover_pt_site
+from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site
 
 
 class CredentialInput(BaseModel):
@@ -71,10 +72,17 @@ class PtSignInInput(BaseModel):
     click_selector: str | None = Field(default=None, max_length=1024)
     success_patterns: list[str] = Field(default_factory=list, max_length=20)
     already_patterns: list[str] = Field(default_factory=list, max_length=20)
+    sign_in_enabled: bool = True
+    profile_refresh_enabled: bool = False
 
 
 class PtSignInEnabledInput(BaseModel):
     enabled: bool
+
+
+class PtSiteActionsInput(BaseModel):
+    sign_in_enabled: bool
+    profile_refresh_enabled: bool
 
 
 class PtSignInCollectInput(BaseModel):
@@ -84,6 +92,8 @@ class PtSignInCollectInput(BaseModel):
     random_delay_minutes: int = Field(default=30, ge=0, le=1440)
     retry_interval_hours: int = Field(default=2, ge=1, le=168)
     max_retries: int = Field(default=5, ge=0, le=20)
+    sign_in_enabled: bool = True
+    profile_refresh_enabled: bool = False
 
 
 class PtSignInScheduleInput(BaseModel):
@@ -469,6 +479,8 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
         "click_selector": data.click_selector or None,
         "success_patterns": data.success_patterns,
         "already_patterns": data.already_patterns,
+        "sign_in_enabled": data.sign_in_enabled,
+        "profile_refresh_enabled": data.profile_refresh_enabled,
     }
     try:
         record = request.app.state.automations.create(
@@ -505,10 +517,22 @@ def list_pt_signin_candidates(request: Request, include_unknown: bool = True) ->
 @router.post("/pt-signin/sites/collect", status_code=201)
 def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dict[str, Any]:
     credential_ids = list(dict.fromkeys(data.credential_ids))
-    candidates = {item["credential"]["id"]: item for item in _pt_signin_candidates(request, True)}
-    requested = [candidates.get(credential_id) for credential_id in credential_ids]
-    if any(item is None or not item["recognized"] for item in requested):
+    candidate_items = _pt_signin_candidates(request, True)
+    candidates = {
+        credential_id: item
+        for item in candidate_items
+        for credential_id in item.get("credential_ids", [item["credential"]["id"]])
+    }
+    selected = [candidates.get(credential_id) for credential_id in credential_ids]
+    if any(item is None or not item["recognized"] for item in selected):
         raise HTTPException(status_code=422, detail="所选凭据中包含未识别的 PT 站点")
+    requested = []
+    selected_site_keys: set[str] = set()
+    for item in selected:
+        if item["site_key"] in selected_site_keys:
+            continue
+        selected_site_keys.add(item["site_key"])
+        requested.append(item)
     unsupported = [item["name"] for item in requested if not item["supported"]]
     if unsupported:
         raise HTTPException(status_code=422, detail=f"以下站点尚需专用适配：{'、'.join(unsupported)}")
@@ -529,6 +553,8 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
             "click_selector": None,
             "success_patterns": [],
             "already_patterns": [],
+            "sign_in_enabled": data.sign_in_enabled,
+            "profile_refresh_enabled": data.profile_refresh_enabled,
             "discovered": True,
             "discovery_reason": candidate["reason"],
         }
@@ -586,6 +612,25 @@ def set_pt_signin_site_enabled(automation_id: str, data: PtSignInEnabledInput,
         return _pt_signin_site_view(record, None)
 
 
+@router.patch("/pt-signin/sites/{automation_id}/actions")
+def set_pt_site_actions(automation_id: str, data: PtSiteActionsInput,
+                        request: Request) -> dict[str, Any]:
+    with request.app.state.sessions.begin() as session:
+        record = _require_pt_automation(session.get(AutomationRecord, automation_id))
+        config = json.loads(record.config_json)
+        was_enabled = record.enabled
+        config.update({
+            "sign_in_enabled": data.sign_in_enabled,
+            "profile_refresh_enabled": data.profile_refresh_enabled,
+        })
+        record.config_json = json.dumps(config, ensure_ascii=False)
+        record.enabled = data.sign_in_enabled or data.profile_refresh_enabled
+        if record.enabled and not was_enabled:
+            record.next_run_at = utc_now()
+        session.flush()
+        return _pt_signin_site_view(record, None)
+
+
 @router.delete("/pt-signin/sites/{automation_id}", status_code=204)
 def delete_pt_signin_site(automation_id: str, request: Request) -> None:
     with request.app.state.sessions.begin() as session:
@@ -611,6 +656,46 @@ def list_pt_signin_executions(request: Request, limit: int = 50) -> dict[str, An
             AutomationRecord.handler_type == "pt_signin"
         ).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
         return {"items": [_pt_execution_view(item) for item in records]}
+
+
+@router.get("/pt-signin/stats")
+def list_pt_site_stats(request: Request) -> dict[str, Any]:
+    with request.app.state.sessions() as session:
+        sites = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(AutomationRecord.name)).all()
+        site_ids = [site.id for site in sites]
+        executions = session.scalars(select(ExecutionRecord).where(
+            ExecutionRecord.automation_id.in_(site_ids),
+            ExecutionRecord.result_json.is_not(None),
+        ).order_by(ExecutionRecord.finished_at.desc(), ExecutionRecord.scheduled_at.desc())).all() \
+            if site_ids else []
+        latest: dict[str, tuple[dict[str, str], datetime]] = {}
+        for execution in executions:
+            if execution.automation_id in latest:
+                continue
+            stats = _profile_stats_from_result(execution.result_json)
+            if stats:
+                latest[execution.automation_id] = (
+                    stats, execution.finished_at or execution.scheduled_at,
+                )
+
+        items = []
+        for site in sites:
+            config = json.loads(site.config_json)
+            snapshot = latest.get(site.id)
+            if not config.get("profile_refresh_enabled", False) and snapshot is None:
+                continue
+            stats, updated_at = snapshot if snapshot else ({}, None)
+            items.append({
+                "automation_id": site.id,
+                "name": site.name,
+                "domain": site.credential.domain if site.credential else None,
+                "profile_refresh_enabled": bool(config.get("profile_refresh_enabled", False)),
+                "updated_at": updated_at,
+                "stats": stats,
+            })
+        return {"items": items}
 
 
 @router.get("/pt-signin/history")
@@ -639,6 +724,7 @@ def pt_signin_history(
 
         date_keys = {value.isoformat() for value in date_values}
         daily: dict[str, dict[str, ExecutionRecord]] = {site.id: {} for site in sites}
+        site_history: dict[str, dict[str, dict[str, str]]] = {site.id: {} for site in sites}
         record_counts = {site.id: 0 for site in sites}
         for execution in executions:
             day = (execution.scheduled_at + offset).date().isoformat()
@@ -646,6 +732,19 @@ def pt_signin_history(
                 continue
             record_counts[execution.automation_id] += 1
             daily[execution.automation_id].setdefault(day, execution)
+            if not execution.result_json:
+                continue
+            with suppress(ValueError, TypeError):
+                result = json.loads(execution.result_json)
+                reported = result.get("details", {}).get("site_history", [])
+                for item in reported:
+                    reported_day = str(item.get("date") or "")
+                    if reported_day not in date_keys:
+                        continue
+                    site_history[execution.automation_id].setdefault(reported_day, {
+                        "date": reported_day,
+                        "reward": str(item.get("reward") or "")[:100],
+                    })
 
         return {
             "today": local_today.isoformat(),
@@ -658,11 +757,13 @@ def pt_signin_history(
                 "automation_id": site.id,
                 "name": site.name,
                 "domain": site.credential.domain if site.credential else None,
+                "url": json.loads(site.config_json).get("url"),
                 "enabled": site.enabled,
                 "record_count": record_counts[site.id],
                 "executions": {
                     day: execution_view(execution) for day, execution in daily[site.id].items()
                 },
+                "site_history": site_history[site.id],
             } for site in sites],
             "latest_execution": _pt_execution_view(latest) if latest else None,
         }
@@ -689,7 +790,8 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
         configured = {
             record.credential_id: record.id for record in automations if record.credential_id
         }
-        items: list[dict[str, Any]] = []
+        grouped: dict[str, dict[str, Any]] = {}
+        unknown_items: list[dict[str, Any]] = []
         for credential in credentials:
             try:
                 cookie_names = set(request.app.state.credentials.cookies_for(credential))
@@ -699,7 +801,7 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
             if discovery is None and not include_unknown:
                 continue
             automation_id = configured.get(credential.id)
-            items.append({
+            item = {
                 "credential": {
                     "id": credential.id,
                     "name": credential.name,
@@ -707,6 +809,8 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
                     "version": credential.version,
                     "updated_at": credential.updated_at,
                 },
+                "credential_ids": [credential.id],
+                "site_key": discovery.site_key if discovery else credential.domain,
                 "name": discovery.name if discovery else credential.domain,
                 "url": discovery.url if discovery else f"https://{credential.domain}/attendance.php",
                 "recognized": discovery is not None,
@@ -715,7 +819,37 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
                 "supported": discovery.supported if discovery else False,
                 "configured": automation_id is not None,
                 "automation_id": automation_id,
-            })
+                "_score": (
+                    len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
+                    len(cookie_names),
+                    credential.domain.startswith("www."),
+                    credential.updated_at,
+                ),
+            }
+            if discovery is None:
+                unknown_items.append(item)
+                continue
+
+            existing = grouped.get(discovery.site_key)
+            if existing is None:
+                grouped[discovery.site_key] = item
+                continue
+            configured_id = existing["automation_id"] or automation_id
+            if item["_score"] > existing["_score"]:
+                item["credential_ids"] = list(dict.fromkeys(
+                    [item["credential"]["id"], *existing["credential_ids"]]
+                ))
+                item["configured"] = configured_id is not None
+                item["automation_id"] = configured_id
+                grouped[discovery.site_key] = item
+            else:
+                existing["credential_ids"].append(credential.id)
+                existing["configured"] = configured_id is not None
+                existing["automation_id"] = configured_id
+
+        items = [*grouped.values(), *unknown_items]
+        for item in items:
+            item.pop("_score", None)
     return sorted(items, key=lambda item: (
         not item["recognized"], not item["supported"], item["name"].casefold(),
         item["credential"]["domain"],
@@ -754,6 +888,8 @@ def _pt_signin_site_view(record: AutomationRecord | None,
             "click_selector": config.get("click_selector"),
             "success_patterns": config.get("success_patterns", []),
             "already_patterns": config.get("already_patterns", []),
+            "sign_in_enabled": bool(config.get("sign_in_enabled", True)),
+            "profile_refresh_enabled": bool(config.get("profile_refresh_enabled", False)),
         },
         "last_execution": execution_view(latest) if latest else None,
     }
@@ -766,6 +902,27 @@ def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
         "domain": record.automation.credential.domain if record.automation.credential else None,
     })
     return result
+
+
+def _profile_stats_from_result(result_json: str | None) -> dict[str, str]:
+    if not result_json:
+        return {}
+    with suppress(ValueError, TypeError):
+        result = json.loads(result_json)
+        details = result.get("details") or {}
+        stats = details.get("profile_stats")
+        if not isinstance(stats, dict):
+            stats = (
+                details.get("actions", {}).get("profile_refresh", {}).get("details", {})
+                .get("profile_stats")
+            )
+        if isinstance(stats, dict):
+            return {
+                str(key): str(value)[:160]
+                for key, value in stats.items()
+                if value is not None and str(value).strip()
+            }
+    return {}
 
 
 @router.put("/cookiecloud/sources/{uuid}")

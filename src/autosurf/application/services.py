@@ -13,6 +13,7 @@ from autosurf.application.registry import HandlerRegistry
 from autosurf.domain.models import ExecutionStatus, RunContext, RunOutcome, utc_now
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
+from autosurf.pt_discovery import PT_COOKIE_MARKERS, canonical_pt_site_domain, pt_site_domain_aliases
 
 
 class CredentialService:
@@ -82,6 +83,32 @@ class CredentialService:
             raise ValueError("credential payload is not a cookie mapping")
         return value, None
 
+    def merged_cookiecloud_snapshot(self, records: list[CredentialRecord]) -> tuple[int | None, str | None]:
+        if not records:
+            return None, None
+        merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for record in sorted(records, key=lambda item: (item.updated_at, item.domain, item.name)):
+            _, browser_cookies = self.credential_values_from_payload(record.encrypted_payload)
+            if browser_cookies is None:
+                continue
+            for cookie in browser_cookies:
+                if cookie.get("name") is None or cookie.get("value") is None:
+                    continue
+                key = (
+                    str(cookie["name"]),
+                    str(cookie.get("domain") or record.domain).lower().lstrip("."),
+                    str(cookie.get("path") or "/"),
+                )
+                merged[key] = dict(cookie)
+        if not merged:
+            primary = records[-1]
+            return primary.version, primary.encrypted_payload
+        payload = {
+            "format": "cookie_records_v1",
+            "cookies": list(merged.values()),
+        }
+        return max(record.version for record in records), self.secrets.encrypt_json(payload)
+
 
 class AutomationService:
     def __init__(self, sessions: sessionmaker[Session], registry: HandlerRegistry) -> None:
@@ -103,9 +130,29 @@ class AutomationService:
 
 
 class QueueService:
-    def __init__(self, sessions: sessionmaker[Session], lease_seconds: int) -> None:
+    def __init__(self, sessions: sessionmaker[Session], lease_seconds: int,
+                 credentials: CredentialService | None = None) -> None:
         self.sessions = sessions
         self.lease_seconds = lease_seconds
+        self.credentials = credentials
+
+    def _credential_snapshot(self, session: Session,
+                             automation: AutomationRecord) -> tuple[int | None, str | None]:
+        credential = automation.credential
+        if credential is None:
+            return None, None
+        if (
+            automation.handler_type != "pt_signin"
+            or credential.provider != "cookiecloud"
+            or self.credentials is None
+        ):
+            return credential.version, credential.encrypted_payload
+        aliases = pt_site_domain_aliases(credential.domain)
+        related = session.scalars(select(CredentialRecord).where(
+            CredentialRecord.provider == "cookiecloud",
+            CredentialRecord.domain.in_(aliases),
+        )).all()
+        return self.credentials.merged_cookiecloud_snapshot(related)
 
     def enqueue_due(self) -> int:
         now = utc_now()
@@ -130,11 +177,12 @@ class QueueService:
                     ExecutionRecord.scheduled_at == scheduled_at,
                 ))
                 if exists is None:
+                    credential_version, credential_payload = self._credential_snapshot(session, automation)
                     session.add(ExecutionRecord(id=str(uuid4()), automation_id=automation.id,
                                                 scheduled_at=scheduled_at, status=ExecutionStatus.PENDING,
                                                 available_at=now + timedelta(seconds=random_delay_seconds), attempts=0,
-                                                credential_version=automation.credential.version if automation.credential else None,
-                                                credential_payload=automation.credential.encrypted_payload if automation.credential else None))
+                                                credential_version=credential_version,
+                                                credential_payload=credential_payload))
                     count += 1
                 while automation.next_run_at <= now:
                     automation.next_run_at += timedelta(seconds=automation.interval_seconds)
@@ -160,10 +208,11 @@ class QueueService:
                     existing.available_at = now
                 session.flush()
                 return existing
+            credential_version, credential_payload = self._credential_snapshot(session, automation)
             execution = ExecutionRecord(id=str(uuid4()), automation_id=automation.id, scheduled_at=now,
                                         status=ExecutionStatus.PENDING, available_at=now, attempts=0,
-                                        credential_version=automation.credential.version if automation.credential else None,
-                                        credential_payload=automation.credential.encrypted_payload if automation.credential else None)
+                                        credential_version=credential_version,
+                                        credential_payload=credential_payload)
             session.add(execution)
         return execution
 
@@ -264,6 +313,102 @@ class ExecutionService:
                 retry_interval_seconds=retry_interval_seconds,
             )
         return True
+
+
+def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
+                              credentials: CredentialService) -> int:
+    merged_count = 0
+    now = utc_now()
+    with sessions.begin() as session:
+        automations = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(AutomationRecord.name, AutomationRecord.id)).all()
+        groups: dict[str, list[AutomationRecord]] = {}
+        for automation in automations:
+            credential = automation.credential
+            if credential is None or credential.provider != "cookiecloud":
+                continue
+            groups.setdefault(canonical_pt_site_domain(credential.domain), []).append(automation)
+
+        for records in groups.values():
+            if len(records) < 2:
+                continue
+
+            def score(automation: AutomationRecord) -> tuple[int, int, bool, Any, str]:
+                credential = automation.credential
+                try:
+                    cookie_names = set(credentials.cookies_for(credential))
+                except ValueError:
+                    cookie_names = set()
+                return (
+                    len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
+                    len(cookie_names),
+                    credential.domain.startswith("www."),
+                    credential.updated_at,
+                    automation.id,
+                )
+
+            primary = max(records, key=score)
+            primary.enabled = any(record.enabled for record in records)
+            primary.next_run_at = min(record.next_run_at for record in records)
+            duplicate_ids = {record.id for record in records if record.id != primary.id}
+            executions = session.scalars(select(ExecutionRecord).where(
+                ExecutionRecord.automation_id.in_(duplicate_ids)
+            )).all()
+            for execution in executions:
+                execution.automation_id = primary.id
+            for record in records:
+                if record.id != primary.id:
+                    session.delete(record)
+                    merged_count += 1
+            session.flush()
+
+            active = session.scalars(select(ExecutionRecord).where(
+                ExecutionRecord.automation_id == primary.id,
+                ExecutionRecord.status.in_([
+                    ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.RETRY_WAIT,
+                ]),
+            ).order_by(ExecutionRecord.available_at, ExecutionRecord.scheduled_at)).all()
+            for execution in active[1:]:
+                execution.status = ExecutionStatus.CANCELLED
+                execution.lease_until = None
+                execution.finished_at = now
+                execution.error = "同一 PT 站点的重复任务已合并"
+
+        session.flush()
+        remaining = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        )).all()
+        for automation in remaining:
+            credential = automation.credential
+            if credential is None or credential.provider != "cookiecloud":
+                continue
+            try:
+                config = json.loads(automation.config_json)
+            except (TypeError, ValueError):
+                config = {}
+            if config.get("credential_aliases_merged"):
+                continue
+            aliases = pt_site_domain_aliases(credential.domain)
+            related = session.scalars(select(CredentialRecord).where(
+                CredentialRecord.provider == "cookiecloud",
+                CredentialRecord.domain.in_(aliases),
+            )).all()
+            if len(related) < 2:
+                continue
+            version, payload = credentials.merged_cookiecloud_snapshot(related)
+            active = session.scalar(select(ExecutionRecord).where(
+                ExecutionRecord.automation_id == automation.id,
+                ExecutionRecord.status.in_([
+                    ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.RETRY_WAIT,
+                ]),
+            ).order_by(ExecutionRecord.available_at, ExecutionRecord.scheduled_at).limit(1))
+            if active is not None:
+                active.credential_version = version
+                active.credential_payload = payload
+            config["credential_aliases_merged"] = True
+            automation.config_json = json.dumps(config, ensure_ascii=False)
+    return merged_count
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
