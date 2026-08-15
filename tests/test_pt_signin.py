@@ -24,6 +24,7 @@ from autosurf.automations.pt_signin import (
     profile_url_from_cookies,
     pt_signin_history_url,
     pttime_history_url_from_profile,
+    rendered_signin_status_text,
 )
 from autosurf.config import Settings
 from autosurf.application.services import reconcile_pt_site_aliases
@@ -472,6 +473,21 @@ async def test_generic_signin_rechecks_dynamically_rendered_status(tmp_path):
     )
 
     assert result.outcome == RunOutcome.ALREADY_DONE
+
+
+@pytest.mark.asyncio
+async def test_rendered_signin_status_reads_frame_attributes_and_pseudo_content():
+    class Frame:
+        def __init__(self, value):
+            self.value = value
+
+        async def evaluate(self, _script):
+            return self.value
+
+    page = Frame("")
+    page.frames = [page, Frame("Checked in")]
+
+    assert await rendered_signin_status_text(page) == "Checked in"
 
 
 def test_known_pt_routes_and_adapter_domains_are_explicit():

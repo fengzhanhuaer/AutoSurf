@@ -321,6 +321,7 @@ class PtSignInHandler:
                                screenshot: Path) -> RunResult:
         config = context.config
         body = await page_body_text(page)
+        body += "\n" + await rendered_signin_status_text(page)
         outcome = classify_pt_page(page.url, status_code, body, config)
         if outcome:
             return await _classified_page_result(
@@ -348,6 +349,7 @@ class PtSignInHandler:
             with suppress(Exception):
                 await page.wait_for_load_state("networkidle", timeout=5_000)
             body = await page_body_text(page)
+            body += "\n" + await rendered_signin_status_text(page)
             outcome = classify_pt_page(page.url, None, body, config)
             if outcome:
                 return await _classified_page_result(
@@ -360,6 +362,7 @@ class PtSignInHandler:
             with suppress(Exception):
                 await page.wait_for_load_state("networkidle", timeout=3_000)
             body = await page_body_text(page)
+            body += "\n" + await rendered_signin_status_text(page)
             outcome = classify_pt_page(page.url, status_code, body, config)
             if outcome:
                 return await _classified_page_result(
@@ -511,6 +514,35 @@ async def page_body_text(page: Any) -> str:
             text = str(value)[:remaining]
             parts.append(text)
             total += len(text)
+    return "\n".join(parts)
+
+
+async def rendered_signin_status_text(page: Any) -> str:
+    frames = getattr(page, "frames", None) or [page]
+    parts: list[str] = []
+    for frame in frames:
+        with suppress(Exception):
+            value = await frame.evaluate(r"""() => {
+              const status = /(?:checked\s+in|今日已签到|今天已签到|\[已签到\])/i;
+              const result = [];
+              for (const element of document.querySelectorAll('*')) {
+                const values = [
+                  element.getAttribute('title'),
+                  element.getAttribute('aria-label'),
+                  element.getAttribute('value'),
+                  element.getAttribute('data-original-title'),
+                  getComputedStyle(element, '::before').content,
+                  getComputedStyle(element, '::after').content,
+                ];
+                for (const item of values) {
+                  if (item && status.test(item)) result.push(item);
+                }
+                if (result.length >= 20) break;
+              }
+              return result.join('\n');
+            }""")
+            if isinstance(value, str) and value:
+                parts.append(value)
     return "\n".join(parts)
 
 
