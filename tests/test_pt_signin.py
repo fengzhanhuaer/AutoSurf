@@ -22,6 +22,7 @@ from autosurf.automations.pt_signin import (
     page_body_text,
     sanitize_pt_profile_stats,
     profile_url_from_cookies,
+    pt_home_url,
     pt_signin_history_url,
     pttime_history_url_from_profile,
     refresh_pt_profile_page,
@@ -256,6 +257,16 @@ def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknow
     assert signature.reason == "cookie_signature"
     assert signature.url == "https://tracker.test/attendance.php"
     assert discover_pt_site("example.com", {"sid", "theme"}) is None
+
+
+def test_pt_signin_urls_keep_homepage_as_the_first_navigation():
+    assert pt_home_url(
+        "https://pterclub.net/attendance.php"
+    ) == "https://pterclub.net/"
+    assert pt_home_url(
+        "https://club.hares.top/attendance.php?action=sign"
+    ) == "https://club.hares.top/"
+    assert pt_home_url("https://haidan.cc/") == "https://haidan.cc/"
 
 
 def test_52pt_discovery_and_adapter_use_the_current_signin_page():

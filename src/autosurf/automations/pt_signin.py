@@ -295,9 +295,17 @@ class PtSignInHandler:
             page = await browser_context.new_page()
             page.set_default_timeout(timeout_ms)
             try:
+                origin = pt_home_url(url)
+                home_response = await page.goto(
+                    origin, wait_until="domcontentloaded", timeout=timeout_ms,
+                )
                 sign_in_result = None
                 if sign_in_enabled:
-                    response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    response = home_response
+                    if (parsed.path or "/") != "/" or parsed.query:
+                        response = await page.goto(
+                            url, wait_until="domcontentloaded", timeout=timeout_ms,
+                        )
                     adapter = next((item for item in self.adapters if item.matches(url)), None)
                     if adapter:
                         sign_in_result = await adapter.sign_in(page, context)
@@ -305,10 +313,6 @@ class PtSignInHandler:
                         sign_in_result = await self._generic_sign_in(
                             page, context, response.status if response else None, screenshot
                         )
-                else:
-                    origin = f"{parsed.scheme}://{parsed.netloc}/"
-                    await page.goto(origin, wait_until="domcontentloaded", timeout=timeout_ms)
-
                 profile_result = None
                 if profile_refresh_enabled:
                     profile_result = await refresh_pt_profile_page(
@@ -385,6 +389,11 @@ class PtSignInHandler:
             message,
             {"url": page.url, "status_code": status_code, "clicked": clicked, "screenshot": str(screenshot)},
         )
+
+
+def pt_home_url(site_url: str) -> str:
+    parsed = validated_http_url(site_url)
+    return f"{parsed.scheme}://{parsed.netloc}/"
 
 
 def classify_pt_page(url: str, status_code: int | None, body: str,
