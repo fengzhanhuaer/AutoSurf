@@ -7,9 +7,11 @@ import pytest
 from sqlalchemy import select
 
 from autosurf.automations.pt_signin import (
+    FiftyTwoPtAdapter,
     PtSignInHandler,
     classify_pt_page,
     combine_pt_action_results,
+    complete_52pt_slider,
     extract_text_signin_history,
     normalize_site_signin_history,
     normalize_pt_profile_stats,
@@ -226,6 +228,78 @@ def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknow
     assert signature.reason == "cookie_signature"
     assert signature.url == "https://tracker.test/attendance.php"
     assert discover_pt_site("example.com", {"sid", "theme"}) is None
+
+
+def test_52pt_discovery_and_adapter_use_the_current_signin_page():
+    discovery = discover_pt_site("52pt.site", {"sid"})
+    adapter = FiftyTwoPtAdapter()
+
+    assert discovery is not None
+    assert discovery.url == "https://52pt.site/52bakatest0818.php"
+    assert adapter.matches(discovery.url) is True
+    assert adapter.matches("https://www.52pt.site/52bakatest0818.php") is True
+    assert adapter.matches("https://not52pt.site/52bakatest0818.php") is False
+
+
+@pytest.mark.asyncio
+async def test_52pt_slider_uses_rendered_geometry_and_requires_completion():
+    class Element:
+        def __init__(self, box=None, value="", disabled=False):
+            self.first = self
+            self.box = box
+            self.value = value
+            self.disabled = disabled
+
+        async def is_visible(self):
+            return self.box is not None
+
+        async def bounding_box(self):
+            return self.box
+
+        async def input_value(self):
+            return self.value
+
+        async def is_disabled(self):
+            return self.disabled
+
+    class Mouse:
+        def __init__(self):
+            self.calls = []
+
+        async def move(self, x, y, steps=1):
+            self.calls.append(("move", x, y, steps))
+
+        async def down(self):
+            self.calls.append(("down",))
+
+        async def up(self):
+            self.calls.append(("up",))
+
+    class Page:
+        def __init__(self):
+            self.mouse = Mouse()
+            self.elements = {
+                "#slider-container": Element({"x": 100, "y": 50, "width": 300, "height": 40}),
+                "#slider-btn": Element({"x": 102, "y": 52, "width": 50, "height": 36}),
+                "#submit-btn": Element({"x": 100, "y": 100, "width": 300, "height": 40}, disabled=False),
+                "#sign_captcha": Element({"x": 0, "y": 0, "width": 0, "height": 0}, value="generated"),
+            }
+
+        def locator(self, selector):
+            return self.elements[selector]
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = Page()
+
+    assert await complete_52pt_slider(page) is True
+    assert page.mouse.calls == [
+        ("move", 127.0, 70.0, 1),
+        ("down",),
+        ("move", 373.0, 70.0, 24),
+        ("up",),
+    ]
 
 
 def test_hhan_domains_share_one_site_key_and_cookie_alias_group():
@@ -567,6 +641,37 @@ def test_pt_alias_reconciliation_merges_tasks_history_and_active_executions(sett
         )
         assert {cookie["name"] for cookie in browser_cookies} == {"cf_clearance", "c_secure_uid"}
         assert json.loads(tasks[0].config_json)["credential_aliases_merged"] is True
+
+
+def test_pt_reconciliation_updates_catalog_url_only_for_discovered_tasks(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:52pt.site", "52pt.site", {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    discovered = app.state.automations.create(
+        "52PT", "pt_signin", 86400,
+        {
+            "url": "https://52pt.site/attendance.php",
+            "credential_domain": "52pt.site",
+            "discovered": True,
+        },
+        credential.id,
+    )
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions.begin() as session:
+        discovered_config = json.loads(session.get(AutomationRecord, discovered.id).config_json)
+        assert discovered_config["url"] == "https://52pt.site/52bakatest0818.php"
+        discovered_config["url"] = "https://52pt.site/custom-signin.php"
+        discovered_config["discovered"] = False
+        session.get(AutomationRecord, discovered.id).config_json = json.dumps(discovered_config)
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        manual_config = json.loads(session.get(AutomationRecord, discovered.id).config_json)
+        assert manual_config["url"] == "https://52pt.site/custom-signin.php"
 
 
 def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(settings):

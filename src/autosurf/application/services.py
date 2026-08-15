@@ -422,6 +422,11 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                 config = json.loads(automation.config_json)
             except (TypeError, ValueError):
                 config = {}
+            discovery = discover_pt_site(credential.domain, set())
+            if discovery and config.get("discovered") and config.get("url") != discovery.url:
+                config["url"] = discovery.url
+                automation.name = discovery.name
+                automation.config_json = json.dumps(config, ensure_ascii=False)
             if config.get("credential_aliases_merged"):
                 continue
             aliases = pt_site_domain_aliases(credential.domain)

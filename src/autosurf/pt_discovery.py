@@ -32,7 +32,7 @@ class PtSiteDefinition:
 PT_SITE_CATALOG = (
     PtSiteDefinition("pt.hdupt.com", "HDU PT"),
     PtSiteDefinition("pterclub.com", "PterClub"),
-    PtSiteDefinition("52pt.site", "52PT"),
+    PtSiteDefinition("52pt.site", "52PT", "/52bakatest0818.php"),
     PtSiteDefinition("u2.dmhy.org", "U2"),
     PtSiteDefinition("hdarea.club", "HDArea"),
     PtSiteDefinition("hhan.club", "HhanClub", aliases=("hhanclub.net", "hhanclub.top")),

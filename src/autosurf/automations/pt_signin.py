@@ -61,6 +61,81 @@ class PtSiteAdapter(Protocol):
     async def sign_in(self, page: Any, context: RunContext) -> RunResult: ...
 
 
+class FiftyTwoPtAdapter:
+    def matches(self, url: str) -> bool:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        return hostname == "52pt.site" or hostname.endswith(".52pt.site")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome:
+            return await _classified_page_result(page, outcome, page.url, None, context=context)
+
+        if "签到页面已暂停使用" in body or not await page.locator("#slider-btn").count():
+            parsed = validated_http_url(str(context.config["url"]))
+            origin = f"{parsed.scheme}://{parsed.netloc}/"
+            await page.goto(origin, wait_until="domcontentloaded")
+            signin_link = page.locator("#game").first
+            if not await signin_link.is_visible():
+                return RunResult(RunOutcome.FAILED, "52PT 首页没有找到签到入口", {"url": page.url})
+            href = str(await signin_link.get_attribute("href") or "")
+            target = urljoin(page.url, href)
+            target_host = (urlparse(target).hostname or "").lower().rstrip(".")
+            if target_host != "52pt.site" and not target_host.endswith(".52pt.site"):
+                return RunResult(RunOutcome.FAILED, "52PT 签到入口指向了站外地址", {"url": target})
+            await signin_link.click()
+            await page.wait_for_load_state("domcontentloaded")
+
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome:
+            return await _classified_page_result(page, outcome, page.url, None, context=context)
+        if not await complete_52pt_slider(page):
+            return RunResult(RunOutcome.FAILED, "52PT 滑块验证未完成", {"url": page.url})
+
+        submit = page.locator("#submit-btn").first
+        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+            await submit.click()
+        response = await navigation.value
+        status_code = response.status if response else None
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, status_code, body, context.config)
+        if outcome:
+            return await _classified_page_result(
+                page, outcome, page.url, status_code, clicked=True, context=context,
+            )
+        return RunResult(RunOutcome.FAILED, "52PT 提交签到后未识别到结果", {
+            "url": page.url, "status_code": status_code, "clicked": True,
+        })
+
+
+async def complete_52pt_slider(page: Any) -> bool:
+    container = page.locator("#slider-container").first
+    slider = page.locator("#slider-btn").first
+    submit = page.locator("#submit-btn").first
+    captcha = page.locator("#sign_captcha").first
+    if not await container.is_visible() or not await slider.is_visible():
+        return False
+    container_box = await container.bounding_box()
+    slider_box = await slider.bounding_box()
+    if not container_box or not slider_box:
+        return False
+
+    start_x = slider_box["x"] + slider_box["width"] / 2
+    start_y = slider_box["y"] + slider_box["height"] / 2
+    end_x = container_box["x"] + container_box["width"] - slider_box["width"] / 2 - 2
+    if end_x <= start_x:
+        return False
+    await page.mouse.move(start_x, start_y)
+    await page.mouse.down()
+    await page.mouse.move(end_x, start_y, steps=24)
+    await page.mouse.up()
+    await page.wait_for_timeout(100)
+    return bool(await captcha.input_value()) and not await submit.is_disabled()
+
+
 class PtSignInHandler:
     type = "pt_signin"
 
