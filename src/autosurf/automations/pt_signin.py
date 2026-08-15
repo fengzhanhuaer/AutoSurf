@@ -522,6 +522,13 @@ async def rendered_signin_status_text(page: Any) -> str:
     parts: list[str] = []
     for frame in frames:
         with suppress(Exception):
+            locator = frame.locator(
+                "text=/checked\\s+in|今日已签到|今天已签到|\\[已签到\\]/i"
+            )
+            if await locator.count():
+                parts.append("Checked in")
+                continue
+        with suppress(Exception):
             value = await frame.evaluate(r"""() => {
               const status = /(?:checked\s+in|今日已签到|今天已签到|\[已签到\])/i;
               const result = [];

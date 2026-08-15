@@ -490,6 +490,22 @@ async def test_rendered_signin_status_reads_frame_attributes_and_pseudo_content(
     assert await rendered_signin_status_text(page) == "Checked in"
 
 
+@pytest.mark.asyncio
+async def test_rendered_signin_status_uses_playwright_text_locator_for_shadow_dom():
+    class Locator:
+        async def count(self):
+            return 1
+
+    class Frame:
+        frames = None
+
+        def locator(self, selector):
+            assert "checked" in selector
+            return Locator()
+
+    assert await rendered_signin_status_text(Frame()) == "Checked in"
+
+
 def test_known_pt_routes_and_adapter_domains_are_explicit():
     expected = {
         "pt.btschool.club": "https://pt.btschool.club/index.php?action=addbonus",
