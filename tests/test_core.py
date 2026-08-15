@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from autosurf.config import Settings
 from autosurf.domain.models import ExecutionStatus, RunOutcome, RunResult, utc_now
@@ -94,7 +95,8 @@ async def test_management_session_login_and_logout(settings):
         assert session.json() == {"username": settings.username}
         assert app_page.status_code == 200
         assert "CookieCloud" in app_page.text
-        assert "PT 站签到" in app_page.text
+        assert "PT 站点" in app_page.text
+        assert "站点签到" in app_page.text
         assert "系统升级" in app_page.text
         assert "系统设置" in app_page.text
         assert 'id="settings-tab-cookiecloud"' in app_page.text
@@ -298,6 +300,32 @@ def test_expired_running_execution_can_be_reclaimed(settings):
     assert reclaimed.attempts == 2
 
 
+def test_pt_scheduled_execution_is_randomized_and_immediate_run_is_deduplicated(settings):
+    app = create_app(settings)
+    automation = app.state.automations.create(
+        "pt", "pt_signin", 86400,
+        {"url": "https://example.test/attendance.php", "random_delay_minutes": 30},
+    )
+    before = utc_now()
+
+    assert app.state.queue.enqueue_due() == 1
+    with app.state.sessions() as session:
+        scheduled = session.scalar(select(ExecutionRecord).where(
+            ExecutionRecord.automation_id == automation.id
+        ))
+        assert scheduled is not None
+        assert before <= scheduled.available_at <= utc_now() + timedelta(minutes=30)
+
+    immediate = app.state.queue.enqueue_now(automation.id)
+    with app.state.sessions() as session:
+        records = session.scalars(select(ExecutionRecord).where(
+            ExecutionRecord.automation_id == automation.id
+        )).all()
+        assert len(records) == 1
+        assert records[0].id == immediate.id == scheduled.id
+        assert records[0].available_at <= utc_now()
+
+
 def test_execution_keeps_credential_snapshot(settings):
     app = create_app(settings)
     credential = app.state.credentials.upsert("snapshot", "example.test", {"sid": "old"})
@@ -330,3 +358,36 @@ async def test_failed_handler_outcome_is_not_recorded_as_success(settings):
         assert record.error == "Cookie expired"
         assert record.result_json is not None
         assert __import__("json").loads(record.result_json)["outcome"] == "auth_expired"
+
+
+@pytest.mark.asyncio
+async def test_pt_retry_policy_uses_configured_fixed_interval_and_retry_count(settings):
+    class FailedPtHandler:
+        type = "pt_signin"
+
+        async def run(self, _context):
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Cookie expired")
+
+    app = create_app(settings)
+    app.state.registry._handlers["pt_signin"] = FailedPtHandler()
+    automation = app.state.automations.create(
+        "failure", "pt_signin", 86400,
+        {"url": "https://example.test", "max_retries": 5, "retry_interval_minutes": 120},
+    )
+    execution = app.state.queue.enqueue_now(automation.id)
+
+    assert await app.state.execution.run_one() is True
+    with app.state.sessions() as session:
+        first_retry = session.get(ExecutionRecord, execution.id)
+        assert first_retry.status == ExecutionStatus.RETRY_WAIT
+        assert timedelta(minutes=119) <= first_retry.available_at - utc_now() <= timedelta(minutes=120)
+
+    for _ in range(5):
+        with app.state.sessions.begin() as session:
+            session.get(ExecutionRecord, execution.id).available_at = utc_now() - timedelta(seconds=1)
+        assert await app.state.execution.run_one() is True
+
+    with app.state.sessions() as session:
+        record = session.get(ExecutionRecord, execution.id)
+        assert record.status == ExecutionStatus.FAILED
+        assert record.attempts == 6

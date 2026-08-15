@@ -17,7 +17,7 @@
       <nav class="nav" aria-label="管理导航">
         <a class="nav-item active" href="/app#pt-signin" data-view="pt-signin" aria-current="page">
           <span class="nav-icon" aria-hidden="true">P</span>
-          <span>PT 站签到</span>
+          <span>PT 站点</span>
         </a>
         <a class="nav-item" href="/app#cookiecloud" data-view="cookiecloud">
           <span class="nav-icon" aria-hidden="true">S</span>
@@ -37,8 +37,8 @@
     <main class="workspace">
       <header class="page-header">
         <div>
-          <h1 id="page-title">PT 站签到</h1>
-          <p id="page-description">PT 站点与执行记录</p>
+          <h1 id="page-title">PT 站点</h1>
+          <p id="page-description">站点管理与自动化</p>
         </div>
         <button class="icon-button" id="refresh-button" type="button" title="刷新" aria-label="刷新">
           <span aria-hidden="true">↻</span>
@@ -56,7 +56,14 @@
         </button>
       </div>
 
-      <section class="settings-panel" id="pt-signin-panel">
+      <div class="settings-tabs" id="pt-tabs" role="tablist" aria-label="PT 站点">
+        <button class="settings-tab active" id="pt-tab-signin" type="button" role="tab"
+                aria-selected="true" aria-controls="pt-signin-panel" data-pt-tab="signin">
+          站点签到
+        </button>
+      </div>
+
+      <section class="settings-panel" id="pt-signin-panel" role="tabpanel" aria-labelledby="pt-tab-signin">
         <section class="summary-strip" aria-label="签到概况">
           <div class="summary-item">
             <span class="summary-label">发现站点</span>
@@ -97,6 +104,18 @@
                   <option value="120">120 秒</option>
                 </select>
               </label>
+              <label>
+                <span>随机（分）</span>
+                <input id="pt-collect-random-delay" type="number" min="0" max="1440" value="30" aria-label="随机延迟分钟">
+              </label>
+              <label>
+                <span>重试（时）</span>
+                <input id="pt-collect-retry-interval" type="number" min="1" max="168" value="2" aria-label="重试间隔小时">
+              </label>
+              <label>
+                <span>重试次数</span>
+                <input id="pt-collect-max-retries" type="number" min="0" max="20" value="5" aria-label="最大重试次数">
+              </label>
             </div>
           </div>
           <div class="discovery-actions">
@@ -112,7 +131,7 @@
         </section>
 
         <details class="manual-site-panel">
-          <summary>手动添加未识别站点 <span id="pt-unknown-count">0</span></summary>
+          <summary>手动添加自定义站点 <span id="pt-unknown-count">0</span></summary>
           <section class="panel config-panel" aria-labelledby="pt-config-title">
             <div class="panel-heading">
               <div>
@@ -143,6 +162,20 @@
                 <label class="field">
                   <span>超时（秒）</span>
                   <input id="pt-timeout" name="timeout_seconds" type="number" min="5" max="180" value="60" required>
+                </label>
+              </div>
+              <div class="form-grid scheduling-grid">
+                <label class="field">
+                  <span>随机延迟（分钟）</span>
+                  <input id="pt-random-delay" name="random_delay_minutes" type="number" min="0" max="1440" value="30" required>
+                </label>
+                <label class="field">
+                  <span>重试间隔（小时）</span>
+                  <input id="pt-retry-interval" name="retry_interval_hours" type="number" min="1" max="168" value="2" required>
+                </label>
+                <label class="field">
+                  <span>重试次数</span>
+                  <input id="pt-max-retries" name="max_retries" type="number" min="0" max="20" value="5" required>
                 </label>
               </div>
               <details class="advanced-settings">
@@ -184,13 +217,36 @@
             <div><h2 id="pt-history-title">执行记录</h2></div>
           </div>
           <div class="table-wrap">
-            <table>
-              <thead><tr><th>任务</th><th>域名</th><th>计划时间</th><th>状态</th><th>结果</th></tr></thead>
-              <tbody id="pt-history-rows"><tr><td class="empty" colspan="5">暂无执行记录</td></tr></tbody>
+            <table class="history-table">
+              <thead><tr id="pt-history-head"><th>站点</th><th>今日</th></tr></thead>
+              <tbody id="pt-history-rows"><tr><td class="empty" colspan="9">暂无签到任务</td></tr></tbody>
             </table>
           </div>
         </section>
       </section>
+
+      <dialog class="schedule-dialog" id="pt-schedule-dialog" aria-labelledby="pt-schedule-title">
+        <form id="pt-schedule-form" method="dialog">
+          <div class="dialog-heading">
+            <div>
+              <h2 id="pt-schedule-title">签到调度</h2>
+              <p id="pt-schedule-site">站点</p>
+            </div>
+            <button class="dialog-close" id="pt-schedule-cancel" type="button" aria-label="关闭" title="关闭">×</button>
+          </div>
+          <div class="dialog-fields">
+            <label class="field"><span>执行周期（小时）</span><input id="pt-schedule-interval" type="number" min="1" max="720" required></label>
+            <label class="field"><span>随机延迟（分钟）</span><input id="pt-schedule-random-delay" type="number" min="0" max="1440" required></label>
+            <label class="field"><span>页面超时（秒）</span><input id="pt-schedule-timeout" type="number" min="5" max="180" required></label>
+            <label class="field"><span>重试间隔（小时）</span><input id="pt-schedule-retry-interval" type="number" min="1" max="168" required></label>
+            <label class="field"><span>重试次数</span><input id="pt-schedule-max-retries" type="number" min="0" max="20" required></label>
+          </div>
+          <div class="dialog-actions">
+            <button class="button secondary" id="pt-schedule-dismiss" type="button">取消</button>
+            <button class="button primary" type="submit">保存</button>
+          </div>
+        </form>
+      </dialog>
 
       <section class="settings-panel" id="cookiecloud-settings-panel" role="tabpanel"
                aria-labelledby="settings-tab-cookiecloud" hidden>

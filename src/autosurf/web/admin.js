@@ -3,7 +3,7 @@ const state = {
   credentials: [],
   ptCandidates: [],
   ptSites: [],
-  ptExecutions: [],
+  ptHistory: { today: null, days: [], items: [], latest_execution: null },
   ptSelection: new Set(),
   selected: "",
   activeView: "pt-signin",
@@ -15,6 +15,7 @@ const elements = {
   pageDescription: document.querySelector("#page-description"),
   navItems: document.querySelectorAll("[data-view]"),
   settingsTabList: document.querySelector("#settings-tabs"),
+  ptTabList: document.querySelector("#pt-tabs"),
   settingsTabs: document.querySelectorAll("[data-settings-tab]"),
   ptPanel: document.querySelector("#pt-signin-panel"),
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
@@ -39,6 +40,9 @@ const elements = {
   ptUrl: document.querySelector("#pt-url"),
   ptInterval: document.querySelector("#pt-interval"),
   ptTimeout: document.querySelector("#pt-timeout"),
+  ptRandomDelay: document.querySelector("#pt-random-delay"),
+  ptRetryInterval: document.querySelector("#pt-retry-interval"),
+  ptMaxRetries: document.querySelector("#pt-max-retries"),
   ptClickSelector: document.querySelector("#pt-click-selector"),
   ptSuccessPatterns: document.querySelector("#pt-success-patterns"),
   ptAlreadyPatterns: document.querySelector("#pt-already-patterns"),
@@ -48,9 +52,23 @@ const elements = {
   ptCollectButton: document.querySelector("#pt-collect-button"),
   ptCollectInterval: document.querySelector("#pt-collect-interval"),
   ptCollectTimeout: document.querySelector("#pt-collect-timeout"),
+  ptCollectRandomDelay: document.querySelector("#pt-collect-random-delay"),
+  ptCollectRetryInterval: document.querySelector("#pt-collect-retry-interval"),
+  ptCollectMaxRetries: document.querySelector("#pt-collect-max-retries"),
   ptUnknownCount: document.querySelector("#pt-unknown-count"),
   ptSiteRows: document.querySelector("#pt-site-rows"),
   ptHistoryRows: document.querySelector("#pt-history-rows"),
+  ptHistoryHead: document.querySelector("#pt-history-head"),
+  ptScheduleDialog: document.querySelector("#pt-schedule-dialog"),
+  ptScheduleForm: document.querySelector("#pt-schedule-form"),
+  ptScheduleSite: document.querySelector("#pt-schedule-site"),
+  ptScheduleInterval: document.querySelector("#pt-schedule-interval"),
+  ptScheduleRandomDelay: document.querySelector("#pt-schedule-random-delay"),
+  ptScheduleTimeout: document.querySelector("#pt-schedule-timeout"),
+  ptScheduleRetryInterval: document.querySelector("#pt-schedule-retry-interval"),
+  ptScheduleMaxRetries: document.querySelector("#pt-schedule-max-retries"),
+  ptScheduleCancel: document.querySelector("#pt-schedule-cancel"),
+  ptScheduleDismiss: document.querySelector("#pt-schedule-dismiss"),
   upgradeStartButton: document.querySelector("#upgrade-start-button"),
   upgradeRevision: document.querySelector("#upgrade-revision"),
   upgradeRemoteRevision: document.querySelector("#upgrade-remote-revision"),
@@ -120,6 +138,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
   elements.upgradePanel.hidden = activeView !== "upgrade";
   elements.settingsTabList.hidden = !systemView;
+  elements.ptTabList.hidden = systemView;
 
   for (const item of elements.navItems) {
     const active = item.dataset.view === "pt-signin" ? !systemView : systemView;
@@ -138,8 +157,8 @@ async function setActiveView(value, { syncHash = true } = {}) {
     elements.pageTitle.textContent = "系统设置";
     elements.pageDescription.textContent = "CookieCloud、程序与浏览器运行时";
   } else {
-    elements.pageTitle.textContent = "PT 站签到";
-    elements.pageDescription.textContent = "PT 站点与执行记录";
+    elements.pageTitle.textContent = "PT 站点";
+    elements.pageDescription.textContent = "站点管理与自动化";
   }
   const refreshLabels = {
     "pt-signin": "刷新签到任务",
@@ -190,8 +209,11 @@ function lineValues(value) {
 
 function renderPtCredentialOptions() {
   const selected = elements.ptCredential.value;
+  const candidateIds = new Set(state.ptCandidates
+    .filter((item) => item.recognized && !item.configured)
+    .map((item) => item.credential.id));
   const credentials = state.credentials
-    .filter((item) => item.provider === "cookiecloud")
+    .filter((item) => item.provider === "cookiecloud" && candidateIds.has(item.id))
     .sort((left, right) => left.domain.localeCompare(right.domain));
   elements.ptCredential.replaceChildren(new Option("请选择凭据", ""));
   for (const item of credentials) {
@@ -214,7 +236,7 @@ function applyPtCredentialSuggestion() {
 function renderPtSummary() {
   document.querySelector("#pt-discovered-count").textContent = state.ptCandidates.filter((item) => item.recognized).length;
   document.querySelector("#pt-enabled-count").textContent = state.ptSites.filter((item) => item.enabled).length;
-  const latest = state.ptExecutions[0];
+  const latest = state.ptHistory.latest_execution;
   document.querySelector("#pt-recent-state").textContent = latest
     ? `${statusLabel(latest.status)} · ${latest.automation_name}`
     : "暂无记录";
@@ -242,10 +264,10 @@ function updatePtCollectControls() {
 }
 
 function renderPtCandidates() {
-  const recognized = state.ptCandidates.filter((item) => item.recognized);
+  const recognized = state.ptCandidates.filter((item) => item.recognized && !item.configured);
   const validIds = new Set(selectablePtCandidates().map((item) => item.credential.id));
   state.ptSelection = new Set([...state.ptSelection].filter((id) => validIds.has(id)));
-  elements.ptUnknownCount.textContent = state.ptCandidates.filter((item) => !item.recognized).length;
+  elements.ptUnknownCount.textContent = recognized.length;
   elements.ptCandidateRows.replaceChildren();
   if (!recognized.length) {
     elements.ptCandidateRows.innerHTML = '<tr><td class="empty" colspan="5">暂无识别到的 PT 站点</td></tr>';
@@ -316,6 +338,11 @@ function renderPtSites() {
     enabled.setAttribute("aria-label", `${site.name} 启用`);
     enabled.addEventListener("change", () => setPtSiteEnabled(site.id, enabled.checked));
     enabledLabel.append(enabled, document.createTextNode("启用"));
+    const settings = document.createElement("button");
+    settings.type = "button";
+    settings.className = "table-button";
+    settings.textContent = "设置";
+    settings.addEventListener("click", () => openPtSchedule(site));
     const run = document.createElement("button");
     run.type = "button";
     run.className = "table-button";
@@ -326,36 +353,101 @@ function renderPtSites() {
     remove.className = "table-button danger";
     remove.textContent = "删除";
     remove.addEventListener("click", () => deletePtSite(site));
-    actions.append(enabledLabel, run, remove);
+    actions.append(enabledLabel, settings, run, remove);
     actionsCell.append(actions);
     row.append(actionsCell);
     elements.ptSiteRows.append(row);
   }
 }
 
+function historyState(execution) {
+  if (!execution) return { key: "empty", icon: "−", label: "未记录" };
+  const outcome = execution.result?.outcome;
+  if (outcome === "success") return { key: "success", icon: "✓", label: "签到成功" };
+  if (outcome === "already_done") return { key: "success", icon: "✓", label: "今日已签到" };
+  if (outcome === "blocked") return { key: "warning", icon: "!", label: "访问被拦截" };
+  if (outcome === "auth_expired") return { key: "failed", icon: "×", label: "登录已失效" };
+  if (execution.status === "running") return { key: "running", icon: "↻", label: "执行中" };
+  if (execution.status === "pending") return { key: "pending", icon: "…", label: "等待执行" };
+  if (execution.status === "retry_wait") return { key: "warning", icon: "↻", label: "等待重试" };
+  if (execution.status === "succeeded") return { key: "success", icon: "✓", label: "成功" };
+  return { key: "failed", icon: "×", label: statusLabel(execution.status) };
+}
+
+function historyTitle(date, execution) {
+  const state = historyState(execution);
+  return `${date} · ${execution ? resultText(execution) : state.label}`;
+}
+
 function renderPtHistory() {
+  const days = state.ptHistory.days || [];
+  elements.ptHistoryHead.replaceChildren();
+  for (const label of ["站点", "今日", ...days.map((item) => item.label)]) {
+    const heading = document.createElement("th");
+    heading.textContent = label;
+    elements.ptHistoryHead.append(heading);
+  }
+
   elements.ptHistoryRows.replaceChildren();
-  if (!state.ptExecutions.length) {
-    elements.ptHistoryRows.innerHTML = '<tr><td class="empty" colspan="5">暂无执行记录</td></tr>';
+  if (!state.ptHistory.items.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.className = "empty";
+    cell.colSpan = days.length + 2;
+    cell.textContent = "暂无签到任务";
+    row.append(cell);
+    elements.ptHistoryRows.append(row);
     return;
   }
-  for (const execution of state.ptExecutions) {
+
+  for (const site of state.ptHistory.items) {
     const row = document.createElement("tr");
-    for (const value of [execution.automation_name, execution.domain || "暂无", formatDate(execution.scheduled_at)]) {
+    const siteCell = document.createElement("td");
+    const siteDetails = document.createElement("div");
+    siteDetails.className = "history-site";
+    const siteName = document.createElement("strong");
+    siteName.textContent = site.name;
+    const count = document.createElement("small");
+    count.textContent = `${site.record_count} 条记录`;
+    siteDetails.append(siteName, count);
+    siteCell.append(siteDetails);
+    row.append(siteCell);
+
+    const todayExecution = site.executions[state.ptHistory.today];
+    const todayState = historyState(todayExecution);
+    const todayCell = document.createElement("td");
+    const todayBadge = document.createElement("span");
+    todayBadge.className = `history-today ${todayState.key}`;
+    todayBadge.textContent = todayState.label;
+    todayBadge.title = historyTitle(state.ptHistory.today, todayExecution);
+    todayCell.append(todayBadge);
+    row.append(todayCell);
+
+    for (const day of days) {
+      const execution = site.executions[day.date];
+      const itemState = historyState(execution);
       const cell = document.createElement("td");
-      cell.textContent = value;
+      const dot = document.createElement("span");
+      dot.className = `history-dot ${itemState.key}`;
+      dot.textContent = itemState.icon;
+      dot.title = historyTitle(day.date, execution);
+      dot.setAttribute("aria-label", historyTitle(day.date, execution));
+      cell.append(dot);
       row.append(cell);
     }
-    const statusCell = document.createElement("td");
-    statusCell.append(statusBadge(execution.status));
-    row.append(statusCell);
-    const resultCell = document.createElement("td");
-    resultCell.className = "result-cell";
-    resultCell.textContent = resultText(execution);
-    resultCell.title = resultText(execution);
-    row.append(resultCell);
     elements.ptHistoryRows.append(row);
   }
+}
+
+function openPtSchedule(site) {
+  elements.ptScheduleDialog.dataset.siteId = site.id;
+  elements.ptScheduleSite.textContent = site.name;
+  elements.ptScheduleInterval.value = site.interval_hours;
+  elements.ptScheduleRandomDelay.value = site.config.random_delay_minutes ?? 30;
+  elements.ptScheduleTimeout.value = site.config.timeout_seconds ?? 60;
+  elements.ptScheduleRetryInterval.value = site.config.retry_interval_hours ?? 2;
+  elements.ptScheduleMaxRetries.value = site.config.max_retries ?? 5;
+  elements.ptScheduleDialog.showModal();
 }
 
 function renderPt() {
@@ -545,18 +637,19 @@ function renderCookieCloud() {
 async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
-    const [sources, credentials, ptCandidates, ptSites, ptExecutions] = await Promise.all([
+    const timezoneOffset = -new Date().getTimezoneOffset();
+    const [sources, credentials, ptCandidates, ptSites, ptHistory] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
-      api("/api/v1/pt-signin/executions"),
+      api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
     ]);
     state.sources = sources.items;
     state.credentials = credentials.items;
     state.ptCandidates = ptCandidates.items;
     state.ptSites = ptSites.items;
-    state.ptExecutions = ptExecutions.items;
+    state.ptHistory = ptHistory;
     if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
     if (!state.selected && state.sources.length === 1) state.selected = state.sources[0].uuid;
     renderCookieCloud();
@@ -589,11 +682,46 @@ elements.ptCollectButton.addEventListener("click", async () => {
         credential_ids: [...state.ptSelection],
         interval_hours: Number(elements.ptCollectInterval.value),
         timeout_seconds: Number(elements.ptCollectTimeout.value),
+        random_delay_minutes: Number(elements.ptCollectRandomDelay.value),
+        retry_interval_hours: Number(elements.ptCollectRetryInterval.value),
+        max_retries: Number(elements.ptCollectMaxRetries.value),
       }),
     });
     state.ptSelection.clear();
     await refresh({ quiet: true });
     showToast(`已添加 ${result.created.length} 个签到站点`);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+function closePtSchedule() {
+  elements.ptScheduleDialog.close();
+}
+
+elements.ptScheduleCancel.addEventListener("click", closePtSchedule);
+elements.ptScheduleDismiss.addEventListener("click", closePtSchedule);
+elements.ptScheduleForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const siteId = elements.ptScheduleDialog.dataset.siteId;
+  if (!siteId) return;
+  setBusy(true);
+  try {
+    await api(`/api/v1/pt-signin/sites/${encodeURIComponent(siteId)}/schedule`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        interval_hours: Number(elements.ptScheduleInterval.value),
+        timeout_seconds: Number(elements.ptScheduleTimeout.value),
+        random_delay_minutes: Number(elements.ptScheduleRandomDelay.value),
+        retry_interval_hours: Number(elements.ptScheduleRetryInterval.value),
+        max_retries: Number(elements.ptScheduleMaxRetries.value),
+      }),
+    });
+    closePtSchedule();
+    await refresh({ quiet: true });
+    showToast("签到调度已保存");
   } catch (error) {
     showToast(error.message, true);
   } finally {
@@ -615,6 +743,9 @@ elements.ptForm.addEventListener("submit", async (event) => {
         url: elements.ptUrl.value.trim(),
         interval_hours: Number(elements.ptInterval.value),
         timeout_seconds: Number(elements.ptTimeout.value),
+        random_delay_minutes: Number(elements.ptRandomDelay.value),
+        retry_interval_hours: Number(elements.ptRetryInterval.value),
+        max_retries: Number(elements.ptMaxRetries.value),
         click_selector: elements.ptClickSelector.value.trim() || null,
         success_patterns: lineValues(elements.ptSuccessPatterns.value),
         already_patterns: lineValues(elements.ptAlreadyPatterns.value),

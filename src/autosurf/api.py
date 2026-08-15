@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+from datetime import datetime, timedelta
 import hashlib
 import hmac
 from importlib.metadata import PackageNotFoundError, version
@@ -14,7 +15,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
@@ -64,6 +65,9 @@ class PtSignInInput(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     interval_hours: int = Field(default=24, ge=1, le=720)
     timeout_seconds: int = Field(default=60, ge=5, le=180)
+    random_delay_minutes: int = Field(default=30, ge=0, le=1440)
+    retry_interval_hours: int = Field(default=2, ge=1, le=168)
+    max_retries: int = Field(default=5, ge=0, le=20)
     click_selector: str | None = Field(default=None, max_length=1024)
     success_patterns: list[str] = Field(default_factory=list, max_length=20)
     already_patterns: list[str] = Field(default_factory=list, max_length=20)
@@ -77,6 +81,17 @@ class PtSignInCollectInput(BaseModel):
     credential_ids: list[str] = Field(min_length=1, max_length=200)
     interval_hours: int = Field(default=24, ge=1, le=720)
     timeout_seconds: int = Field(default=60, ge=5, le=180)
+    random_delay_minutes: int = Field(default=30, ge=0, le=1440)
+    retry_interval_hours: int = Field(default=2, ge=1, le=168)
+    max_retries: int = Field(default=5, ge=0, le=20)
+
+
+class PtSignInScheduleInput(BaseModel):
+    interval_hours: int = Field(default=24, ge=1, le=720)
+    timeout_seconds: int = Field(default=60, ge=5, le=180)
+    random_delay_minutes: int = Field(default=30, ge=0, le=1440)
+    retry_interval_hours: int = Field(default=2, ge=1, le=168)
+    max_retries: int = Field(default=5, ge=0, le=20)
 
 
 class LoginInput(BaseModel):
@@ -448,6 +463,9 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
         "url": data.url,
         "credential_domain": credential_domain,
         "timeout_seconds": data.timeout_seconds,
+        "random_delay_minutes": data.random_delay_minutes,
+        "retry_interval_minutes": data.retry_interval_hours * 60,
+        "max_retries": data.max_retries,
         "click_selector": data.click_selector or None,
         "success_patterns": data.success_patterns,
         "already_patterns": data.already_patterns,
@@ -505,6 +523,9 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
             "url": candidate["url"],
             "credential_domain": candidate["credential"]["domain"],
             "timeout_seconds": data.timeout_seconds,
+            "random_delay_minutes": data.random_delay_minutes,
+            "retry_interval_minutes": data.retry_interval_hours * 60,
+            "max_retries": data.max_retries,
             "click_selector": None,
             "success_patterns": [],
             "already_patterns": [],
@@ -532,6 +553,24 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
                 "reason": "already_configured",
             } for item in skipped],
         }
+
+
+@router.patch("/pt-signin/sites/{automation_id}/schedule")
+def set_pt_signin_schedule(automation_id: str, data: PtSignInScheduleInput,
+                           request: Request) -> dict[str, Any]:
+    with request.app.state.sessions.begin() as session:
+        record = _require_pt_automation(session.get(AutomationRecord, automation_id))
+        config = json.loads(record.config_json)
+        config.update({
+            "timeout_seconds": data.timeout_seconds,
+            "random_delay_minutes": data.random_delay_minutes,
+            "retry_interval_minutes": data.retry_interval_hours * 60,
+            "max_retries": data.max_retries,
+        })
+        record.interval_seconds = data.interval_hours * 3600
+        record.config_json = json.dumps(config, ensure_ascii=False)
+        session.flush()
+        return _pt_signin_site_view(record, None)
 
 
 @router.patch("/pt-signin/sites/{automation_id}/enabled")
@@ -572,6 +611,61 @@ def list_pt_signin_executions(request: Request, limit: int = 50) -> dict[str, An
             AutomationRecord.handler_type == "pt_signin"
         ).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
         return {"items": [_pt_execution_view(item) for item in records]}
+
+
+@router.get("/pt-signin/history")
+def pt_signin_history(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=31),
+    timezone_offset: int = Query(default=0, ge=-840, le=840),
+) -> dict[str, Any]:
+    offset = timedelta(minutes=timezone_offset)
+    local_today = (utc_now() + offset).date()
+    date_values = [local_today - timedelta(days=index) for index in range(days)]
+    window_start = datetime.combine(date_values[-1], datetime.min.time()) - offset
+
+    with request.app.state.sessions() as session:
+        sites = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(AutomationRecord.name)).all()
+        site_ids = [site.id for site in sites]
+        executions = session.scalars(select(ExecutionRecord).where(
+            ExecutionRecord.automation_id.in_(site_ids),
+            ExecutionRecord.scheduled_at >= window_start,
+        ).order_by(ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc())).all() if site_ids else []
+        latest = session.scalar(select(ExecutionRecord).join(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc()).limit(1))
+
+        date_keys = {value.isoformat() for value in date_values}
+        daily: dict[str, dict[str, ExecutionRecord]] = {site.id: {} for site in sites}
+        record_counts = {site.id: 0 for site in sites}
+        for execution in executions:
+            day = (execution.scheduled_at + offset).date().isoformat()
+            if day not in date_keys:
+                continue
+            record_counts[execution.automation_id] += 1
+            daily[execution.automation_id].setdefault(day, execution)
+
+        return {
+            "today": local_today.isoformat(),
+            "days": [{
+                "date": value.isoformat(),
+                "label": f"{value.month}/{value.day}",
+                "is_today": value == local_today,
+            } for value in date_values],
+            "items": [{
+                "automation_id": site.id,
+                "name": site.name,
+                "domain": site.credential.domain if site.credential else None,
+                "enabled": site.enabled,
+                "record_count": record_counts[site.id],
+                "executions": {
+                    day: execution_view(execution) for day, execution in daily[site.id].items()
+                },
+            } for site in sites],
+            "latest_execution": _pt_execution_view(latest) if latest else None,
+        }
 
 
 def _validate_pt_url(url: str, credential_domain: str) -> None:
@@ -654,6 +748,9 @@ def _pt_signin_site_view(record: AutomationRecord | None,
         } if credential else None,
         "config": {
             "timeout_seconds": config.get("timeout_seconds", 60),
+            "random_delay_minutes": config.get("random_delay_minutes", 30),
+            "retry_interval_hours": max(int(config.get("retry_interval_minutes", 120)) // 60, 1),
+            "max_retries": config.get("max_retries", 5),
             "click_selector": config.get("click_selector"),
             "success_patterns": config.get("success_patterns", []),
             "already_patterns": config.get("already_patterns", []),

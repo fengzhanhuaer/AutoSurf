@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import timedelta
 from typing import Any
 from uuid import uuid4
@@ -115,6 +116,15 @@ class QueueService:
             )).all()
             for automation in due:
                 scheduled_at = automation.next_run_at
+                random_delay_seconds = 0
+                if automation.handler_type == "pt_signin":
+                    try:
+                        config = json.loads(automation.config_json)
+                    except (TypeError, ValueError):
+                        config = {}
+                    random_delay_minutes = _bounded_int(config.get("random_delay_minutes"), 30, 0, 1440)
+                    if random_delay_minutes:
+                        random_delay_seconds = secrets.randbelow(random_delay_minutes * 60 + 1)
                 exists = session.scalar(select(ExecutionRecord.id).where(
                     ExecutionRecord.automation_id == automation.id,
                     ExecutionRecord.scheduled_at == scheduled_at,
@@ -122,7 +132,7 @@ class QueueService:
                 if exists is None:
                     session.add(ExecutionRecord(id=str(uuid4()), automation_id=automation.id,
                                                 scheduled_at=scheduled_at, status=ExecutionStatus.PENDING,
-                                                available_at=now, attempts=0,
+                                                available_at=now + timedelta(seconds=random_delay_seconds), attempts=0,
                                                 credential_version=automation.credential.version if automation.credential else None,
                                                 credential_payload=automation.credential.encrypted_payload if automation.credential else None))
                     count += 1
@@ -136,6 +146,20 @@ class QueueService:
             automation = session.get(AutomationRecord, automation_id)
             if automation is None:
                 raise ValueError("automation does not exist")
+            existing = session.scalar(select(ExecutionRecord).where(
+                ExecutionRecord.automation_id == automation.id,
+                or_(
+                    ExecutionRecord.status.in_([
+                        ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.RETRY_WAIT,
+                    ]),
+                    ExecutionRecord.scheduled_at >= now - timedelta(minutes=5),
+                ),
+            ).order_by(ExecutionRecord.scheduled_at.desc()).limit(1))
+            if existing is not None:
+                if existing.status in {ExecutionStatus.PENDING, ExecutionStatus.RETRY_WAIT}:
+                    existing.available_at = now
+                session.flush()
+                return existing
             execution = ExecutionRecord(id=str(uuid4()), automation_id=automation.id, scheduled_at=now,
                                         status=ExecutionStatus.PENDING, available_at=now, attempts=0,
                                         credential_version=automation.credential.version if automation.credential else None,
@@ -170,7 +194,8 @@ class QueueService:
                 record.lease_until = None
 
     def fail(self, execution_id: str, error: str, max_attempts: int = 3,
-             result: dict[str, Any] | None = None) -> None:
+             result: dict[str, Any] | None = None,
+             retry_interval_seconds: int | None = None) -> None:
         now = utc_now()
         with self.sessions.begin() as session:
             record = session.get(ExecutionRecord, execution_id)
@@ -181,7 +206,10 @@ class QueueService:
             record.lease_until = None
             if record.attempts < max_attempts:
                 record.status = ExecutionStatus.RETRY_WAIT
-                record.available_at = now + timedelta(seconds=30 * (2 ** (record.attempts - 1)))
+                delay = retry_interval_seconds
+                if delay is None:
+                    delay = 30 * (2 ** (record.attempts - 1))
+                record.available_at = now + timedelta(seconds=max(delay, 1))
             else:
                 record.status = ExecutionStatus.FAILED
                 record.finished_at = now
@@ -199,16 +227,26 @@ class ExecutionService:
         claimed = self.queue.claim()
         if claimed is None:
             return False
+        max_attempts = 3
+        retry_interval_seconds = None
         try:
             with self.sessions() as session:
                 execution = session.get(ExecutionRecord, claimed.id)
                 if execution is None:
                     raise RuntimeError("claimed execution disappeared")
                 automation = execution.automation
+                automation_config = json.loads(automation.config_json)
+                if automation.handler_type == "pt_signin":
+                    max_retries = _bounded_int(automation_config.get("max_retries"), 5, 0, 20)
+                    retry_minutes = _bounded_int(
+                        automation_config.get("retry_interval_minutes"), 120, 1, 10080
+                    )
+                    max_attempts = max_retries + 1
+                    retry_interval_seconds = retry_minutes * 60
                 cookies, browser_cookies = self.credentials.credential_values_from_payload(
                     execution.credential_payload
                 )
-                context = RunContext(execution_id=execution.id, config=json.loads(automation.config_json),
+                context = RunContext(execution_id=execution.id, config=automation_config,
                                      cookies=cookies, browser_cookies=browser_cookies)
                 handler = self.registry.get(automation.handler_type)
             result = await handler.run(context)
@@ -216,7 +254,21 @@ class ExecutionService:
             if result.outcome in {RunOutcome.SUCCESS, RunOutcome.ALREADY_DONE}:
                 self.queue.succeed(claimed.id, result_payload)
             else:
-                self.queue.fail(claimed.id, result.message, result=result_payload)
+                self.queue.fail(
+                    claimed.id, result.message, max_attempts=max_attempts,
+                    result=result_payload, retry_interval_seconds=retry_interval_seconds,
+                )
         except Exception as exc:
-            self.queue.fail(claimed.id, f"{type(exc).__name__}: {exc}")
+            self.queue.fail(
+                claimed.id, f"{type(exc).__name__}: {exc}", max_attempts=max_attempts,
+                retry_interval_seconds=retry_interval_seconds,
+            )
         return True
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(max(parsed, minimum), maximum)

@@ -1,9 +1,15 @@
+from datetime import datetime, timedelta
+import json
+from uuid import uuid4
+
 import httpx
 import pytest
 
 from autosurf.automations.pt_signin import PtSignInHandler, classify_pt_page
 from autosurf.config import Settings
 from autosurf.domain.models import RunContext, RunOutcome
+from autosurf.domain.models import utc_now
+from autosurf.infrastructure.database import ExecutionRecord
 from autosurf.main import create_app
 from autosurf.pt_discovery import discover_pt_site
 
@@ -118,6 +124,15 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
         assert site["config"]["success_patterns"] == ["签到完成"]
 
         listed = await client.get("/api/v1/pt-signin/sites", auth=auth)
+        scheduled = await client.patch(
+            f"/api/v1/pt-signin/sites/{site_id}/schedule", auth=auth, json={
+                "interval_hours": 12,
+                "timeout_seconds": 45,
+                "random_delay_minutes": 30,
+                "retry_interval_hours": 2,
+                "max_retries": 5,
+            },
+        )
         disabled = await client.patch(
             f"/api/v1/pt-signin/sites/{site_id}/enabled", auth=auth, json={"enabled": False}
         )
@@ -129,6 +144,10 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     assert wrong_provider.status_code == 422
     assert cross_domain.status_code == 422
     assert listed.json()["items"][0]["id"] == site_id
+    assert scheduled.json()["interval_hours"] == 12
+    assert scheduled.json()["config"]["random_delay_minutes"] == 30
+    assert scheduled.json()["config"]["retry_interval_hours"] == 2
+    assert scheduled.json()["config"]["max_retries"] == 5
     assert disabled.json()["enabled"] is False
     assert queued.status_code == 202
     assert history.json()["items"][0]["automation_name"] == "Tracker"
@@ -211,3 +230,64 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
     assert collected_again.json()["created"] == []
     assert len(collected_again.json()["skipped"]) == 2
     assert sum(item["configured"] for item in refreshed.json()["items"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:tracker.test", "tracker.test", {"sid": "secret"}, provider="cookiecloud"
+    )
+    site = app.state.automations.create(
+        "Tracker", "pt_signin", 86400,
+        {"url": "https://tracker.test/attendance.php", "credential_domain": "tracker.test"},
+        credential.id,
+    )
+    empty_site = app.state.automations.create(
+        "Empty", "pt_signin", 86400,
+        {"url": "https://tracker.test/attendance.php", "credential_domain": "tracker.test"},
+        credential.id,
+    )
+    offset = timedelta(minutes=480)
+    local_today = (utc_now() + offset).date()
+    today_start_utc = datetime.combine(local_today, datetime.min.time()) - offset
+    yesterday_start_utc = today_start_utc - timedelta(days=1)
+
+    def execution(scheduled_at, status, message=None):
+        return ExecutionRecord(
+            id=str(uuid4()), automation_id=site.id, scheduled_at=scheduled_at,
+            status=status, attempts=1, available_at=scheduled_at,
+            result_json=json.dumps({"outcome": "success", "message": message}) if message else None,
+            error=None if message else "temporary failure",
+        )
+
+    with app.state.sessions.begin() as session:
+        session.add_all([
+            execution(yesterday_start_utc + timedelta(hours=3), "retry_wait"),
+            execution(today_start_utc + timedelta(hours=1), "failed"),
+            execution(today_start_utc + timedelta(hours=2), "succeeded", "签到成功"),
+        ])
+
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/pt-signin/history?days=7&timezone_offset=480", auth=auth
+        )
+        invalid = await client.get(
+            "/api/v1/pt-signin/history?timezone_offset=900", auth=auth
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["today"] == local_today.isoformat()
+    assert len(payload["days"]) == 7
+    assert payload["days"][0]["is_today"] is True
+    by_id = {item["automation_id"]: item for item in payload["items"]}
+    assert by_id[site.id]["record_count"] == 3
+    assert by_id[site.id]["executions"][local_today.isoformat()]["status"] == "succeeded"
+    assert by_id[site.id]["executions"][local_today.isoformat()]["result"]["message"] == "签到成功"
+    assert by_id[empty_site.id]["record_count"] == 0
+    assert by_id[empty_site.id]["executions"] == {}
+    assert payload["latest_execution"]["automation_name"] == "Tracker"
+    assert invalid.status_code == 422
