@@ -966,6 +966,40 @@ def test_pt_reconciliation_migrates_capabilities_and_current_domain(settings):
         assert execution.status == "pending"
 
 
+def test_pt_reconciliation_rebinds_old_task_to_current_domain_credential(settings):
+    app = create_app(settings)
+    old = app.state.credentials.upsert(
+        "cookiecloud:test:www.haidan.video", "www.haidan.video", {"sid": "old"},
+        provider="cookiecloud",
+    )
+    current = app.state.credentials.upsert(
+        "cookiecloud:test:www.haidan.cc", "www.haidan.cc",
+        {"c_secure_uid": "7", "sid": "current"}, provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "Haidan (旧域名)", "pt_signin", 86400, {
+            "url": "https://www.haidan.video/attendance.php",
+            "credential_domain": "www.haidan.video",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+            "discovered": True,
+        }, old.id,
+    )
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        migrated = session.get(AutomationRecord, task.id)
+        config = json.loads(migrated.config_json)
+        assert migrated.name == "Haidan"
+        assert migrated.credential_id == current.id
+        assert migrated.credential.domain == "www.haidan.cc"
+        assert config["url"] == "https://haidan.cc/"
+        assert config["credential_domain"] == "haidan.cc"
+        assert config["sign_in_enabled"] is False
+        assert config["profile_refresh_enabled"] is True
+
+
 def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(settings):
     app = create_app(settings)
     tasks = []

@@ -419,6 +419,27 @@ def test_immediate_retry_refreshes_waiting_credential_snapshot(settings):
         assert app.state.credentials.cookies_from_payload(row.credential_payload) == {"sid": "new"}
 
 
+def test_immediate_run_creates_new_execution_after_terminal_result(settings):
+    app = create_app(settings)
+    automation = app.state.automations.create(
+        "retry", "http_signin", 3600, {"url": "https://example.test"}
+    )
+    completed = app.state.queue.enqueue_now(automation.id)
+    app.state.queue.fail(completed.id, "failed", max_attempts=0)
+
+    retried = app.state.queue.enqueue_now(automation.id)
+
+    assert retried.id != completed.id
+    assert retried.status == ExecutionStatus.PENDING
+    with app.state.sessions() as session:
+        records = session.scalars(select(ExecutionRecord).where(
+            ExecutionRecord.automation_id == automation.id
+        )).all()
+        assert {record.status for record in records} == {
+            ExecutionStatus.FAILED, ExecutionStatus.PENDING,
+        }
+
+
 @pytest.mark.asyncio
 async def test_failed_handler_outcome_is_not_recorded_as_success(settings):
     class FailedHandler:

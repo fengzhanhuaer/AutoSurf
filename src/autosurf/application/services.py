@@ -201,12 +201,9 @@ class QueueService:
                 raise ValueError("automation does not exist")
             existing = session.scalar(select(ExecutionRecord).where(
                 ExecutionRecord.automation_id == automation.id,
-                or_(
-                    ExecutionRecord.status.in_([
-                        ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.RETRY_WAIT,
-                    ]),
-                    ExecutionRecord.scheduled_at >= now - timedelta(minutes=5),
-                ),
+                ExecutionRecord.status.in_([
+                    ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.RETRY_WAIT,
+                ]),
             ).order_by(ExecutionRecord.scheduled_at.desc()).limit(1))
             if existing is not None:
                 if existing.status in {ExecutionStatus.PENDING, ExecutionStatus.RETRY_WAIT}:
@@ -425,8 +422,39 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
             discovery = discover_pt_site(credential.domain, set())
             if discovery and config.get("discovered"):
                 changed = False
+                aliases = pt_site_domain_aliases(credential.domain)
+                related = session.scalars(select(CredentialRecord).where(
+                    CredentialRecord.provider == "cookiecloud",
+                    CredentialRecord.domain.in_(aliases),
+                )).all()
+                current_credentials = [
+                    item for item in related
+                    if item.domain.removeprefix("www.") == discovery.site_key
+                ]
+                if current_credentials:
+                    def current_score(item: CredentialRecord) -> tuple[int, int, bool, Any, str]:
+                        try:
+                            cookie_names = set(credentials.cookies_for(item))
+                        except ValueError:
+                            cookie_names = set()
+                        return (
+                            len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
+                            len(cookie_names),
+                            item.domain.startswith("www."),
+                            item.updated_at,
+                            item.id,
+                        )
+
+                    preferred = max(current_credentials, key=current_score)
+                    if automation.credential_id != preferred.id:
+                        automation.credential = preferred
+                        credential = preferred
+                        changed = True
                 if config.get("url") != discovery.url:
                     config["url"] = discovery.url
+                    changed = True
+                if config.get("credential_domain") != discovery.site_key:
+                    config["credential_domain"] = discovery.site_key
                     changed = True
                 if automation.name != discovery.name:
                     automation.name = discovery.name
