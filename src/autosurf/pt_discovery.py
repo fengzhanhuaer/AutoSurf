@@ -31,8 +31,7 @@ class PtSiteDefinition:
 # cover NexusPHP sites that are not listed here.
 PT_SITE_CATALOG = (
     PtSiteDefinition("pt.hdupt.com", "HDU PT"),
-    PtSiteDefinition("pterclub.net", "PterClub"),
-    PtSiteDefinition("pterclub.com", "PterClub (旧域名)", "/", "custom_required"),
+    PtSiteDefinition("pterclub.net", "PterClub", aliases=("pterclub.com",)),
     PtSiteDefinition("52pt.site", "52PT", "/52bakatest0818.php"),
     PtSiteDefinition("u2.dmhy.org", "U2"),
     PtSiteDefinition("hdarea.club", "HDArea", "/"),
@@ -44,19 +43,20 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("ptchdbits.co", "CHDBits", "/bakatest.php"),
     PtSiteDefinition("hdcity.city", "HDCity", "/"),
     PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
-    PtSiteDefinition("rousi.pro", "Rousi", "/", "custom_required"),
-    PtSiteDefinition("rousi.zip", "Rousi (旧域名)", "/", "custom_required"),
+    PtSiteDefinition("rousi.pro", "Rousi", "/", "custom_required", aliases=("rousi.zip",)),
     PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "custom_required"),
     PtSiteDefinition("totheglory.im", "TTG"),
     PtSiteDefinition(
         "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
     ),
     PtSiteDefinition("yemapt.org", "YemaPT"),
-    PtSiteDefinition("haidan.cc", "Haidan", "/", "profile_refresh_only"),
-    PtSiteDefinition("haidan.video", "Haidan (旧域名)", "/", "custom_required"),
+    PtSiteDefinition(
+        "haidan.cc", "Haidan", "/", "profile_refresh_only", aliases=("haidan.video",),
+    ),
     PtSiteDefinition("open.cd", "OpenCD", "/"),
     PtSiteDefinition("hdchina.org", "HDChina"),
     PtSiteDefinition("hdsky.me", "HDSky", "/"),
+    PtSiteDefinition("hdvideo.top", "HDVideo", "/"),
     PtSiteDefinition("nanyangpt.com", "NanyangPT", "/", "profile_refresh_only"),
     PtSiteDefinition("et8.org", "TCCF", "/", "profile_refresh_only"),
     PtSiteDefinition("pt.eastgame.org", "TLFBits", "/", "profile_refresh_only"),
@@ -104,15 +104,10 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
     lowered_names = {str(name).lower() for name in cookie_names}
     markers = lowered_names.intersection(PT_COOKIE_MARKERS)
     if definition:
-        matched_domain = next(
-            alias for alias in (definition.domain, *definition.aliases)
-            if _domain_matches(normalized_domain, alias)
-        )
-        target_domain = (
-            matched_domain
-            if matched_domain == normalized_domain or matched_domain.endswith(f".{normalized_domain}")
-            else normalized_domain
-        )
+        # Always navigate to the catalog's current domain. Alias credentials are
+        # still merged into the same site, but retired domains are never used as
+        # automation targets.
+        target_domain = definition.domain
         return PtDiscovery(
             site_key=definition.domain,
             name=definition.name,

@@ -427,6 +427,32 @@ def test_hhan_domains_share_one_site_key_and_cookie_alias_group():
     }
 
 
+@pytest.mark.parametrize(
+    ("current_domain", "old_domain", "name"),
+    [
+        ("pterclub.net", "pterclub.com", "PterClub"),
+        ("rousi.pro", "rousi.zip", "Rousi"),
+        ("haidan.cc", "haidan.video", "Haidan"),
+    ],
+)
+def test_retired_domains_resolve_to_current_site(current_domain, old_domain, name):
+    current = discover_pt_site(current_domain, {"c_secure_uid"})
+    old = discover_pt_site(old_domain, {"c_secure_uid"})
+
+    assert current is not None
+    assert old is not None
+    assert current.site_key == old.site_key == current_domain
+    assert current.name == old.name == name
+    assert current.url.startswith(f"https://{current_domain}/")
+    assert old.url.startswith(f"https://{current_domain}/")
+    assert set(pt_site_domain_aliases(old_domain)) == {
+        current_domain,
+        f"www.{current_domain}",
+        old_domain,
+        f"www.{old_domain}",
+    }
+
+
 def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     discovery = discover_pt_site("zhuque.in", {"c_secure_uid"})
     rousi = discover_pt_site("rousi.pro", {"sid"})
@@ -445,6 +471,15 @@ def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     assert mteam is not None
     assert mteam.name == "M-Team"
     assert mteam.strategy == "custom_required"
+
+
+def test_hdvideo_uses_current_catalog_domain():
+    discovery = discover_pt_site("www.hdvideo.top", {"c_secure_uid"})
+
+    assert discovery is not None
+    assert discovery.site_key == "hdvideo.top"
+    assert discovery.name == "HDVideo"
+    assert discovery.url == "https://hdvideo.top/"
 
 
 @pytest.mark.asyncio
@@ -638,7 +673,7 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
     assert by_id[refresh_only.id]["profile_refresh_supported"] is True
     assert by_id[refresh_only.id]["profile_url"] == "https://zhuque.in/user/info"
     assert by_id[pttime_www.id]["name"] == "PTTime"
-    assert by_id[pttime_www.id]["url"] == "https://www.pttime.org/attendance.php"
+    assert by_id[pttime_www.id]["url"] == "https://pttime.org/attendance.php"
     assert set(by_id[pttime_www.id]["credential_ids"]) == {pttime_root.id, pttime_www.id}
     assert "c_secure_uid" not in candidates.text
     assert "secret" not in candidates.text
@@ -785,13 +820,13 @@ def test_pt_reconciliation_updates_catalog_url_only_for_discovered_tasks(setting
         assert manual_config["url"] == "https://52pt.site/custom-signin.php"
 
 
-def test_pt_reconciliation_migrates_capabilities_and_cancels_unsupported_tasks(settings):
+def test_pt_reconciliation_migrates_capabilities_and_current_domain(settings):
     app = create_app(settings)
     refresh_credential = app.state.credentials.upsert(
         "cookiecloud:test:nanyangpt.com", "nanyangpt.com", {"sid": "secret"},
         provider="cookiecloud",
     )
-    parked_credential = app.state.credentials.upsert(
+    old_domain_credential = app.state.credentials.upsert(
         "cookiecloud:test:pterclub.com", "pterclub.com", {"sid": "secret"},
         provider="cookiecloud",
     )
@@ -806,7 +841,7 @@ def test_pt_reconciliation_migrates_capabilities_and_cancels_unsupported_tasks(s
             "discovered": True,
         }, refresh_credential.id,
     )
-    parked_task = app.state.automations.create(
+    old_domain_task = app.state.automations.create(
         "PterClub", "pt_signin", 86400, {
             "url": "https://pterclub.com/attendance.php",
             "credential_domain": "pterclub.com",
@@ -815,26 +850,28 @@ def test_pt_reconciliation_migrates_capabilities_and_cancels_unsupported_tasks(s
             "sign_in_supported": True,
             "profile_refresh_supported": True,
             "discovered": True,
-        }, parked_credential.id,
+        }, old_domain_credential.id,
     )
-    parked_execution = app.state.queue.enqueue_now(parked_task.id)
+    old_domain_execution = app.state.queue.enqueue_now(old_domain_task.id)
 
     reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
 
     with app.state.sessions() as session:
         refreshed = session.get(AutomationRecord, refresh_task.id)
         refresh_config = json.loads(refreshed.config_json)
-        parked = session.get(AutomationRecord, parked_task.id)
-        parked_config = json.loads(parked.config_json)
-        execution = session.get(ExecutionRecord, parked_execution.id)
+        migrated = session.get(AutomationRecord, old_domain_task.id)
+        migrated_config = json.loads(migrated.config_json)
+        execution = session.get(ExecutionRecord, old_domain_execution.id)
         assert refresh_config["url"] == "https://nanyangpt.com/"
         assert refresh_config["sign_in_enabled"] is False
         assert refresh_config["profile_refresh_enabled"] is True
         assert refresh_config["sign_in_supported"] is False
-        assert parked.enabled is False
-        assert parked_config["sign_in_supported"] is False
-        assert parked_config["profile_refresh_supported"] is False
-        assert execution.status == "cancelled"
+        assert migrated.enabled is True
+        assert migrated.name == "PterClub"
+        assert migrated_config["url"] == "https://pterclub.net/attendance.php"
+        assert migrated_config["sign_in_supported"] is True
+        assert migrated_config["profile_refresh_supported"] is True
+        assert execution.status == "pending"
 
 
 def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(settings):
