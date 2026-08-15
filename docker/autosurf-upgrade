@@ -43,6 +43,13 @@ if [ -f "$pid_file" ]; then
 fi
 
 {
+    branch=${AUTOSURF_BRANCH:-main}
+    git -c "safe.directory=$program_dir" -C "$program_dir" check-ref-format --branch "$branch"
+    git -c "safe.directory=$program_dir" -C "$program_dir" fetch --prune origin \
+        "+refs/heads/$branch:refs/remotes/origin/$branch"
+    git -c "safe.directory=$program_dir" -C "$program_dir" reset --hard \
+        "refs/remotes/origin/$branch"
+    git -c "safe.directory=$program_dir" -C "$program_dir" clean -fd
     "$venv_dir/bin/autosurf" upgrade --repository "$program_dir"
     "$venv_dir/bin/python" -m playwright install chromium
 } >> "$log_file" 2>&1

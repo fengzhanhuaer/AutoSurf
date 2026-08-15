@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -21,12 +22,24 @@ class UpgradeResult:
 def upgrade(settings: Settings, repository: Path | None = None) -> UpgradeResult:
     repository = (repository or Path.cwd()).resolve()
     _ensure_git_repository(repository)
-    if _git(repository, "status", "--porcelain").strip():
-        raise RuntimeError("working tree has uncommitted changes; commit or stash them before upgrading")
-
     previous = _git(repository, "rev-parse", "HEAD").strip()
+    branch = os.environ.get("AUTOSURF_BRANCH", "main").strip()
+    if not branch:
+        raise RuntimeError("AUTOSURF_BRANCH cannot be empty")
+    _git(repository, "check-ref-format", "--branch", branch)
+    remote_ref = f"refs/remotes/origin/{branch}"
+    _git(
+        repository,
+        "fetch",
+        "--prune",
+        "origin",
+        f"+refs/heads/{branch}:{remote_ref}",
+    )
+
     backup = _backup_database(settings.data_dir)
-    _run(repository, "git", "pull", "--ff-only")
+    _git(repository, "reset", "--hard", remote_ref)
+    # Preserve ignored runtime state such as .venv while removing local source additions.
+    _git(repository, "clean", "-fd")
     current = _git(repository, "rev-parse", "HEAD").strip()
     _run(repository, sys.executable, "-m", "pip", "install", "--upgrade", "-e", ".")
     upgrade_database(settings.database_url)

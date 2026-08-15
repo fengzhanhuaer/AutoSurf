@@ -73,7 +73,7 @@ For normal upgrades, use the authenticated management page or keep the Docker sh
 docker exec autosurf autosurf-upgrade
 ```
 
-The helper gracefully stops only the AutoSurf application process, backs up SQLite, fast-forward pulls `./autosurf_program`, updates its isolated Python environment, installs the matching browser into `./browser`, applies migrations, and asks the shell to start the new version. The container and all mounted directories remain in place.
+The helper gracefully stops only the AutoSurf application process, backs up SQLite, force-aligns `./autosurf_program` to `origin/$AUTOSURF_BRANCH`, updates its isolated Python environment, installs the matching browser into `./browser`, applies migrations, and asks the shell to start the new version. The container and all mounted directories remain in place. Remote source is authoritative during upgrades: tracked local changes and untracked non-ignored files inside `./autosurf_program` are deleted. Ignored runtime state such as `.venv` and the separately mounted `data` and `browser` directories is preserved.
 
 In the management page, open **系统设置 > 系统升级**, review the program and browser versions, then choose **开始升级**. The page follows the application restart and reports the persisted result. Only one upgrade can run at a time.
 
@@ -232,7 +232,7 @@ For a local Python installation, AutoSurf provides an upgrade command:
 .venv\Scripts\autosurf upgrade --repository D:\Code\AutoSurf
 ```
 
-The command requires a clean Git working tree, creates a timestamped SQLite backup under `data/backups`, performs a fast-forward-only pull, updates installed Python dependencies, and applies database migrations. Restart the running service after it completes. If AutoSurf runs as a Windows service, restart it through the same service manager that starts it.
+The command creates a timestamped SQLite backup under `data/backups`, fetches the configured `AUTOSURF_BRANCH` (default `main`), force-resets the checkout to that remote branch, removes untracked non-ignored files, updates installed Python dependencies, and applies database migrations. Local source changes in the selected repository are intentionally discarded. Restart the running service after it completes. If AutoSurf runs as a Windows service, restart it through the same service manager that starts it.
 
 ## Current boundaries
 
