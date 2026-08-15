@@ -51,6 +51,8 @@ CHALLENGE_PATTERNS = (
     r"just\s+a\s+moment",
     r"attention\s+required",
     r"验证您是真人",
+    r"雷池\s*WAF",
+    r"客户端异常.{0,24}合法用户",
 )
 COMMON_BUTTON_PATTERNS = (
     re.compile(r"^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$", re.IGNORECASE),
@@ -76,12 +78,17 @@ class FiftyTwoPtAdapter:
         if outcome:
             return await _classified_page_result(page, outcome, page.url, None, context=context)
 
-        if "签到页面已暂停使用" in body or not await page.locator("#slider-btn").count():
+        sign_in_paused = "签到页面已暂停使用" in body
+        if sign_in_paused or not await page.locator("#slider-btn").count():
             parsed = validated_http_url(str(context.config["url"]))
             origin = f"{parsed.scheme}://{parsed.netloc}/"
             await page.goto(origin, wait_until="domcontentloaded")
             signin_link = page.locator("#game").first
             if not await signin_link.is_visible():
+                if sign_in_paused and await discover_pt_profile_url(page):
+                    return _classified_result(
+                        RunOutcome.ALREADY_DONE, page.url, None, clicked=False,
+                    )
                 return RunResult(RunOutcome.FAILED, "52PT 首页没有找到签到入口", {"url": page.url})
             href = str(await signin_link.get_attribute("href") or "")
             target = urljoin(page.url, href)
@@ -433,6 +440,11 @@ def _classified_result(outcome: RunOutcome, url: str, status_code: int | None,
 
 async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
                                   credential_domain: str, timeout_ms: int) -> RunResult:
+    current_body = await page_body_text(page)
+    current_outcome = classify_pt_page(page.url, None, current_body, context.config)
+    if current_outcome in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
+        return _classified_result(current_outcome, page.url, None)
+
     configured = str(context.config.get("profile_url") or "").strip()
     if not configured:
         discovery = discover_pt_site(urlparse(site_url).hostname or "", set(context.cookies))

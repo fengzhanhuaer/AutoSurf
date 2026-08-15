@@ -24,6 +24,7 @@ from autosurf.automations.pt_signin import (
     profile_url_from_cookies,
     pt_signin_history_url,
     pttime_history_url_from_profile,
+    refresh_pt_profile_page,
     rendered_signin_status_text,
 )
 from autosurf.config import Settings
@@ -82,6 +83,11 @@ def test_pt_page_classification_distinguishes_common_results():
     assert classify_pt_page(
         "https://tjupt.org/attendance.php", 200, interrupted
     ) == RunOutcome.FAILED
+    assert classify_pt_page(
+        "https://www.hdkyl.in/attendance.php",
+        468,
+        "安全检测能力由 雷池 WAF 驱动，客户端异常，请确认您是合法用户",
+    ) == RunOutcome.BLOCKED
 
 
 def test_pt_profile_url_and_combined_action_results():
@@ -275,6 +281,79 @@ async def test_btschool_adapter_treats_authenticated_empty_reward_as_already_don
 
     assert adapter.matches(Page.url) is True
     assert result.outcome == RunOutcome.ALREADY_DONE
+
+
+@pytest.mark.asyncio
+async def test_52pt_missing_home_entry_after_paused_page_is_already_done():
+    class Locator:
+        first = None
+
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        async def inner_text(self):
+            return "签到页面已暂停使用" if self.page.url.endswith("52bakatest0818.php") else "欢迎回来"
+
+        async def count(self):
+            return 0
+
+        async def is_visible(self):
+            return False
+
+    class Page:
+        url = "https://52pt.site/52bakatest0818.php"
+        frames = None
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+
+        async def evaluate(self, _script):
+            return "https://52pt.site/userdetails.php?id=7"
+
+    page = Page()
+    result = await FiftyTwoPtAdapter().sign_in(page, RunContext(
+        "test", {"url": page.url}, {"sid": "secret"},
+    ))
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+
+
+@pytest.mark.asyncio
+async def test_profile_refresh_reports_login_redirect_as_auth_expired():
+    class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        async def inner_text(self):
+            return "请登录 用户名 密码"
+
+        async def count(self):
+            return 0
+
+    class Page:
+        url = "https://www.haidan.cc/login.php"
+        frames = None
+
+        def locator(self, selector):
+            return Locator(selector)
+
+        async def evaluate(self, _script):
+            return ""
+
+    result = await refresh_pt_profile_page(
+        Page(),
+        RunContext("test", {"url": "https://haidan.cc/"}, {"sid": "secret"}),
+        "https://haidan.cc/",
+        "haidan.cc",
+        30_000,
+    )
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
 
 
 @pytest.mark.asyncio
