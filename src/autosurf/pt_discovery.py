@@ -56,7 +56,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("open.cd", "OpenCD", "/"),
     PtSiteDefinition("hdchina.org", "HDChina"),
     PtSiteDefinition("hdsky.me", "HDSky", "/"),
-    PtSiteDefinition("hdvideo.top", "HDVideo", "/"),
+    PtSiteDefinition("hdvideo.top", "HDVideo", "/attendance.php"),
     PtSiteDefinition("nanyangpt.com", "NanyangPT", "/", "profile_refresh_only"),
     PtSiteDefinition("et8.org", "TCCF", "/", "profile_refresh_only"),
     PtSiteDefinition("pt.eastgame.org", "TLFBits", "/", "profile_refresh_only"),

@@ -731,7 +731,28 @@ def test_hdvideo_uses_current_catalog_domain():
     assert discovery is not None
     assert discovery.site_key == "hdvideo.top"
     assert discovery.name == "HDVideo"
-    assert discovery.url == "https://hdvideo.top/"
+    assert discovery.url == "https://hdvideo.top/attendance.php"
+
+
+def test_hdvideo_discovered_task_migrates_to_attendance_page(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:hdvideo.top", "hdvideo.top", {"c_secure_uid": "7"},
+        provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "HDVideo", "pt_signin", 86400, {
+            "url": "https://hdvideo.top/",
+            "credential_domain": "hdvideo.top",
+            "discovered": True,
+        }, credential.id,
+    )
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        config = json.loads(session.get(AutomationRecord, task.id).config_json)
+        assert config["url"] == "https://hdvideo.top/attendance.php"
 
 
 @pytest.mark.asyncio
