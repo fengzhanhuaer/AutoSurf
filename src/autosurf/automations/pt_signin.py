@@ -353,6 +353,18 @@ class PtSignInHandler:
                 return await _classified_page_result(
                     page, outcome, page.url, status_code, clicked=True, context=context
                 )
+        else:
+            # Some trackers render their user/status toolbar after DOMContentLoaded.
+            # Recheck once before declaring that no sign-in state or control exists.
+            await page.wait_for_timeout(1_500)
+            with suppress(Exception):
+                await page.wait_for_load_state("networkidle", timeout=3_000)
+            body = await page_body_text(page)
+            outcome = classify_pt_page(page.url, status_code, body, config)
+            if outcome:
+                return await _classified_page_result(
+                    page, outcome, page.url, status_code, context=context
+                )
 
         await _save_screenshot(page, screenshot)
         message = "页面中没有找到签到入口" if not clicked else "签到后未识别到成功结果"

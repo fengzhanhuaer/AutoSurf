@@ -425,6 +425,55 @@ async def test_frame_text_and_profile_discovery_include_child_frames():
     assert await discover_pt_profile_url(page) == "https://hdcity.city/user.php?id=7"
 
 
+@pytest.mark.asyncio
+async def test_generic_signin_rechecks_dynamically_rendered_status(tmp_path):
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return "Checked in" if self.page.waited else "Home"
+
+    class MissingControls:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def filter(self, **_kwargs):
+            return self
+
+        async def count(self):
+            return 0
+
+    class Page:
+        url = "https://hdcity.city/"
+        frames = None
+        waited = False
+
+        def locator(self, selector):
+            return Body(self) if selector == "body" else MissingControls()
+
+        async def wait_for_timeout(self, _milliseconds):
+            self.waited = True
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, _script):
+            return []
+
+    page = Page()
+    result = await PtSignInHandler()._generic_sign_in(
+        page,
+        RunContext("test", {"url": page.url}, {"sid": "secret"}),
+        200,
+        tmp_path / "failed.png",
+    )
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+
+
 def test_known_pt_routes_and_adapter_domains_are_explicit():
     expected = {
         "pt.btschool.club": "https://pt.btschool.club/index.php?action=addbonus",
