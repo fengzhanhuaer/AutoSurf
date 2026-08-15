@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from autosurf.automations.browser_session import playwright_cookies, validated_http_url
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
+from autosurf.pt_discovery import discover_pt_site
 
 
 DEFAULT_ALREADY_PATTERNS = (
@@ -70,8 +71,25 @@ class PtSignInHandler:
         config = context.config
         url = str(config["url"])
         parsed = validated_http_url(url)
-        sign_in_enabled = bool(config.get("sign_in_enabled", True))
-        profile_refresh_enabled = bool(config.get("profile_refresh_enabled", False))
+        discovery = discover_pt_site(parsed.hostname or "", set(context.cookies))
+        catalog_sign_in_supported = discovery.sign_in_supported if discovery else True
+        catalog_profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
+        sign_in_supported = bool(config.get(
+            "sign_in_supported", catalog_sign_in_supported,
+        )) and catalog_sign_in_supported
+        profile_refresh_supported = bool(config.get(
+            "profile_refresh_supported", catalog_profile_refresh_supported,
+        )) and catalog_profile_refresh_supported
+        sign_in_enabled = bool(config.get("sign_in_enabled", True)) and sign_in_supported
+        profile_refresh_enabled = (
+            bool(config.get("profile_refresh_enabled", False)) and profile_refresh_supported
+        )
+        if (
+            discovery
+            and discovery.default_profile_refresh_enabled
+            and "profile_refresh_supported" not in config
+        ):
+            profile_refresh_enabled = True
         if not sign_in_enabled and not profile_refresh_enabled:
             return RunResult(RunOutcome.FAILED, "PT 站点未启用签到或个人信息刷新")
         credential_domain = str(config.get("credential_domain") or "").lower().lstrip(".")
@@ -230,6 +248,9 @@ def _classified_result(outcome: RunOutcome, url: str, status_code: int | None,
 async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
                                   credential_domain: str, timeout_ms: int) -> RunResult:
     configured = str(context.config.get("profile_url") or "").strip()
+    if not configured:
+        discovery = discover_pt_site(urlparse(site_url).hostname or "", set(context.cookies))
+        configured = discovery.profile_url if discovery and discovery.profile_url else ""
     profile_url = urljoin(site_url, configured) if configured else await discover_pt_profile_url(page)
     if not profile_url:
         profile_url = profile_url_from_cookies(site_url, context.cookies)

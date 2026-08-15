@@ -242,14 +242,18 @@ def test_hhan_domains_share_one_site_key_and_cookie_alias_group():
     }
 
 
-def test_pt_discovery_marks_api_only_sites_for_a_dedicated_adapter():
+def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     discovery = discover_pt_site("zhuque.in", {"c_secure_uid"})
     rousi = discover_pt_site("rousi.pro", {"sid"})
     mteam = discover_pt_site("kp.m-team.cc", {"token"})
 
     assert discovery is not None
-    assert discovery.strategy == "custom_required"
-    assert discovery.supported is False
+    assert discovery.strategy == "profile_refresh_only"
+    assert discovery.supported is True
+    assert discovery.sign_in_supported is False
+    assert discovery.profile_refresh_supported is True
+    assert discovery.default_profile_refresh_enabled is True
+    assert discovery.profile_url == "https://zhuque.in/user/info"
     assert rousi is not None
     assert rousi.name == "Rousi"
     assert rousi.strategy == "custom_required"
@@ -378,9 +382,12 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
         {"sid": "secret"},
         provider="cookiecloud",
     )
+    refresh_only = app.state.credentials.upsert(
+        "cookiecloud:test:zhuque.in", "zhuque.in", {"sid": "secret"}, provider="cookiecloud",
+    )
     unsupported = app.state.credentials.upsert(
-        "cookiecloud:test:zhuque.in",
-        "zhuque.in",
+        "cookiecloud:test:rousi.pro",
+        "rousi.pro",
         {"sid": "secret"},
         provider="cookiecloud",
     )
@@ -412,10 +419,21 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
             "credential_ids": [unsupported.id],
         })
         collected = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
-            "credential_ids": [recognized.id, recognized.id, catalog.id, pttime_root.id, pttime_www.id],
+            "credential_ids": [
+                recognized.id, recognized.id, catalog.id, refresh_only.id,
+                pttime_root.id, pttime_www.id,
+            ],
             "interval_hours": 12,
             "timeout_seconds": 45,
         })
+        created_zhuque = next(
+            item for item in collected.json()["created"] if item["name"] == "Zhuque"
+        )
+        rejected_sign_in = await client.patch(
+            f"/api/v1/pt-signin/sites/{created_zhuque['id']}/actions",
+            auth=auth,
+            json={"sign_in_enabled": True, "profile_refresh_enabled": True},
+        )
         collected_again = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
             "credential_ids": [recognized.id, catalog.id],
         })
@@ -423,31 +441,44 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
 
     items = candidates.json()["items"]
     by_id = {item["credential"]["id"]: item for item in items}
-    assert set(by_id) == {recognized.id, catalog.id, unknown.id, unsupported.id, pttime_www.id}
+    assert set(by_id) == {
+        recognized.id, catalog.id, unknown.id, refresh_only.id, unsupported.id, pttime_www.id,
+    }
     assert by_id[recognized.id]["reason"] == "cookie_signature"
     assert by_id[catalog.id]["name"] == "TJUPT"
     assert by_id[unknown.id]["recognized"] is False
     assert by_id[unsupported.id]["supported"] is False
+    assert by_id[refresh_only.id]["supported"] is True
+    assert by_id[refresh_only.id]["sign_in_supported"] is False
+    assert by_id[refresh_only.id]["profile_refresh_supported"] is True
+    assert by_id[refresh_only.id]["profile_url"] == "https://zhuque.in/user/info"
     assert by_id[pttime_www.id]["name"] == "PTTime"
     assert by_id[pttime_www.id]["url"] == "https://www.pttime.org/attendance.php"
     assert set(by_id[pttime_www.id]["credential_ids"]) == {pttime_root.id, pttime_www.id}
     assert "c_secure_uid" not in candidates.text
     assert "secret" not in candidates.text
     assert {item["credential"]["id"] for item in recognized_only.json()["items"]} == {
-        recognized.id, catalog.id, unsupported.id, pttime_www.id,
+        recognized.id, catalog.id, refresh_only.id, unsupported.id, pttime_www.id,
     }
     assert rejected.status_code == 422
     assert unsupported_result.status_code == 422
     assert "尚需专用适配" in unsupported_result.json()["detail"]
     assert collected.status_code == 201
-    assert len(collected.json()["created"]) == 3
+    assert len(collected.json()["created"]) == 4
     assert {item["interval_hours"] for item in collected.json()["created"]} == {12}
     assert {item["config"]["timeout_seconds"] for item in collected.json()["created"]} == {45}
     assert collected_again.json()["created"] == []
     assert len(collected_again.json()["skipped"]) == 2
-    assert sum(item["configured"] for item in refreshed.json()["items"]) == 3
+    assert sum(item["configured"] for item in refreshed.json()["items"]) == 4
+    assert rejected_sign_in.status_code == 422
+    assert "没有签到功能" in rejected_sign_in.json()["detail"]
 
     pttime_site = next(item for item in collected.json()["created"] if item["name"] == "PTTime")
+    zhuque_site = next(item for item in collected.json()["created"] if item["name"] == "Zhuque")
+    assert zhuque_site["config"]["sign_in_enabled"] is False
+    assert zhuque_site["config"]["profile_refresh_enabled"] is True
+    assert zhuque_site["config"]["sign_in_supported"] is False
+    assert zhuque_site["url"] == "https://zhuque.in/"
     execution = app.state.queue.enqueue_now(pttime_site["id"])
     with app.state.sessions() as session:
         snapshot = session.get(ExecutionRecord, execution.id).credential_payload
@@ -457,6 +488,41 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
         ("c_secure_uid", "www.pttime.org"),
         ("c_secure_pass", "www.pttime.org"),
     }
+
+
+@pytest.mark.asyncio
+async def test_existing_zhuque_task_migrates_to_refresh_only_and_can_be_disabled(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:zhuque.in", "zhuque.in", {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "Zhuque", "pt_signin", 86400, {
+            "url": "https://zhuque.in/",
+            "credential_domain": "zhuque.in",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": False,
+        }, credential.id,
+    )
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        before = await client.get("/api/v1/pt-signin/sites", auth=auth)
+        disabled = await client.patch(
+            f"/api/v1/pt-signin/sites/{task.id}/actions", auth=auth,
+            json={"sign_in_enabled": False, "profile_refresh_enabled": False},
+        )
+        after = await client.get("/api/v1/pt-signin/sites", auth=auth)
+
+    before_config = before.json()["items"][0]["config"]
+    assert before_config["sign_in_enabled"] is False
+    assert before_config["profile_refresh_enabled"] is True
+    assert before_config["sign_in_supported"] is False
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert after.json()["items"][0]["config"]["profile_refresh_enabled"] is False
 
 
 def test_pt_alias_reconciliation_merges_tasks_history_and_active_executions(settings):

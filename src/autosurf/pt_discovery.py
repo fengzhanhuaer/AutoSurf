@@ -24,6 +24,7 @@ class PtSiteDefinition:
     signin_path: str = "/attendance.php"
     strategy: str = "generic_browser"
     aliases: tuple[str, ...] = ()
+    profile_path: str | None = None
 
 
 # This catalog supplies stable names and known sign-in paths. Cookie signatures
@@ -45,7 +46,9 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("rousi.pro", "Rousi", "/", "custom_required"),
     PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "custom_required"),
     PtSiteDefinition("totheglory.im", "TTG"),
-    PtSiteDefinition("zhuque.in", "Zhuque", "/", "custom_required"),
+    PtSiteDefinition(
+        "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
+    ),
     PtSiteDefinition("yemapt.org", "YemaPT"),
     PtSiteDefinition("haidan.video", "Haidan", "/signin.php"),
     PtSiteDefinition("open.cd", "OpenCD"),
@@ -61,10 +64,27 @@ class PtDiscovery:
     url: str
     reason: str
     strategy: str
+    profile_url: str | None = None
 
     @property
     def supported(self) -> bool:
+        return self.sign_in_supported or self.profile_refresh_supported
+
+    @property
+    def sign_in_supported(self) -> bool:
         return self.strategy == "generic_browser"
+
+    @property
+    def profile_refresh_supported(self) -> bool:
+        return self.strategy in {"generic_browser", "profile_refresh_only"}
+
+    @property
+    def default_sign_in_enabled(self) -> bool:
+        return self.sign_in_supported
+
+    @property
+    def default_profile_refresh_enabled(self) -> bool:
+        return self.strategy == "profile_refresh_only"
 
 
 def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> PtDiscovery | None:
@@ -91,6 +111,10 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
             url=urljoin(f"https://{target_domain}/", definition.signin_path.lstrip("/")),
             reason="site_catalog",
             strategy=definition.strategy,
+            profile_url=(
+                urljoin(f"https://{target_domain}/", definition.profile_path.lstrip("/"))
+                if definition.profile_path else None
+            ),
         )
     if markers:
         return PtDiscovery(

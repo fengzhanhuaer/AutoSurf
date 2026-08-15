@@ -279,11 +279,12 @@ function renderPtSummary() {
     : "暂无记录";
 }
 
-function candidateReasonLabel(reason) {
+function candidateReasonLabel(candidate) {
+  if (candidate.strategy === "profile_refresh_only") return "仅刷新个人信息";
   return ({
     site_catalog: "站点目录",
     cookie_signature: "PT Cookie 特征",
-  })[reason] || "未识别";
+  })[candidate.reason] || "未识别";
 }
 
 function selectablePtCandidates() {
@@ -329,7 +330,7 @@ function renderPtCandidates() {
     selectCell.append(checkbox);
     row.append(selectCell);
 
-    for (const value of [candidate.name, candidate.credential.domain, candidateReasonLabel(candidate.reason)]) {
+    for (const value of [candidate.name, candidate.credential.domain, candidateReasonLabel(candidate)]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -337,7 +338,11 @@ function renderPtCandidates() {
     const statusCell = document.createElement("td");
     const badge = document.createElement("span");
     badge.className = `candidate-state ${candidate.configured ? "configured" : candidate.supported ? "available" : "unsupported"}`;
-    badge.textContent = candidate.configured ? "已添加" : candidate.supported ? "可添加" : "待专用适配";
+    badge.textContent = candidate.configured
+      ? "已添加"
+      : candidate.strategy === "profile_refresh_only"
+        ? "可添加（仅刷新）"
+        : candidate.supported ? "可添加" : "待专用适配";
     statusCell.append(badge);
     row.append(statusCell);
     elements.ptCandidateRows.append(row);
@@ -371,6 +376,9 @@ function renderPtSites() {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = Boolean(site.config[key]);
+      const supportKey = key === "sign_in_enabled" ? "sign_in_supported" : "profile_refresh_supported";
+      checkbox.disabled = site.config[supportKey] === false;
+      if (checkbox.disabled) toggleLabel.title = `${site.name} 不支持${label}`;
       checkbox.setAttribute("aria-label", `${site.name} ${title}`);
       checkbox.addEventListener("change", () => setPtSiteAction(site, key, checkbox.checked));
       toggleLabel.append(checkbox, document.createTextNode(label));

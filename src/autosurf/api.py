@@ -499,6 +499,13 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
             raise HTTPException(status_code=422, detail="请选择 CookieCloud 导入的凭据")
         _validate_pt_url(data.url, credential.domain)
         credential_domain = credential.domain
+        try:
+            cookie_names = set(request.app.state.credentials.cookies_for(credential))
+        except ValueError:
+            cookie_names = set()
+        discovery = discover_pt_site(credential.domain, cookie_names)
+        sign_in_supported = discovery.sign_in_supported if discovery else True
+        profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
     config = {
         "url": data.url,
         "credential_domain": credential_domain,
@@ -509,8 +516,15 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
         "click_selector": data.click_selector or None,
         "success_patterns": data.success_patterns,
         "already_patterns": data.already_patterns,
-        "sign_in_enabled": data.sign_in_enabled,
-        "profile_refresh_enabled": data.profile_refresh_enabled,
+        "sign_in_enabled": data.sign_in_enabled and sign_in_supported,
+        "profile_refresh_enabled": (
+            data.profile_refresh_enabled
+            or bool(discovery and discovery.default_profile_refresh_enabled)
+        ) and profile_refresh_supported,
+        "sign_in_supported": sign_in_supported,
+        "profile_refresh_supported": profile_refresh_supported,
+        "discovery_strategy": discovery.strategy if discovery else None,
+        "profile_url": discovery.profile_url if discovery else None,
     }
     try:
         record = request.app.state.automations.create(
@@ -583,8 +597,14 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
             "click_selector": None,
             "success_patterns": [],
             "already_patterns": [],
-            "sign_in_enabled": data.sign_in_enabled,
-            "profile_refresh_enabled": data.profile_refresh_enabled,
+            "sign_in_enabled": data.sign_in_enabled and candidate["sign_in_supported"],
+            "profile_refresh_enabled": (
+                data.profile_refresh_enabled or candidate["default_profile_refresh_enabled"]
+            ) and candidate["profile_refresh_supported"],
+            "sign_in_supported": candidate["sign_in_supported"],
+            "profile_refresh_supported": candidate["profile_refresh_supported"],
+            "discovery_strategy": candidate["strategy"],
+            "profile_url": candidate["profile_url"],
             "discovered": True,
             "discovery_reason": candidate["reason"],
         }
@@ -648,10 +668,17 @@ def set_pt_site_actions(automation_id: str, data: PtSiteActionsInput,
     with request.app.state.sessions.begin() as session:
         record = _require_pt_automation(session.get(AutomationRecord, automation_id))
         config = json.loads(record.config_json)
+        sign_in_supported, profile_refresh_supported = _pt_site_capabilities(record, config)
+        if data.sign_in_enabled and not sign_in_supported:
+            raise HTTPException(status_code=422, detail="该站点没有签到功能，仅支持刷新个人信息")
+        if data.profile_refresh_enabled and not profile_refresh_supported:
+            raise HTTPException(status_code=422, detail="该站点不支持刷新个人信息")
         was_enabled = record.enabled
         config.update({
             "sign_in_enabled": data.sign_in_enabled,
             "profile_refresh_enabled": data.profile_refresh_enabled,
+            "sign_in_supported": sign_in_supported,
+            "profile_refresh_supported": profile_refresh_supported,
         })
         record.config_json = json.dumps(config, ensure_ascii=False)
         record.enabled = data.sign_in_enabled or data.profile_refresh_enabled
@@ -846,7 +873,14 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
                 "recognized": discovery is not None,
                 "reason": discovery.reason if discovery else "unknown",
                 "strategy": discovery.strategy if discovery else None,
+                "profile_url": discovery.profile_url if discovery else None,
                 "supported": discovery.supported if discovery else False,
+                "sign_in_supported": discovery.sign_in_supported if discovery else False,
+                "profile_refresh_supported": discovery.profile_refresh_supported if discovery else False,
+                "default_sign_in_enabled": discovery.default_sign_in_enabled if discovery else False,
+                "default_profile_refresh_enabled": (
+                    discovery.default_profile_refresh_enabled if discovery else False
+                ),
                 "configured": automation_id is not None,
                 "automation_id": automation_id,
                 "_score": (
@@ -896,7 +930,14 @@ def _pt_signin_site_view(record: AutomationRecord | None,
                          latest: ExecutionRecord | None) -> dict[str, Any]:
     record = _require_pt_automation(record)
     config = json.loads(record.config_json)
+    sign_in_supported, profile_refresh_supported = _pt_site_capabilities(record, config)
     credential = record.credential
+    discovery = discover_pt_site(credential.domain, set()) if credential else None
+    legacy_profile_refresh_default = bool(
+        discovery
+        and discovery.default_profile_refresh_enabled
+        and "profile_refresh_supported" not in config
+    )
     return {
         "id": record.id,
         "name": record.name,
@@ -918,11 +959,34 @@ def _pt_signin_site_view(record: AutomationRecord | None,
             "click_selector": config.get("click_selector"),
             "success_patterns": config.get("success_patterns", []),
             "already_patterns": config.get("already_patterns", []),
-            "sign_in_enabled": bool(config.get("sign_in_enabled", True)),
-            "profile_refresh_enabled": bool(config.get("profile_refresh_enabled", False)),
+            "sign_in_enabled": bool(config.get("sign_in_enabled", True)) and sign_in_supported,
+            "profile_refresh_enabled": (
+                (
+                    bool(config.get("profile_refresh_enabled", False))
+                    or legacy_profile_refresh_default
+                )
+                and profile_refresh_supported
+            ),
+            "sign_in_supported": sign_in_supported,
+            "profile_refresh_supported": profile_refresh_supported,
         },
         "last_execution": execution_view(latest) if latest else None,
     }
+
+
+def _pt_site_capabilities(record: AutomationRecord, config: dict[str, Any]) -> tuple[bool, bool]:
+    credential = record.credential
+    discovery = discover_pt_site(credential.domain, set()) if credential else None
+    catalog_sign_in_supported = discovery.sign_in_supported if discovery else True
+    catalog_profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
+    return (
+        bool(config.get(
+            "sign_in_supported", catalog_sign_in_supported,
+        )) and catalog_sign_in_supported,
+        bool(config.get(
+            "profile_refresh_supported", catalog_profile_refresh_supported,
+        )) and catalog_profile_refresh_supported,
+    )
 
 
 def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
