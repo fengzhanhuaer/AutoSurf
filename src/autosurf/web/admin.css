@@ -179,6 +179,7 @@ td:first-child { color: var(--text); font-weight: 600; }
 .history-today { display: inline-flex; min-height: 26px; padding: 0 9px; align-items: center; border-radius: 4px; background: #eef2f5; color: #52606d; font-size: 12px; font-weight: 700; }
 .history-dot { display: inline-grid; width: 24px; height: 24px; place-items: center; border: 1px solid #c8d0d8; border-radius: 50%; background: #eef2f5; color: #65717d; font-size: 13px; font-weight: 800; line-height: 1; }
 .history-today.success, .history-dot.success { border-color: #91d4bd; background: #e6f5f0; color: #08715f; }
+.history-today.refresh, .history-dot.refresh { border-color: #a9c1ed; background: #edf4ff; color: #2457a6; }
 .history-today.warning, .history-dot.warning { border-color: #e3c66d; background: #fff6df; color: #8b5d00; }
 .history-today.failed, .history-dot.failed { border-color: #efaaa4; background: var(--danger-bg); color: var(--danger); }
 .history-today.running, .history-dot.running, .history-today.pending, .history-dot.pending { border-color: #a9c1ed; background: #edf4ff; color: #2457a6; }

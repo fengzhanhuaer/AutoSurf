@@ -1347,7 +1347,11 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     }
     assert by_id[empty_site.id]["record_count"] == 0
     assert by_id[empty_site.id]["executions"] == {}
-    assert by_id[refresh_only.id]["record_count"] == 0
-    assert by_id[refresh_only.id]["executions"] == {}
-    assert payload["latest_execution"]["automation_name"] == "Tracker"
+    refresh_history = by_id[refresh_only.id]
+    assert refresh_history["history_action"] == "profile_refresh"
+    assert refresh_history["record_count"] == 1
+    refresh_execution = refresh_history["executions"][local_today.isoformat()]
+    assert refresh_execution["action_type"] == "profile_refresh"
+    assert refresh_execution["result"]["message"] == "PT 站个人信息页刷新成功"
+    assert payload["latest_execution"]["automation_name"] == "NanyangPT"
     assert invalid.status_code == 422

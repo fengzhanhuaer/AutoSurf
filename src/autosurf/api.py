@@ -776,12 +776,20 @@ def pt_signin_history(
             ExecutionRecord.scheduled_at >= window_start,
         ).order_by(ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc())).all() if site_ids else []
         date_keys = {value.isoformat() for value in date_values}
-        sign_in_enabled: dict[str, bool] = {}
+        history_actions: dict[str, str | None] = {}
         for site in sites:
             config = json.loads(site.config_json)
-            supported, _ = _pt_site_capabilities(site, config)
-            sign_in_enabled[site.id] = supported and bool(config.get("sign_in_enabled", True))
-        enabled_site_ids = [site_id for site_id, enabled in sign_in_enabled.items() if enabled]
+            sign_in_supported, profile_refresh_supported = _pt_site_capabilities(site, config)
+            sign_in_enabled = sign_in_supported and bool(config.get("sign_in_enabled", True))
+            profile_refresh_enabled = profile_refresh_supported and bool(
+                config.get("profile_refresh_enabled", False)
+            )
+            history_actions[site.id] = (
+                "sign_in" if sign_in_enabled
+                else "profile_refresh" if profile_refresh_enabled
+                else None
+            )
+        enabled_site_ids = [site_id for site_id, action in history_actions.items() if action]
         latest = session.scalar(select(ExecutionRecord).where(
             ExecutionRecord.automation_id.in_(enabled_site_ids)
         ).order_by(
@@ -791,17 +799,18 @@ def pt_signin_history(
         site_history: dict[str, dict[str, dict[str, str]]] = {site.id: {} for site in sites}
         record_counts = {site.id: 0 for site in sites}
         for execution in executions:
-            if not sign_in_enabled.get(execution.automation_id, False):
+            action = history_actions.get(execution.automation_id)
+            if action is None:
                 continue
             day = (execution.scheduled_at + offset).date().isoformat()
             if day not in date_keys:
                 continue
-            view = _pt_signin_history_execution_view(execution)
+            view = _pt_history_execution_view(execution, action)
             if view is None:
                 continue
             record_counts[execution.automation_id] += 1
             daily[execution.automation_id].setdefault(day, view)
-            if not execution.result_json:
+            if action != "sign_in" or not execution.result_json:
                 continue
             with suppress(ValueError, TypeError):
                 result = json.loads(execution.result_json)
@@ -828,6 +837,7 @@ def pt_signin_history(
                 "domain": site.credential.domain if site.credential else None,
                 "url": json.loads(site.config_json).get("url"),
                 "enabled": site.enabled,
+                "history_action": history_actions[site.id],
                 "record_count": record_counts[site.id],
                 "executions": daily[site.id],
                 "site_history": site_history[site.id],
@@ -1008,22 +1018,23 @@ def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
     return result
 
 
-def _pt_signin_history_execution_view(record: ExecutionRecord) -> dict[str, Any] | None:
+def _pt_history_execution_view(record: ExecutionRecord, action: str) -> dict[str, Any] | None:
     view = execution_view(record)
+    view["action_type"] = action
     result = view.get("result")
     if not isinstance(result, dict):
         return view
     actions = (result.get("details") or {}).get("actions")
     if not isinstance(actions, dict):
         return view
-    sign_in = actions.get("sign_in")
-    if not isinstance(sign_in, dict) or not sign_in.get("enabled"):
+    action_result = actions.get(action)
+    if not isinstance(action_result, dict) or not action_result.get("enabled"):
         return None
-    if sign_in.get("outcome"):
+    if action_result.get("outcome"):
         view["result"] = {
-            "outcome": sign_in.get("outcome"),
-            "message": sign_in.get("message"),
-            "details": sign_in.get("details"),
+            "outcome": action_result.get("outcome"),
+            "message": action_result.get("message"),
+            "details": action_result.get("details"),
         }
     return view
 

@@ -85,19 +85,31 @@ class CookieCloudStore:
 
         decrypted = decrypt_cookiecloud(uuid, password, str(payload.get("encrypted", "")),
                                         str(payload.get("crypto_type", "legacy")))
-        imported: list[dict[str, Any]] = []
+        grouped: dict[str, dict[tuple[str, str, str], dict[str, Any]]] = {}
         for bucket, entries in decrypted["cookie_data"].items():
             if not isinstance(entries, list):
                 continue
             domain = _canonical_domain(str(bucket), entries)
-            cookies = [
-                normalized
-                for cookie in entries
-                if isinstance(cookie, dict)
-                for normalized in [_cookie_record(cookie, domain)]
-                if normalized is not None
-            ]
-            if not domain or not cookies:
+            if not domain:
+                continue
+            cookies = grouped.setdefault(domain, {})
+            for cookie in entries:
+                if not isinstance(cookie, dict):
+                    continue
+                normalized = _cookie_record(cookie, domain)
+                if normalized is None:
+                    continue
+                key = (
+                    normalized["name"],
+                    normalized["domain"],
+                    normalized["path"],
+                )
+                cookies[key] = normalized
+
+        imported: list[dict[str, Any]] = []
+        for domain, cookie_map in grouped.items():
+            cookies = list(cookie_map.values())
+            if not cookies:
                 continue
             record = self.credentials.upsert_cookie_records(
                 f"cookiecloud:{uuid}:{domain}", domain, cookies, "cookiecloud"

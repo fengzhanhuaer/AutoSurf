@@ -424,15 +424,22 @@ function renderPtSites() {
 function historyState(execution) {
   if (!execution) return { key: "empty", icon: "−", label: "未记录" };
   if (execution.site_reported) return { key: "success", icon: "✓", label: "站点已签到" };
+  const refresh = execution.action_type === "profile_refresh";
   const outcome = execution.result?.outcome;
-  if (outcome === "success") return { key: "success", icon: "✓", label: "签到成功" };
-  if (outcome === "already_done") return { key: "success", icon: "✓", label: "今日已签到" };
+  if (outcome === "success") return refresh
+    ? { key: "refresh", icon: "↻", label: "刷新成功" }
+    : { key: "success", icon: "✓", label: "签到成功" };
+  if (outcome === "already_done") return refresh
+    ? { key: "refresh", icon: "↻", label: "刷新完成" }
+    : { key: "success", icon: "✓", label: "今日已签到" };
   if (outcome === "blocked") return { key: "warning", icon: "!", label: "访问被拦截" };
   if (outcome === "auth_expired") return { key: "failed", icon: "×", label: "登录已失效" };
-  if (execution.status === "running") return { key: "running", icon: "↻", label: "执行中" };
-  if (execution.status === "pending") return { key: "pending", icon: "…", label: "等待执行" };
+  if (execution.status === "running") return { key: "running", icon: "↻", label: refresh ? "刷新中" : "执行中" };
+  if (execution.status === "pending") return { key: "pending", icon: "…", label: refresh ? "等待刷新" : "等待执行" };
   if (execution.status === "retry_wait") return { key: "warning", icon: "↻", label: "等待重试" };
-  if (execution.status === "succeeded") return { key: "success", icon: "✓", label: "成功" };
+  if (execution.status === "succeeded") return refresh
+    ? { key: "refresh", icon: "↻", label: "刷新成功" }
+    : { key: "success", icon: "✓", label: "成功" };
   return { key: "failed", icon: "×", label: statusLabel(execution.status) };
 }
 

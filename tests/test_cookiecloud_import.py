@@ -36,8 +36,9 @@ def evp_bytes_to_key(password: bytes, salt: bytes) -> tuple[bytes, bytes]:
     return output[:32], output[32:48]
 
 
-def encrypt_vector(uuid: str, password: str, crypto_type: str) -> str:
-    plaintext = json.dumps(PAYLOAD, separators=(",", ":")).encode()
+def encrypt_vector(uuid: str, password: str, crypto_type: str,
+                   payload: dict | None = None) -> str:
+    plaintext = json.dumps(payload or PAYLOAD, separators=(",", ":")).encode()
     passphrase = hashlib.md5(f"{uuid}-{password}".encode()).hexdigest()[:16].encode()
     if crypto_type == "legacy":
         salt = b"12345678"
@@ -95,6 +96,52 @@ async def test_upload_auto_imports_configured_source(tmp_path):
             {"name": "theme", "value": "dark", "domain": ".example.com", "path": "/",
              "secure": False, "httpOnly": False},
         ]
+
+
+@pytest.mark.asyncio
+async def test_import_merges_cookiecloud_buckets_for_the_same_canonical_domain(tmp_path):
+    settings = Settings(data_dir=tmp_path, secret_key="s" * 32,
+                        username="admin", password="password123")
+    app = create_app(settings)
+    auth = (settings.username, settings.password)
+    payload = {
+        "cookie_data": {
+            ".pterclub.net": [{
+                "name": "c_secure_uid", "value": "7", "domain": ".pterclub.net", "path": "/",
+            }],
+            "pterclub.net": [{
+                "name": "PHPSESSID", "value": "session", "domain": "pterclub.net", "path": "/",
+            }],
+        },
+        "local_storage_data": {},
+        "update_time": "2026-08-16T00:00:00.000Z",
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.put("/api/v1/cookiecloud/sources/test-id", auth=auth, json={
+            "uuid": "test-id", "password": "password", "auto_import": True,
+        })
+        uploaded = await client.post("/cookiecloud/update", json={
+            "uuid": "test-id",
+            "encrypted": encrypt_vector(
+                "test-id", "password", "aes-128-cbc-fixed", payload,
+            ),
+            "crypto_type": "aes-128-cbc-fixed",
+        })
+
+    assert uploaded.status_code == 200
+    assert uploaded.json()["imported"] == 1
+    with app.state.sessions() as session:
+        credentials = session.scalars(select(CredentialRecord)).all()
+        assert len(credentials) == 1
+        assert credentials[0].domain == "pterclub.net"
+        cookies = app.state.credentials.browser_cookies_from_payload(
+            credentials[0].encrypted_payload
+        )
+        assert {(item["name"], item["domain"]) for item in cookies} == {
+            ("c_secure_uid", ".pterclub.net"),
+            ("PHPSESSID", "pterclub.net"),
+        }
 
 
 @pytest.mark.asyncio
