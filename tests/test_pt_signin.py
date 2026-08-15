@@ -14,6 +14,8 @@ from autosurf.automations.pt_signin import (
     normalize_site_signin_history,
     normalize_pt_profile_stats,
     profile_url_from_cookies,
+    pt_signin_history_url,
+    pttime_history_url_from_profile,
 )
 from autosurf.config import Settings
 from autosurf.application.services import reconcile_pt_site_aliases
@@ -21,7 +23,7 @@ from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.domain.models import utc_now
 from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
 from autosurf.main import create_app
-from autosurf.pt_discovery import discover_pt_site
+from autosurf.pt_discovery import discover_pt_site, pt_site_domain_aliases
 
 
 @pytest.fixture
@@ -51,6 +53,9 @@ def test_pt_page_classification_distinguishes_common_results():
     ) == RunOutcome.SUCCESS
     assert classify_pt_page(
         "https://pttime.org/attendance.php", 200, "今天已签到，请勿重复刷新。已刷次数：2次。"
+    ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://pttime.org/attendance.php", 200, "拒绝访问：已签到，无需再签"
     ) == RunOutcome.ALREADY_DONE
     interrupted = (
         "已断签2天，当前可补签天数为113天，请点击选择补签弥补连续天数，"
@@ -180,6 +185,16 @@ def test_text_signin_history_supports_pttime_records():
         {"date": "2026-08-14", "reward": "600"},
         {"date": "2026-08-15", "reward": "600"},
     ]
+    assert pt_signin_history_url(
+        "https://www.pttime.org/attendance.php", {"c_secure_uid": "94806"}
+    ) == "https://www.pttime.org/attendance.php?type=sign&uid=94806"
+    assert pt_signin_history_url(
+        "https://tracker.test/attendance.php", {"c_secure_uid": "94806"}
+    ) is None
+    assert pttime_history_url_from_profile(
+        "https://www.pttime.org/attendance.php",
+        "/userdetails.php?id=94806",
+    ) == "https://www.pttime.org/attendance.php?type=sign&uid=94806"
 
 
 def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknown_sites():
@@ -194,6 +209,20 @@ def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknow
     assert signature.reason == "cookie_signature"
     assert signature.url == "https://tracker.test/attendance.php"
     assert discover_pt_site("example.com", {"sid", "theme"}) is None
+
+
+def test_hhan_domains_share_one_site_key_and_cookie_alias_group():
+    domains = ("hhan.club", "hhanclub.net", "hhanclub.top")
+    discoveries = [discover_pt_site(domain, {"c_secure_uid"}) for domain in domains]
+
+    assert all(discovery is not None for discovery in discoveries)
+    assert {discovery.site_key for discovery in discoveries} == {"hhan.club"}
+    assert {discovery.name for discovery in discoveries} == {"HhanClub"}
+    assert set(pt_site_domain_aliases("hhanclub.top")) == {
+        "hhan.club", "www.hhan.club",
+        "hhanclub.net", "www.hhanclub.net",
+        "hhanclub.top", "www.hhanclub.top",
+    }
 
 
 def test_pt_discovery_marks_api_only_sites_for_a_dedicated_adapter():
@@ -455,6 +484,44 @@ def test_pt_alias_reconciliation_merges_tasks_history_and_active_executions(sett
         )
         assert {cookie["name"] for cookie in browser_cookies} == {"cf_clearance", "c_secure_uid"}
         assert json.loads(tasks[0].config_json)["credential_aliases_merged"] is True
+
+
+def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(settings):
+    app = create_app(settings)
+    tasks = []
+    executions = []
+    for index, domain in enumerate(("hhan.club", "hhanclub.net", "hhanclub.top")):
+        credential = app.state.credentials.upsert(
+            f"cookiecloud:test:{domain}", domain,
+            {"c_secure_uid": str(index + 1)}, provider="cookiecloud",
+        )
+        task = app.state.automations.create(
+            domain, "pt_signin", 86400,
+            {
+                "url": f"https://{domain}/attendance.php",
+                "credential_domain": domain,
+                "sign_in_enabled": index != 0,
+                "profile_refresh_enabled": index == 0,
+            },
+            credential.id,
+        )
+        tasks.append(task)
+        executions.append(app.state.queue.enqueue_now(task.id))
+
+    assert reconcile_pt_site_aliases(app.state.sessions, app.state.credentials) == 2
+
+    with app.state.sessions() as session:
+        remaining = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        )).all()
+        history = session.scalars(select(ExecutionRecord)).all()
+        assert len(remaining) == 1
+        assert remaining[0].name == "HhanClub"
+        assert {item.automation_id for item in history} == {remaining[0].id}
+        assert {item.id for item in history} == {item.id for item in executions}
+        config = json.loads(remaining[0].config_json)
+        assert config["sign_in_enabled"] is True
+        assert config["profile_refresh_enabled"] is True
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ class PtSiteDefinition:
     name: str
     signin_path: str = "/attendance.php"
     strategy: str = "generic_browser"
+    aliases: tuple[str, ...] = ()
 
 
 # This catalog supplies stable names and known sign-in paths. Cookie signatures
@@ -33,6 +34,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("52pt.site", "52PT"),
     PtSiteDefinition("u2.dmhy.org", "U2"),
     PtSiteDefinition("hdarea.club", "HDArea"),
+    PtSiteDefinition("hhan.club", "HhanClub", aliases=("hhanclub.net", "hhanclub.top")),
     PtSiteDefinition("tjupt.org", "TJUPT"),
     PtSiteDefinition("club.hares.top", "Hares", "/attendance.php?action=sign"),
     PtSiteDefinition("pt.btschool.club", "BTSchool"),
@@ -70,13 +72,17 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
     if not normalized_domain:
         return None
 
-    definition = next((item for item in PT_SITE_CATALOG if _domain_matches(normalized_domain, item.domain)), None)
+    definition = _site_definition(normalized_domain)
     lowered_names = {str(name).lower() for name in cookie_names}
     markers = lowered_names.intersection(PT_COOKIE_MARKERS)
     if definition:
+        matched_domain = next(
+            alias for alias in (definition.domain, *definition.aliases)
+            if _domain_matches(normalized_domain, alias)
+        )
         target_domain = (
-            definition.domain
-            if definition.domain == normalized_domain or definition.domain.endswith(f".{normalized_domain}")
+            matched_domain
+            if matched_domain == normalized_domain or matched_domain.endswith(f".{normalized_domain}")
             else normalized_domain
         )
         return PtDiscovery(
@@ -99,12 +105,30 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
 
 def canonical_pt_site_domain(domain: str) -> str:
     normalized = domain.lower().lstrip(".").rstrip(".")
+    definition = _site_definition(normalized)
+    if definition:
+        return definition.domain
     return normalized[4:] if normalized.startswith("www.") else normalized
 
 
-def pt_site_domain_aliases(domain: str) -> tuple[str, str]:
+def pt_site_domain_aliases(domain: str) -> tuple[str, ...]:
+    normalized = domain.lower().lstrip(".").rstrip(".")
     canonical = canonical_pt_site_domain(domain)
-    return canonical, f"www.{canonical}"
+    definition = _site_definition(normalized)
+    domains = [canonical, normalized[4:] if normalized.startswith("www.") else normalized]
+    if definition:
+        domains.extend((definition.domain, *definition.aliases))
+    aliases = []
+    for item in domains:
+        aliases.extend((item, f"www.{item}"))
+    return tuple(dict.fromkeys(aliases))
+
+
+def _site_definition(domain: str) -> PtSiteDefinition | None:
+    return next((
+        item for item in PT_SITE_CATALOG
+        if any(_domain_matches(domain, alias) for alias in (item.domain, *item.aliases))
+    ), None)
 
 
 def _domain_matches(credential_domain: str, catalog_domain: str) -> bool:

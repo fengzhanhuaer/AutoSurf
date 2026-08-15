@@ -6,7 +6,7 @@ from contextlib import suppress
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from autosurf.automations.browser_session import playwright_cookies, validated_http_url
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
@@ -16,6 +16,7 @@ DEFAULT_ALREADY_PATTERNS = (
     r"今日已签到",
     r"今天已签到",
     r"已经签到",
+    r"已签到.{0,20}无需再签",
     r"签到已得",
     r"already\s+(?:checked|signed)",
     r"checked\s+in\s+today",
@@ -133,7 +134,9 @@ class PtSignInHandler:
         body = (await page.locator("body").inner_text())[:1_000_000]
         outcome = classify_pt_page(page.url, status_code, body, config)
         if outcome:
-            return await _classified_page_result(page, outcome, page.url, status_code)
+            return await _classified_page_result(
+                page, outcome, page.url, status_code, context=context
+            )
 
         clicked = False
         selector = str(config.get("click_selector") or "").strip()
@@ -159,7 +162,7 @@ class PtSignInHandler:
             outcome = classify_pt_page(page.url, None, body, config)
             if outcome:
                 return await _classified_page_result(
-                    page, outcome, page.url, status_code, clicked=True
+                    page, outcome, page.url, status_code, clicked=True, context=context
                 )
 
         await _save_screenshot(page, screenshot)
@@ -425,11 +428,57 @@ def _action_result_view(result: RunResult | None) -> dict[str, Any]:
 
 async def _classified_page_result(page: Any, outcome: RunOutcome, url: str,
                                   status_code: int | None,
-                                  clicked: bool = False) -> RunResult:
+                                  clicked: bool = False,
+                                  context: RunContext | None = None) -> RunResult:
     site_history = None
     if outcome in {RunOutcome.SUCCESS, RunOutcome.ALREADY_DONE}:
+        history_url = await discover_pt_signin_history_url(
+            page, url, context.cookies if context else {}
+        )
+        if history_url and page.url != history_url:
+            with suppress(Exception):
+                await page.goto(history_url, wait_until="domcontentloaded")
         site_history = await extract_site_signin_history(page)
     return _classified_result(outcome, url, status_code, clicked, site_history)
+
+
+def pt_signin_history_url(site_url: str, cookies: dict[str, str]) -> str | None:
+    parsed = urlparse(site_url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname != "pttime.org" and not hostname.endswith(".pttime.org"):
+        return None
+    user_id = str(cookies.get("c_secure_uid") or "").strip()
+    if not user_id.isdigit():
+        return None
+    return urljoin(site_url, f"/attendance.php?type=sign&uid={user_id}")
+
+
+async def discover_pt_signin_history_url(page: Any, site_url: str,
+                                         cookies: dict[str, str]) -> str | None:
+    direct = pt_signin_history_url(site_url, cookies)
+    if direct:
+        return direct
+    parsed = urlparse(site_url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname != "pttime.org" and not hostname.endswith(".pttime.org"):
+        return None
+    with suppress(Exception):
+        await page.goto(urljoin(site_url, "/"), wait_until="domcontentloaded")
+        profile = page.locator('a[href*="userdetails.php?id="]').first
+        href = await profile.get_attribute("href")
+        return pttime_history_url_from_profile(site_url, href)
+    return None
+
+
+def pttime_history_url_from_profile(site_url: str, profile_url: str | None) -> str | None:
+    if not profile_url:
+        return None
+    absolute = urljoin(site_url, profile_url)
+    user_ids = parse_qs(urlparse(absolute).query).get("id", [])
+    user_id = str(user_ids[0]).strip() if user_ids else ""
+    if not user_id.isdigit():
+        return None
+    return urljoin(site_url, f"/attendance.php?type=sign&uid={user_id}")
 
 
 async def extract_site_signin_history(page: Any) -> list[dict[str, str]]:

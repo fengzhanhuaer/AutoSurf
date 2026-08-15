@@ -26,8 +26,7 @@ fi
 touch "$upgrade_lock"
 write_status running
 cleanup() {
-    status=$?
-    if [ "$status" -ne 0 ] && [ "$upgrade_state" != complete ]; then
+    if [ "$upgrade_state" != complete ]; then
         write_status failed
     fi
     rm -f "$upgrade_lock"

@@ -169,6 +169,42 @@ async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tm
 
 
 @pytest.mark.asyncio
+async def test_web_upgrade_settles_stale_running_status(settings, tmp_path, monkeypatch):
+    repository = tmp_path / "program"
+    repository.joinpath(".git").mkdir(parents=True)
+    revision = "a" * 40
+    status_file = settings.data_dir / "upgrade-status.json"
+    status_file.write_text(
+        '{"state":"running","updated_at":"2026-08-15T08:43:17Z"}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("autosurf.api._program_repository", lambda: repository)
+    monkeypatch.setattr("autosurf.api._upgrade_command", lambda: ["fixed-upgrade-helper"])
+    monkeypatch.setattr("autosurf.api._upgrade_running", lambda _request: False)
+    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: revision)
+    monkeypatch.setattr("autosurf.api._remote_revision", lambda _repository, _branch: (revision, None))
+    monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {
+        "installed": True, "playwright_version": "1.61.0", "persistent": True,
+    })
+    monkeypatch.setattr("autosurf.api._python_dependencies", lambda _repository: {
+        "checked": True, "satisfied": True, "total": 9, "issue_count": 0, "issues": [], "error": None,
+    })
+
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/system/upgrade", auth=(settings.username, settings.password),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["running"] is False
+    assert response.json()["last_upgrade"]["state"] == "complete"
+    assert '"state": "complete"' in status_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_web_upgrade_rejects_current_version_and_remote_check_failure(settings, tmp_path, monkeypatch):
     repository = tmp_path / "program"
     repository.joinpath(".git").mkdir(parents=True)
@@ -302,6 +338,24 @@ def test_expired_running_execution_can_be_reclaimed(settings):
     assert reclaimed.attempts == 2
 
 
+def test_success_clears_error_from_an_earlier_retry(settings):
+    app = create_app(settings)
+    automation = app.state.automations.create(
+        "retry", "http_signin", 3600, {"url": "https://example.test"}
+    )
+    execution = app.state.queue.enqueue_now(automation.id)
+    with app.state.sessions.begin() as session:
+        row = session.get(ExecutionRecord, execution.id)
+        row.error = "earlier failure"
+
+    app.state.queue.succeed(execution.id, {"outcome": "success", "message": "done"})
+
+    with app.state.sessions() as session:
+        row = session.get(ExecutionRecord, execution.id)
+        assert row.status == ExecutionStatus.SUCCEEDED
+        assert row.error is None
+
+
 def test_pt_scheduled_execution_is_randomized_and_immediate_run_is_deduplicated(settings):
     app = create_app(settings)
     automation = app.state.automations.create(
@@ -338,6 +392,31 @@ def test_execution_keeps_credential_snapshot(settings):
     with app.state.sessions() as session:
         row = session.get(ExecutionRecord, execution.id)
         assert app.state.credentials.cookies_from_payload(row.credential_payload) == {"sid": "old"}
+
+
+def test_immediate_retry_refreshes_waiting_credential_snapshot(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "retry-snapshot", "example.test", {"sid": "old"}, provider="cookiecloud"
+    )
+    automation = app.state.automations.create(
+        "retry", "pt_signin", 3600,
+        {"url": "https://example.test/attendance.php"}, credential.id,
+    )
+    execution = app.state.queue.enqueue_now(automation.id)
+    with app.state.sessions.begin() as session:
+        row = session.get(ExecutionRecord, execution.id)
+        row.status = ExecutionStatus.RETRY_WAIT
+
+    app.state.credentials.upsert(
+        "retry-snapshot", "example.test", {"sid": "new"}, provider="cookiecloud"
+    )
+    retried = app.state.queue.enqueue_now(automation.id)
+
+    with app.state.sessions() as session:
+        row = session.get(ExecutionRecord, retried.id)
+        assert retried.id == execution.id
+        assert app.state.credentials.cookies_from_payload(row.credential_payload) == {"sid": "new"}
 
 
 @pytest.mark.asyncio

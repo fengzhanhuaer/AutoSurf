@@ -256,6 +256,30 @@ def _last_upgrade(request: Request) -> dict[str, str] | None:
     return {key: str(result[key]) for key in ("state", "updated_at") if key in result}
 
 
+def _settle_stale_upgrade(request: Request, last: dict[str, str] | None, *, running: bool,
+                          local_revision: str | None, remote_revision: str | None,
+                          check_error: str | None, browser: dict[str, Any],
+                          dependencies: dict[str, Any]) -> dict[str, str] | None:
+    if not last or last.get("state") != "running" or running:
+        return last
+    complete = bool(
+        check_error is None
+        and local_revision
+        and local_revision == remote_revision
+        and browser.get("installed")
+        and dependencies.get("checked")
+        and dependencies.get("satisfied")
+    )
+    settled = {
+        "state": "complete" if complete else "failed",
+        "updated_at": utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    status_file = request.app.state.settings.data_dir / "upgrade-status.json"
+    with suppress(OSError):
+        status_file.write_text(json.dumps(settled, ensure_ascii=True) + "\n", encoding="utf-8")
+    return settled
+
+
 def _browser_runtime() -> dict[str, Any]:
     browser_root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""))
     try:
@@ -359,6 +383,11 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
     update_available = bool(local_revision and remote_revision and local_revision != remote_revision)
     browser_missing = not browser["installed"]
     dependency_repair_needed = python_dependencies["checked"] and not python_dependencies["satisfied"]
+    last_upgrade = _settle_stale_upgrade(
+        request, _last_upgrade(request), running=running,
+        local_revision=local_revision, remote_revision=remote_revision,
+        check_error=check_error, browser=browser, dependencies=python_dependencies,
+    )
     return {
         "available": environment_available,
         "can_upgrade": environment_available and check_error is None and (
@@ -373,7 +402,7 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
         "branch": branch,
         "browser": browser,
         "python_dependencies": python_dependencies,
-        "last_upgrade": _last_upgrade(request),
+        "last_upgrade": last_upgrade,
     }
 
 

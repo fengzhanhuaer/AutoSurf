@@ -13,7 +13,12 @@ from autosurf.application.registry import HandlerRegistry
 from autosurf.domain.models import ExecutionStatus, RunContext, RunOutcome, utc_now
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
-from autosurf.pt_discovery import PT_COOKIE_MARKERS, canonical_pt_site_domain, pt_site_domain_aliases
+from autosurf.pt_discovery import (
+    PT_COOKIE_MARKERS,
+    canonical_pt_site_domain,
+    discover_pt_site,
+    pt_site_domain_aliases,
+)
 
 
 class CredentialService:
@@ -205,6 +210,11 @@ class QueueService:
             ).order_by(ExecutionRecord.scheduled_at.desc()).limit(1))
             if existing is not None:
                 if existing.status in {ExecutionStatus.PENDING, ExecutionStatus.RETRY_WAIT}:
+                    credential_version, credential_payload = self._credential_snapshot(
+                        session, automation
+                    )
+                    existing.credential_version = credential_version
+                    existing.credential_payload = credential_payload
                     existing.available_at = now
                 session.flush()
                 return existing
@@ -239,6 +249,7 @@ class QueueService:
             if record is not None:
                 record.status = ExecutionStatus.SUCCEEDED
                 record.result_json = json.dumps(result, ensure_ascii=False)
+                record.error = None
                 record.finished_at = utc_now()
                 record.lease_until = None
 
@@ -351,6 +362,30 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
             primary = max(records, key=score)
             primary.enabled = any(record.enabled for record in records)
             primary.next_run_at = min(record.next_run_at for record in records)
+            configs = []
+            for record in records:
+                try:
+                    configs.append(json.loads(record.config_json))
+                except (TypeError, ValueError):
+                    configs.append({})
+            primary_config = configs[records.index(primary)]
+            primary_config["sign_in_enabled"] = any(
+                config.get("sign_in_enabled", True) for config in configs
+            )
+            primary_config["profile_refresh_enabled"] = any(
+                config.get("profile_refresh_enabled", False) for config in configs
+            )
+            primary.config_json = json.dumps(primary_config, ensure_ascii=False)
+            try:
+                primary_cookie_names = set(credentials.cookies_for(primary.credential))
+            except ValueError:
+                primary_cookie_names = set()
+            primary_discovery = discover_pt_site(
+                primary.credential.domain,
+                primary_cookie_names,
+            )
+            if primary_discovery:
+                primary.name = primary_discovery.name
             duplicate_ids = {record.id for record in records if record.id != primary.id}
             executions = session.scalars(select(ExecutionRecord).where(
                 ExecutionRecord.automation_id.in_(duplicate_ids)
