@@ -423,7 +423,7 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 
 
 @pytest.mark.asyncio
-async def test_tjupt_confirmation_navigation_is_success_without_result_copy():
+async def test_tjupt_broken_streak_restarts_without_spending_makeup():
     class Locator:
         first = None
 
@@ -433,16 +433,16 @@ async def test_tjupt_confirmation_navigation_is_success_without_result_copy():
             self.first = self
 
         async def inner_text(self):
-            if self.page.confirmed:
-                return "签到记录"
+            if self.page.restarted:
+                return "签到成功，本次签到获得 100 魔力值"
             return "已断签 2 天，请点击选择补签或放弃补签重新开始签到"
 
         async def is_visible(self):
-            return True
+            return "action=cancel" in self.page.last_selector
 
         async def click(self):
-            self.page.confirmed = True
-            self.page.url = "https://tjupt.org/attendance.php?action=confirm"
+            self.page.restarted = True
+            self.page.url = "https://tjupt.org/attendance.php?action=cancel"
 
     class Response:
         status = 200
@@ -463,10 +463,12 @@ async def test_tjupt_confirmation_navigation_is_success_without_result_copy():
 
     class Page:
         url = "https://tjupt.org/attendance.php"
-        confirmed = False
+        restarted = False
+        last_selector = ""
         frames = None
 
         def locator(self, selector):
+            self.last_selector = selector
             return Locator(self, body=selector == "body")
 
         def expect_navigation(self, **_kwargs):
@@ -482,6 +484,8 @@ async def test_tjupt_confirmation_navigation_is_success_without_result_copy():
 
     assert result.outcome == RunOutcome.SUCCESS
     assert result.details["clicked"] is True
+    assert page.restarted is True
+    assert page.url.endswith("action=cancel")
 
 
 @pytest.mark.asyncio
@@ -677,13 +681,25 @@ def test_hhan_domains_share_one_site_key_and_cookie_alias_group():
     discoveries = [discover_pt_site(domain, {"c_secure_uid"}) for domain in domains]
 
     assert all(discovery is not None for discovery in discoveries)
-    assert {discovery.site_key for discovery in discoveries} == {"hhan.club"}
+    assert {discovery.site_key for discovery in discoveries} == {"hhanclub.net"}
     assert {discovery.name for discovery in discoveries} == {"HhanClub"}
     assert set(pt_site_domain_aliases("hhanclub.top")) == {
         "hhan.club", "www.hhan.club",
         "hhanclub.net", "www.hhanclub.net",
         "hhanclub.top", "www.hhanclub.top",
     }
+
+
+def test_haidan_supports_daily_checkin_and_completed_label():
+    discovery = discover_pt_site("www.haidan.cc", {"c_secure_uid"})
+
+    assert discovery is not None
+    assert discovery.url == "https://haidan.cc/"
+    assert discovery.sign_in_supported is True
+    assert discovery.profile_refresh_supported is True
+    assert classify_pt_page(
+        "https://haidan.cc/index.php", 200, "每日打卡 已签到卡", {},
+    ) == RunOutcome.ALREADY_DONE
 
 
 @pytest.mark.parametrize(
@@ -1184,7 +1200,8 @@ def test_pt_reconciliation_rebinds_old_task_to_current_domain_credential(setting
         assert migrated.credential.domain == "www.haidan.cc"
         assert config["url"] == "https://haidan.cc/"
         assert config["credential_domain"] == "haidan.cc"
-        assert config["sign_in_enabled"] is False
+        assert config["sign_in_enabled"] is True
+        assert config["sign_in_supported"] is True
         assert config["profile_refresh_enabled"] is True
 
 
@@ -1204,6 +1221,7 @@ def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(se
                 "credential_domain": domain,
                 "sign_in_enabled": index != 0,
                 "profile_refresh_enabled": index == 0,
+                "discovered": True,
             },
             credential.id,
         )
@@ -1219,9 +1237,12 @@ def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(se
         history = session.scalars(select(ExecutionRecord)).all()
         assert len(remaining) == 1
         assert remaining[0].name == "HhanClub"
+        assert remaining[0].credential.domain == "hhanclub.net"
         assert {item.automation_id for item in history} == {remaining[0].id}
         assert {item.id for item in history} == {item.id for item in executions}
         config = json.loads(remaining[0].config_json)
+        assert config["url"] == "https://hhanclub.net/attendance.php"
+        assert config["credential_domain"] == "hhanclub.net"
         assert config["sign_in_enabled"] is True
         assert config["profile_refresh_enabled"] is True
 
@@ -1241,6 +1262,20 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
         "Empty", "pt_signin", 86400,
         {"url": "https://tracker.test/attendance.php", "credential_domain": "tracker.test"},
         credential.id,
+    )
+    refresh_credential = app.state.credentials.upsert(
+        "cookiecloud:test:nanyangpt.com", "nanyangpt.com", {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    refresh_only = app.state.automations.create(
+        "NanyangPT", "pt_signin", 86400, {
+            "url": "https://nanyangpt.com/",
+            "credential_domain": "nanyangpt.com",
+            "sign_in_enabled": False,
+            "profile_refresh_enabled": True,
+            "sign_in_supported": False,
+            "profile_refresh_supported": True,
+        }, refresh_credential.id,
     )
     offset = timedelta(minutes=480)
     local_today = (utc_now() + offset).date()
@@ -1266,6 +1301,23 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
                 {"date": local_today.isoformat(), "reward": "165"},
                 {"date": (local_today - timedelta(days=1)).isoformat(), "reward": "160"},
             ]),
+            ExecutionRecord(
+                id=str(uuid4()), automation_id=refresh_only.id,
+                scheduled_at=today_start_utc + timedelta(hours=3), status="succeeded",
+                attempts=1, available_at=today_start_utc + timedelta(hours=3),
+                result_json=json.dumps({
+                    "outcome": "success",
+                    "message": "PT 站个人信息页刷新成功",
+                    "details": {"actions": {
+                        "sign_in": {"enabled": False},
+                        "profile_refresh": {
+                            "enabled": True,
+                            "outcome": "success",
+                            "message": "PT 站个人信息页刷新成功",
+                        },
+                    }},
+                }),
+            ),
         ])
 
     transport = httpx.ASGITransport(app=app)
@@ -1295,5 +1347,7 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     }
     assert by_id[empty_site.id]["record_count"] == 0
     assert by_id[empty_site.id]["executions"] == {}
+    assert by_id[refresh_only.id]["record_count"] == 0
+    assert by_id[refresh_only.id]["executions"] == {}
     assert payload["latest_execution"]["automation_name"] == "Tracker"
     assert invalid.status_code == 422

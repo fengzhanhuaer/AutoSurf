@@ -19,6 +19,7 @@ DEFAULT_ALREADY_PATTERNS = (
     r"已经签到",
     r"今天已经签过到了",
     r"\[已签到\]",
+    r"已签到卡",
     r"已签到.{0,20}无需再签",
     r"签到已得",
     r"already\s+(?:checked|signed)",
@@ -210,32 +211,33 @@ class TjuptAdapter:
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
         body = (await page.locator("body").inner_text())[:1_000_000]
         outcome = classify_pt_page(page.url, None, body, context.config)
-        if outcome != RunOutcome.FAILED:
+        if outcome == RunOutcome.FAILED:
+            restart = page.locator('a[href*="action=cancel"]').first
+            if not await restart.is_visible():
+                return await _classified_page_result(
+                    page, outcome, page.url, None, context=context,
+                )
+            async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+                await restart.click()
+            response = await navigation.value
+            status_code = response.status if response else None
+            body = (await page.locator("body").inner_text())[:1_000_000]
+            outcome = classify_pt_page(page.url, status_code, body, context.config)
             if outcome:
-                return await _classified_page_result(page, outcome, page.url, None, context=context)
-            return RunResult(RunOutcome.FAILED, "TJUPT 签到页面没有返回可识别结果", {"url": page.url})
-
-        supplement = page.locator('a[href*="action=confirm"]').first
-        if not await supplement.is_visible():
-            return await _classified_page_result(page, outcome, page.url, None, context=context)
-        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-            await supplement.click()
-        response = await navigation.value
-        status_code = response.status if response else None
-        body = (await page.locator("body").inner_text())[:1_000_000]
-        outcome = classify_pt_page(page.url, status_code, body, context.config)
+                return await _classified_page_result(
+                    page, outcome, page.url, status_code, clicked=True, context=context,
+                )
+            return RunResult(
+                RunOutcome.FAILED,
+                "TJUPT 重新开始签到后没有返回可识别结果",
+                {"url": page.url, "status_code": status_code, "clicked": True},
+            )
         if outcome:
-            return await _classified_page_result(
-                page, outcome, page.url, status_code, clicked=True, context=context,
-            )
-        if status_code is None or 200 <= status_code < 400:
-            return await _classified_page_result(
-                page, RunOutcome.SUCCESS, page.url, status_code, clicked=True, context=context,
-            )
+            return await _classified_page_result(page, outcome, page.url, None, context=context)
         return RunResult(
             RunOutcome.FAILED,
-            "TJUPT 补签后没有返回可识别结果",
-            {"url": page.url, "status_code": status_code, "clicked": True},
+            "TJUPT 签到页面没有返回可识别结果",
+            {"url": page.url},
         )
 
 

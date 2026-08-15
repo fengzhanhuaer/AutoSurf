@@ -775,20 +775,32 @@ def pt_signin_history(
             ExecutionRecord.automation_id.in_(site_ids),
             ExecutionRecord.scheduled_at >= window_start,
         ).order_by(ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc())).all() if site_ids else []
-        latest = session.scalar(select(ExecutionRecord).join(AutomationRecord).where(
-            AutomationRecord.handler_type == "pt_signin"
-        ).order_by(ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc()).limit(1))
-
         date_keys = {value.isoformat() for value in date_values}
-        daily: dict[str, dict[str, ExecutionRecord]] = {site.id: {} for site in sites}
+        sign_in_enabled: dict[str, bool] = {}
+        for site in sites:
+            config = json.loads(site.config_json)
+            supported, _ = _pt_site_capabilities(site, config)
+            sign_in_enabled[site.id] = supported and bool(config.get("sign_in_enabled", True))
+        enabled_site_ids = [site_id for site_id, enabled in sign_in_enabled.items() if enabled]
+        latest = session.scalar(select(ExecutionRecord).where(
+            ExecutionRecord.automation_id.in_(enabled_site_ids)
+        ).order_by(
+            ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc()
+        ).limit(1)) if enabled_site_ids else None
+        daily: dict[str, dict[str, dict[str, Any]]] = {site.id: {} for site in sites}
         site_history: dict[str, dict[str, dict[str, str]]] = {site.id: {} for site in sites}
         record_counts = {site.id: 0 for site in sites}
         for execution in executions:
+            if not sign_in_enabled.get(execution.automation_id, False):
+                continue
             day = (execution.scheduled_at + offset).date().isoformat()
             if day not in date_keys:
                 continue
+            view = _pt_signin_history_execution_view(execution)
+            if view is None:
+                continue
             record_counts[execution.automation_id] += 1
-            daily[execution.automation_id].setdefault(day, execution)
+            daily[execution.automation_id].setdefault(day, view)
             if not execution.result_json:
                 continue
             with suppress(ValueError, TypeError):
@@ -817,9 +829,7 @@ def pt_signin_history(
                 "url": json.loads(site.config_json).get("url"),
                 "enabled": site.enabled,
                 "record_count": record_counts[site.id],
-                "executions": {
-                    day: execution_view(execution) for day, execution in daily[site.id].items()
-                },
+                "executions": daily[site.id],
                 "site_history": site_history[site.id],
             } for site in sites],
             "latest_execution": _pt_execution_view(latest) if latest else None,
@@ -996,6 +1006,26 @@ def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
         "domain": record.automation.credential.domain if record.automation.credential else None,
     })
     return result
+
+
+def _pt_signin_history_execution_view(record: ExecutionRecord) -> dict[str, Any] | None:
+    view = execution_view(record)
+    result = view.get("result")
+    if not isinstance(result, dict):
+        return view
+    actions = (result.get("details") or {}).get("actions")
+    if not isinstance(actions, dict):
+        return view
+    sign_in = actions.get("sign_in")
+    if not isinstance(sign_in, dict) or not sign_in.get("enabled"):
+        return None
+    if sign_in.get("outcome"):
+        view["result"] = {
+            "outcome": sign_in.get("outcome"),
+            "message": sign_in.get("message"),
+            "details": sign_in.get("details"),
+        }
+    return view
 
 
 def _profile_stats_from_result(result_json: str | None) -> dict[str, str]:
