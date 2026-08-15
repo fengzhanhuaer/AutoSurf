@@ -59,8 +59,8 @@
       <section class="settings-panel" id="pt-signin-panel">
         <section class="summary-strip" aria-label="签到概况">
           <div class="summary-item">
-            <span class="summary-label">签到任务</span>
-            <strong id="pt-task-count">0</strong>
+            <span class="summary-label">发现站点</span>
+            <strong id="pt-discovered-count">0</strong>
           </div>
           <div class="summary-item">
             <span class="summary-label">已启用</span>
@@ -72,11 +72,51 @@
           </div>
         </section>
 
-        <div class="content-grid pt-content-grid">
+        <section class="panel discovery-panel" aria-labelledby="pt-discovery-title">
+          <div class="panel-heading discovery-heading">
+            <div>
+              <h2 id="pt-discovery-title">发现的 PT 站点</h2>
+              <p>CookieCloud · Playwright Chromium</p>
+            </div>
+            <div class="discovery-settings">
+              <label>
+                <span>周期</span>
+                <select id="pt-collect-interval" aria-label="签到周期">
+                  <option value="12">12 小时</option>
+                  <option value="24" selected>24 小时</option>
+                  <option value="48">48 小时</option>
+                  <option value="168">7 天</option>
+                </select>
+              </label>
+              <label>
+                <span>超时</span>
+                <select id="pt-collect-timeout" aria-label="签到超时">
+                  <option value="30">30 秒</option>
+                  <option value="60" selected>60 秒</option>
+                  <option value="90">90 秒</option>
+                  <option value="120">120 秒</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="discovery-actions">
+            <button class="button secondary" id="pt-select-all-button" type="button">全选可添加站点</button>
+            <button class="button primary" id="pt-collect-button" type="button" disabled>添加所选站点</button>
+          </div>
+          <div class="table-wrap discovery-table-wrap">
+            <table>
+              <thead><tr><th class="select-column"><span class="visually-hidden">选择</span></th><th>站点</th><th>凭据域名</th><th>识别依据</th><th>状态</th></tr></thead>
+              <tbody id="pt-candidate-rows"><tr><td class="empty" colspan="5">暂无识别到的 PT 站点</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <details class="manual-site-panel">
+          <summary>手动添加未识别站点 <span id="pt-unknown-count">0</span></summary>
           <section class="panel config-panel" aria-labelledby="pt-config-title">
             <div class="panel-heading">
               <div>
-                <h2 id="pt-config-title">新增签到任务</h2>
+                <h2 id="pt-config-title">新增自定义签到任务</h2>
                 <p>执行引擎：Playwright Chromium</p>
               </div>
             </div>
@@ -125,21 +165,7 @@
               </div>
             </form>
           </section>
-
-          <aside class="side-column">
-            <section class="panel status-panel" aria-labelledby="pt-runtime-title">
-              <div class="panel-heading compact">
-                <h2 id="pt-runtime-title">执行状态</h2>
-              </div>
-              <dl class="status-list">
-                <div><dt>浏览器</dt><dd>Chromium</dd></div>
-                <div><dt>运行方式</dt><dd>无界面真实浏览器</dd></div>
-                <div><dt>Cookie 来源</dt><dd>CookieCloud</dd></div>
-                <div><dt>失败证据</dt><dd>页面截图</dd></div>
-              </dl>
-            </section>
-          </aside>
-        </div>
+        </details>
 
         <section class="table-section" aria-labelledby="pt-sites-title">
           <div class="section-heading">

@@ -1,8 +1,10 @@
 const state = {
   sources: [],
   credentials: [],
+  ptCandidates: [],
   ptSites: [],
   ptExecutions: [],
+  ptSelection: new Set(),
   selected: "",
   activeView: "pt-signin",
 };
@@ -41,6 +43,12 @@ const elements = {
   ptSuccessPatterns: document.querySelector("#pt-success-patterns"),
   ptAlreadyPatterns: document.querySelector("#pt-already-patterns"),
   ptSaveButton: document.querySelector("#pt-save-button"),
+  ptCandidateRows: document.querySelector("#pt-candidate-rows"),
+  ptSelectAllButton: document.querySelector("#pt-select-all-button"),
+  ptCollectButton: document.querySelector("#pt-collect-button"),
+  ptCollectInterval: document.querySelector("#pt-collect-interval"),
+  ptCollectTimeout: document.querySelector("#pt-collect-timeout"),
+  ptUnknownCount: document.querySelector("#pt-unknown-count"),
   ptSiteRows: document.querySelector("#pt-site-rows"),
   ptHistoryRows: document.querySelector("#pt-history-rows"),
   upgradeStartButton: document.querySelector("#upgrade-start-button"),
@@ -150,6 +158,8 @@ function setBusy(busy) {
   elements.body.classList.toggle("loading", busy);
   elements.saveButton.disabled = busy;
   elements.ptSaveButton.disabled = busy;
+  elements.ptSelectAllButton.disabled = busy || selectablePtCandidates().length === 0;
+  elements.ptCollectButton.disabled = busy || state.ptSelection.size === 0;
   elements.refreshButton.disabled = busy;
 }
 
@@ -202,12 +212,78 @@ function applyPtCredentialSuggestion() {
 }
 
 function renderPtSummary() {
-  document.querySelector("#pt-task-count").textContent = state.ptSites.length;
+  document.querySelector("#pt-discovered-count").textContent = state.ptCandidates.filter((item) => item.recognized).length;
   document.querySelector("#pt-enabled-count").textContent = state.ptSites.filter((item) => item.enabled).length;
   const latest = state.ptExecutions[0];
   document.querySelector("#pt-recent-state").textContent = latest
     ? `${statusLabel(latest.status)} · ${latest.automation_name}`
     : "暂无记录";
+}
+
+function candidateReasonLabel(reason) {
+  return ({
+    site_catalog: "站点目录",
+    cookie_signature: "PT Cookie 特征",
+  })[reason] || "未识别";
+}
+
+function selectablePtCandidates() {
+  return state.ptCandidates.filter((item) => item.recognized && item.supported && !item.configured);
+}
+
+function updatePtCollectControls() {
+  const selectable = selectablePtCandidates();
+  const selectedCount = state.ptSelection.size;
+  elements.ptSelectAllButton.disabled = selectable.length === 0;
+  elements.ptSelectAllButton.textContent = selectable.length > 0 && selectedCount === selectable.length
+    ? "取消全选" : "全选可添加站点";
+  elements.ptCollectButton.disabled = selectedCount === 0;
+  elements.ptCollectButton.textContent = selectedCount ? `添加所选站点 (${selectedCount})` : "添加所选站点";
+}
+
+function renderPtCandidates() {
+  const recognized = state.ptCandidates.filter((item) => item.recognized);
+  const validIds = new Set(selectablePtCandidates().map((item) => item.credential.id));
+  state.ptSelection = new Set([...state.ptSelection].filter((id) => validIds.has(id)));
+  elements.ptUnknownCount.textContent = state.ptCandidates.filter((item) => !item.recognized).length;
+  elements.ptCandidateRows.replaceChildren();
+  if (!recognized.length) {
+    elements.ptCandidateRows.innerHTML = '<tr><td class="empty" colspan="5">暂无识别到的 PT 站点</td></tr>';
+    updatePtCollectControls();
+    return;
+  }
+  for (const candidate of recognized) {
+    const row = document.createElement("tr");
+    const selectCell = document.createElement("td");
+    selectCell.className = "select-column";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "candidate-checkbox";
+    checkbox.disabled = candidate.configured || !candidate.supported;
+    checkbox.checked = state.ptSelection.has(candidate.credential.id);
+    checkbox.setAttribute("aria-label", `选择 ${candidate.name}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.ptSelection.add(candidate.credential.id);
+      else state.ptSelection.delete(candidate.credential.id);
+      updatePtCollectControls();
+    });
+    selectCell.append(checkbox);
+    row.append(selectCell);
+
+    for (const value of [candidate.name, candidate.credential.domain, candidateReasonLabel(candidate.reason)]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    const statusCell = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `candidate-state ${candidate.configured ? "configured" : candidate.supported ? "available" : "unsupported"}`;
+    badge.textContent = candidate.configured ? "已添加" : candidate.supported ? "可添加" : "待专用适配";
+    statusCell.append(badge);
+    row.append(statusCell);
+    elements.ptCandidateRows.append(row);
+  }
+  updatePtCollectControls();
 }
 
 function renderPtSites() {
@@ -285,6 +361,7 @@ function renderPtHistory() {
 function renderPt() {
   renderPtCredentialOptions();
   renderPtSummary();
+  renderPtCandidates();
   renderPtSites();
   renderPtHistory();
 }
@@ -468,14 +545,16 @@ function renderCookieCloud() {
 async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
-    const [sources, credentials, ptSites, ptExecutions] = await Promise.all([
+    const [sources, credentials, ptCandidates, ptSites, ptExecutions] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
+      api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
       api("/api/v1/pt-signin/executions"),
     ]);
     state.sources = sources.items;
     state.credentials = credentials.items;
+    state.ptCandidates = ptCandidates.items;
     state.ptSites = ptSites.items;
     state.ptExecutions = ptExecutions.items;
     if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
@@ -490,6 +569,37 @@ async function refresh({ quiet = false } = {}) {
     setBusy(false);
   }
 }
+
+elements.ptSelectAllButton.addEventListener("click", () => {
+  const selectable = selectablePtCandidates();
+  const allSelected = selectable.length > 0 && selectable.every((item) => state.ptSelection.has(item.credential.id));
+  state.ptSelection = allSelected
+    ? new Set()
+    : new Set(selectable.map((item) => item.credential.id));
+  renderPtCandidates();
+});
+
+elements.ptCollectButton.addEventListener("click", async () => {
+  if (!state.ptSelection.size) return;
+  setBusy(true);
+  try {
+    const result = await api("/api/v1/pt-signin/sites/collect", {
+      method: "POST",
+      body: JSON.stringify({
+        credential_ids: [...state.ptSelection],
+        interval_hours: Number(elements.ptCollectInterval.value),
+        timeout_seconds: Number(elements.ptCollectTimeout.value),
+      }),
+    });
+    state.ptSelection.clear();
+    await refresh({ quiet: true });
+    showToast(`已添加 ${result.created.length} 个签到站点`);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
 
 elements.ptCredential.addEventListener("change", applyPtCredentialSuggestion);
 elements.ptUrl.addEventListener("input", () => { elements.ptUrl.dataset.suggested = "false"; });

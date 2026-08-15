@@ -27,6 +27,7 @@ from autosurf.infrastructure.database import (
     CredentialRecord,
     ExecutionRecord,
 )
+from autosurf.pt_discovery import discover_pt_site
 
 
 class CredentialInput(BaseModel):
@@ -70,6 +71,12 @@ class PtSignInInput(BaseModel):
 
 class PtSignInEnabledInput(BaseModel):
     enabled: bool
+
+
+class PtSignInCollectInput(BaseModel):
+    credential_ids: list[str] = Field(min_length=1, max_length=200)
+    interval_hours: int = Field(default=24, ge=1, le=720)
+    timeout_seconds: int = Field(default=60, ge=5, le=180)
 
 
 class LoginInput(BaseModel):
@@ -472,6 +479,61 @@ def list_pt_signin_sites(request: Request) -> dict[str, Any]:
         return {"items": [_pt_signin_site_view(record, latest.get(record.id)) for record in records]}
 
 
+@router.get("/pt-signin/candidates")
+def list_pt_signin_candidates(request: Request, include_unknown: bool = True) -> dict[str, Any]:
+    return {"items": _pt_signin_candidates(request, include_unknown)}
+
+
+@router.post("/pt-signin/sites/collect", status_code=201)
+def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dict[str, Any]:
+    credential_ids = list(dict.fromkeys(data.credential_ids))
+    candidates = {item["credential"]["id"]: item for item in _pt_signin_candidates(request, True)}
+    requested = [candidates.get(credential_id) for credential_id in credential_ids]
+    if any(item is None or not item["recognized"] for item in requested):
+        raise HTTPException(status_code=422, detail="所选凭据中包含未识别的 PT 站点")
+    unsupported = [item["name"] for item in requested if not item["supported"]]
+    if unsupported:
+        raise HTTPException(status_code=422, detail=f"以下站点尚需专用适配：{'、'.join(unsupported)}")
+
+    created_ids: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in requested:
+        if candidate["configured"]:
+            skipped.append(candidate)
+            continue
+        config = {
+            "url": candidate["url"],
+            "credential_domain": candidate["credential"]["domain"],
+            "timeout_seconds": data.timeout_seconds,
+            "click_selector": None,
+            "success_patterns": [],
+            "already_patterns": [],
+            "discovered": True,
+            "discovery_reason": candidate["reason"],
+        }
+        try:
+            record = request.app.state.automations.create(
+                candidate["name"], "pt_signin", data.interval_hours * 3600, config,
+                candidate["credential"]["id"],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        created_ids.append(record.id)
+
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.id.in_(created_ids)
+        ).order_by(AutomationRecord.name)).all() if created_ids else []
+        return {
+            "created": [_pt_signin_site_view(record, None) for record in records],
+            "skipped": [{
+                "credential_id": item["credential"]["id"],
+                "automation_id": item["automation_id"],
+                "reason": "already_configured",
+            } for item in skipped],
+        }
+
+
 @router.patch("/pt-signin/sites/{automation_id}/enabled")
 def set_pt_signin_site_enabled(automation_id: str, data: PtSignInEnabledInput,
                                request: Request) -> dict[str, Any]:
@@ -520,6 +582,50 @@ def _validate_pt_url(url: str, credential_domain: str) -> None:
     domain = credential_domain.lower().lstrip(".").rstrip(".")
     if hostname != domain and not hostname.endswith(f".{domain}"):
         raise HTTPException(status_code=422, detail="签到地址必须属于所选 CookieCloud 凭据域名")
+
+
+def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[str, Any]]:
+    with request.app.state.sessions() as session:
+        credentials = session.scalars(select(CredentialRecord).where(
+            CredentialRecord.provider == "cookiecloud"
+        ).order_by(CredentialRecord.domain, CredentialRecord.name)).all()
+        automations = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(AutomationRecord.name)).all()
+        configured = {
+            record.credential_id: record.id for record in automations if record.credential_id
+        }
+        items: list[dict[str, Any]] = []
+        for credential in credentials:
+            try:
+                cookie_names = set(request.app.state.credentials.cookies_for(credential))
+            except ValueError:
+                cookie_names = set()
+            discovery = discover_pt_site(credential.domain, cookie_names)
+            if discovery is None and not include_unknown:
+                continue
+            automation_id = configured.get(credential.id)
+            items.append({
+                "credential": {
+                    "id": credential.id,
+                    "name": credential.name,
+                    "domain": credential.domain,
+                    "version": credential.version,
+                    "updated_at": credential.updated_at,
+                },
+                "name": discovery.name if discovery else credential.domain,
+                "url": discovery.url if discovery else f"https://{credential.domain}/attendance.php",
+                "recognized": discovery is not None,
+                "reason": discovery.reason if discovery else "unknown",
+                "strategy": discovery.strategy if discovery else None,
+                "supported": discovery.supported if discovery else False,
+                "configured": automation_id is not None,
+                "automation_id": automation_id,
+            })
+    return sorted(items, key=lambda item: (
+        not item["recognized"], not item["supported"], item["name"].casefold(),
+        item["credential"]["domain"],
+    ))
 
 
 def _require_pt_automation(record: AutomationRecord | None) -> AutomationRecord:

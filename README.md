@@ -132,7 +132,9 @@ Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported
 
 ### PT sign-in
 
-Open **PT 站签到** in the management interface and choose a CookieCloud credential. AutoSurf suggests `https://<credential-domain>/attendance.php`; adjust it when the tracker uses a different sign-in page. The URL must remain on the selected credential domain or one of its subdomains.
+Open **PT 站签到** in the management interface. AutoSurf discovers PT candidates from its built-in site catalog and high-confidence PT cookie signatures, then lets you select and add all supported sites in one operation. Cookie names and values are never returned by the discovery API. Existing tasks are de-duplicated by credential, and sites that require a dedicated API adapter are shown but cannot be bulk-added.
+
+Credentials that cannot be identified remain available under **手动添加未识别站点**. AutoSurf suggests `https://<credential-domain>/attendance.php`; adjust it when the tracker uses a different sign-in page. The URL must remain on the selected credential domain or one of its subdomains.
 
 Each run starts an isolated headless Playwright Chromium browser, injects only cookies applicable to the target host, executes the page JavaScript, and checks for already-signed, successful, expired-login, and challenge states. A common sign-in control is clicked automatically. Site-specific CSS selectors and result text can be configured under the advanced settings. Unknown, blocked, and timed-out results are not recorded as successful, and failed runs retain a screenshot under `data/browser-artifacts`.
 
@@ -140,6 +142,8 @@ The PT management API is available at:
 
 - `POST /api/v1/pt-signin/sites`
 - `GET /api/v1/pt-signin/sites`
+- `GET /api/v1/pt-signin/candidates`
+- `POST /api/v1/pt-signin/sites/collect`
 - `PATCH /api/v1/pt-signin/sites/{id}/enabled`
 - `POST /api/v1/pt-signin/sites/{id}/run`
 - `DELETE /api/v1/pt-signin/sites/{id}`

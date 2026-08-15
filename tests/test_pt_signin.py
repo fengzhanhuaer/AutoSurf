@@ -5,6 +5,7 @@ from autosurf.automations.pt_signin import PtSignInHandler, classify_pt_page
 from autosurf.config import Settings
 from autosurf.domain.models import RunContext, RunOutcome
 from autosurf.main import create_app
+from autosurf.pt_discovery import discover_pt_site
 
 
 @pytest.fixture
@@ -35,6 +36,28 @@ def test_pt_page_classification_distinguishes_common_results():
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "获得 [10]", {"success_patterns": ["获得 [10]"]}
     ) == RunOutcome.SUCCESS
+
+
+def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknown_sites():
+    catalog = discover_pt_site(".club.hares.top", {"sid"})
+    signature = discover_pt_site("tracker.test", {"C_SECURE_UID", "session"})
+
+    assert catalog is not None
+    assert catalog.name == "Hares"
+    assert catalog.url == "https://club.hares.top/attendance.php?action=sign"
+    assert catalog.supported is True
+    assert signature is not None
+    assert signature.reason == "cookie_signature"
+    assert signature.url == "https://tracker.test/attendance.php"
+    assert discover_pt_site("example.com", {"sid", "theme"}) is None
+
+
+def test_pt_discovery_marks_api_only_sites_for_a_dedicated_adapter():
+    discovery = discover_pt_site("zhuque.in", {"c_secure_uid"})
+
+    assert discovery is not None
+    assert discovery.strategy == "custom_required"
+    assert discovery.supported is False
 
 
 @pytest.mark.asyncio
@@ -112,3 +135,79 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     assert history.json()["items"][0]["status"] == "pending"
     assert deleted.status_code == 204
     assert empty.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(settings):
+    app = create_app(settings)
+    recognized = app.state.credentials.upsert(
+        "cookiecloud:test:tracker.test",
+        "tracker.test",
+        {"c_secure_uid": "1", "sid": "secret"},
+        provider="cookiecloud",
+    )
+    catalog = app.state.credentials.upsert(
+        "cookiecloud:test:tjupt.org",
+        "tjupt.org",
+        {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    unknown = app.state.credentials.upsert(
+        "cookiecloud:test:example.com",
+        "example.com",
+        {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    unsupported = app.state.credentials.upsert(
+        "cookiecloud:test:zhuque.in",
+        "zhuque.in",
+        {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    app.state.credentials.upsert("manual", "manual.test", {"passkey": "secret"}, provider="manual")
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        candidates = await client.get("/api/v1/pt-signin/candidates", auth=auth)
+        recognized_only = await client.get(
+            "/api/v1/pt-signin/candidates?include_unknown=false", auth=auth
+        )
+        rejected = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
+            "credential_ids": [unknown.id], "interval_hours": 12, "timeout_seconds": 45,
+        })
+        unsupported_result = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
+            "credential_ids": [unsupported.id],
+        })
+        collected = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
+            "credential_ids": [recognized.id, recognized.id, catalog.id],
+            "interval_hours": 12,
+            "timeout_seconds": 45,
+        })
+        collected_again = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
+            "credential_ids": [recognized.id, catalog.id],
+        })
+        refreshed = await client.get("/api/v1/pt-signin/candidates", auth=auth)
+
+    items = candidates.json()["items"]
+    by_id = {item["credential"]["id"]: item for item in items}
+    assert set(by_id) == {recognized.id, catalog.id, unknown.id, unsupported.id}
+    assert by_id[recognized.id]["reason"] == "cookie_signature"
+    assert by_id[catalog.id]["name"] == "TJUPT"
+    assert by_id[unknown.id]["recognized"] is False
+    assert by_id[unsupported.id]["supported"] is False
+    assert "c_secure_uid" not in candidates.text
+    assert "secret" not in candidates.text
+    assert {item["credential"]["id"] for item in recognized_only.json()["items"]} == {
+        recognized.id, catalog.id, unsupported.id,
+    }
+    assert rejected.status_code == 422
+    assert unsupported_result.status_code == 422
+    assert "尚需专用适配" in unsupported_result.json()["detail"]
+    assert collected.status_code == 201
+    assert len(collected.json()["created"]) == 2
+    assert {item["interval_hours"] for item in collected.json()["created"]} == {12}
+    assert {item["config"]["timeout_seconds"] for item in collected.json()["created"]} == {45}
+    assert collected_again.json()["created"] == []
+    assert len(collected_again.json()["skipped"]) == 2
+    assert sum(item["configured"] for item in refreshed.json()["items"]) == 2
