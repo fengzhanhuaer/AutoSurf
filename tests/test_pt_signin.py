@@ -152,6 +152,13 @@ def test_pt_profile_stats_normalization_supports_nexusphp_labels():
         "uploaded": "上传量 10.92TB",
         "seeding_count": "共有0记录",
     }) == {"uploaded": "10.92TB", "seeding_count": "0"}
+    assert normalize_pt_profile_stats({
+        "pairs": [],
+        "body": "",
+        "title": "HDVIDEO :: 用户详情 - mapleren - Powered by NexusPHP",
+        "profile_username": "上传量: 512.34 GB",
+    }) == {"username": "mapleren"}
+    assert sanitize_pt_profile_stats({"username": "下载量: 32.38 GB"}) == {}
 
 
 @pytest.mark.asyncio

@@ -594,8 +594,22 @@ async def extract_pt_profile_stats(page: Any) -> dict[str, str]:
             const value = term.nextElementSibling;
             if (value?.matches('dd')) addPair(term.innerText, value.innerText);
           }
+          const currentUrl = location.href.split('#')[0];
           const profileLink = [...document.querySelectorAll('a[href*="userdetails.php?id="]')]
-            .find((anchor) => anchor.href === location.href || anchor.href.split('#')[0] === location.href.split('#')[0]);
+            .filter((anchor) => anchor.href.split('#')[0] === currentUrl)
+            .map((anchor) => {
+              const text = (anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim();
+              const parent = (anchor.parentElement?.innerText || anchor.parentElement?.textContent || '')
+                .replace(/\s+/g, ' ').trim();
+              const usernameLike = /^[\p{L}\p{N}_.-]{2,40}$/u.test(text);
+              const fieldLabel = /^(?:上传量|上傳量|下载量|下載量|分享率|魔力值?|积分|電影票|电影票|H&R)$/i.test(text);
+              let score = usernameLike && !fieldLabel ? 1 : 0;
+              if (score && parent === text) score += 100;
+              if (score && /欢迎回来|歡迎回來|welcome\s+back/i.test(parent)) score += 80;
+              return {anchor, score};
+            })
+            .sort((left, right) => right.score - left.score)
+            .find((item) => item.score > 0)?.anchor;
           return {
             pairs,
             body: (document.body?.innerText || '').slice(0, 100000),
@@ -637,16 +651,33 @@ def normalize_pt_profile_stats(value: Any) -> dict[str, str]:
                 result[key] = text
                 break
 
+    username = _sanitize_pt_username(result.get("username"))
+    if username:
+        result["username"] = username
+    else:
+        result.pop("username", None)
     if not result.get("username"):
-        username = str(value.get("profile_username") or "").strip()
+        username = _sanitize_pt_username(value.get("profile_username"))
         if username:
-            result["username"] = username[:80]
+            result["username"] = username
     body = str(value.get("body") or "")
     title = str(value.get("title") or "")
     if not result.get("username"):
+        match = re.search(
+            r"(?:用户详情|用戶詳情)\s*[-:：]\s*([^\s|:：–—-]{1,40})",
+            title,
+            re.IGNORECASE,
+        )
+        if match:
+            username = _sanitize_pt_username(match.group(1))
+            if username:
+                result["username"] = username
+    if not result.get("username"):
         match = re.search(r"([^\s|_-]{1,40})\s*(?:的|之)\s*(?:个人资料|個人資料|个人信息)", f"{title}\n{body}")
         if match:
-            result["username"] = match.group(1).strip()
+            username = _sanitize_pt_username(match.group(1))
+            if username:
+                result["username"] = username
 
     fallback_patterns = {
         "uploaded": r"(?:上传量|上傳量|Uploaded)\s*[:：]?\s*([\d,.]+\s*[KMGTPE]?i?B)",
@@ -663,6 +694,20 @@ def normalize_pt_profile_stats(value: Any) -> dict[str, str]:
     return sanitize_pt_profile_stats(result)
 
 
+def _sanitize_pt_username(value: Any) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or re.match(
+        r"^(?:上传量|上傳量|下载量|下載量|分享率|分享比率|魔力值?|积分|積分|"
+        r"电影票|電影票|邀请|邀請|当前活动|當前活動|可连接|可連接|连接数|連接數|"
+        r"H&R|认领|認領)(?:\s*[:：]|$)",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
+    match = re.match(r"[\w.-]{1,40}", text, re.UNICODE)
+    return match.group(0) if match else None
+
+
 def sanitize_pt_profile_stats(value: dict[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     allowed = {
@@ -676,10 +721,10 @@ def sanitize_pt_profile_stats(value: dict[str, Any]) -> dict[str, str]:
         if not text:
             continue
         if key == "username":
-            match = re.match(r"[\w.-]{1,40}", text, re.UNICODE)
-            if not match:
+            username = _sanitize_pt_username(text)
+            if not username:
                 continue
-            text = match.group(0)
+            text = username
         elif key == "user_level":
             text = re.split(
                 r"签到(?:得)?魔力|当前时间|校验等级|等级参考|修改此项|参考《|"
