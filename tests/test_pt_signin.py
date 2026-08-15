@@ -15,9 +15,11 @@ from autosurf.automations.pt_signin import (
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
+    discover_pt_profile_url,
     extract_text_signin_history,
     normalize_site_signin_history,
     normalize_pt_profile_stats,
+    page_body_text,
     sanitize_pt_profile_stats,
     profile_url_from_cookies,
     pt_signin_history_url,
@@ -331,6 +333,96 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 
     assert result.outcome == RunOutcome.BLOCKED
     assert result.message == "OpenCD 签到需要图片验证码"
+
+
+@pytest.mark.asyncio
+async def test_tjupt_confirmation_navigation_is_success_without_result_copy():
+    class Locator:
+        first = None
+
+        def __init__(self, page, body=False):
+            self.page = page
+            self.body = body
+            self.first = self
+
+        async def inner_text(self):
+            if self.page.confirmed:
+                return "签到记录"
+            return "已断签 2 天，请点击选择补签或放弃补签重新开始签到"
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.page.confirmed = True
+            self.page.url = "https://tjupt.org/attendance.php?action=confirm"
+
+    class Response:
+        status = 200
+
+    class Navigation:
+        @property
+        def value(self):
+            async def response():
+                return Response()
+            return response()
+
+    class NavigationContext:
+        async def __aenter__(self):
+            return Navigation()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Page:
+        url = "https://tjupt.org/attendance.php"
+        confirmed = False
+        frames = None
+
+        def locator(self, selector):
+            return Locator(self, body=selector == "body")
+
+        def expect_navigation(self, **_kwargs):
+            return NavigationContext()
+
+        async def evaluate(self, _script):
+            return []
+
+    page = Page()
+    result = await TjuptAdapter().sign_in(page, RunContext(
+        "test", {"url": page.url}, {"sid": "secret"},
+    ))
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["clicked"] is True
+
+
+@pytest.mark.asyncio
+async def test_frame_text_and_profile_discovery_include_child_frames():
+    class Body:
+        def __init__(self, value):
+            self.value = value
+
+        async def inner_text(self):
+            return self.value
+
+    class Frame:
+        def __init__(self, body, profile=None):
+            self.body = body
+            self.profile = profile
+
+        def locator(self, _selector):
+            return Body(self.body)
+
+        async def evaluate(self, _script):
+            return self.profile
+
+    child = Frame("mapleren Checked in", "https://hdcity.city/user.php?id=7")
+    page = Frame("home")
+    page.frames = [page, child]
+
+    assert await page_body_text(page) == "home\nmapleren Checked in"
+    assert await discover_pt_profile_url(page) == "https://hdcity.city/user.php?id=7"
 
 
 def test_known_pt_routes_and_adapter_domains_are_explicit():

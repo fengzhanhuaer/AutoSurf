@@ -221,6 +221,10 @@ class TjuptAdapter:
             return await _classified_page_result(
                 page, outcome, page.url, status_code, clicked=True, context=context,
             )
+        if status_code is None or 200 <= status_code < 400:
+            return await _classified_page_result(
+                page, RunOutcome.SUCCESS, page.url, status_code, clicked=True, context=context,
+            )
         return RunResult(
             RunOutcome.FAILED,
             "TJUPT 补签后没有返回可识别结果",
@@ -316,7 +320,7 @@ class PtSignInHandler:
     async def _generic_sign_in(self, page: Any, context: RunContext, status_code: int | None,
                                screenshot: Path) -> RunResult:
         config = context.config
-        body = (await page.locator("body").inner_text())[:1_000_000]
+        body = await page_body_text(page)
         outcome = classify_pt_page(page.url, status_code, body, config)
         if outcome:
             return await _classified_page_result(
@@ -343,7 +347,7 @@ class PtSignInHandler:
             await page.wait_for_timeout(min(max(int(config.get("wait_after_click_ms", 1500)), 0), 10_000))
             with suppress(Exception):
                 await page.wait_for_load_state("networkidle", timeout=5_000)
-            body = (await page.locator("body").inner_text())[:1_000_000]
+            body = await page_body_text(page)
             outcome = classify_pt_page(page.url, None, body, config)
             if outcome:
                 return await _classified_page_result(
@@ -454,24 +458,48 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
 
 
 async def discover_pt_profile_url(page: Any) -> str | None:
-    with suppress(Exception):
-        result = await page.evaluate(r"""() => {
+    frames = getattr(page, "frames", None) or [page]
+    for frame in frames:
+        with suppress(Exception):
+            result = await frame.evaluate(r"""() => {
           const anchors = [...document.querySelectorAll('a[href]')];
           const candidates = anchors.map((anchor) => {
             const href = anchor.href || '';
             const text = (anchor.innerText || anchor.textContent || '').trim();
             let score = 0;
             if (/userdetails\.php\?[^#]*\bid=/i.test(href)) score = 100;
+            else if (/(?:^|\/)user\.php\?[^#]*\b(?:id|uid)=/i.test(href)) score = 75;
             else if (/\/(?:users?|profile)\//i.test(href)) score = 60;
             if (/个人(?:资料|信息|主页)|用户详情|my\s*profile/i.test(text)) score += 30;
+            const container = anchor.closest('nav, header, footer, tr, td, div');
+            const context = (container?.innerText || container?.textContent || '');
+            if (/logout|退出|checked\s+in/i.test(context)) score += 40;
             return {href, score};
           }).filter((item) => item.score > 0);
           candidates.sort((left, right) => right.score - left.score);
           return candidates[0]?.href || null;
         }""")
-        if isinstance(result, str) and result:
-            return result
+            if isinstance(result, str) and result:
+                return result
     return None
+
+
+async def page_body_text(page: Any) -> str:
+    frames = getattr(page, "frames", None) or [page]
+    parts: list[str] = []
+    total = 0
+    for frame in frames:
+        with suppress(Exception):
+            value = await frame.locator("body").inner_text()
+            if not value:
+                continue
+            remaining = 1_000_000 - total
+            if remaining <= 0:
+                break
+            text = str(value)[:remaining]
+            parts.append(text)
+            total += len(text)
+    return "\n".join(parts)
 
 
 def profile_url_from_cookies(site_url: str, cookies: dict[str, str]) -> str | None:
