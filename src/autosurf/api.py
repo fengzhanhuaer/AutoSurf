@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
 from autosurf.domain.models import utc_now
+from autosurf.automations.pt_signin import sanitize_pt_profile_stats
 from autosurf.infrastructure.database import (
     AutomationRecord,
     CookieCloudBlob,
@@ -946,11 +947,11 @@ def _profile_stats_from_result(result_json: str | None) -> dict[str, str]:
                 .get("profile_stats")
             )
         if isinstance(stats, dict):
-            return {
+            return sanitize_pt_profile_stats({
                 str(key): str(value)[:160]
                 for key, value in stats.items()
                 if value is not None and str(value).strip()
-            }
+            })
     return {}
 
 
@@ -1004,6 +1005,17 @@ def update_cookiecloud_source_settings(uuid: str, data: CookieCloudSourceSetting
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _cookiecloud_source_view(request, uuid)
+
+
+@router.post("/cookiecloud/sources/{uuid}/password/reveal")
+def reveal_cookiecloud_password(uuid: str, request: Request, response: Response) -> dict[str, str]:
+    try:
+        password = request.app.state.cookiecloud.password_for(uuid)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return {"password": password}
 
 
 @router.post("/cookiecloud/sources/{uuid}/import")

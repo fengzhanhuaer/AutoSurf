@@ -13,6 +13,7 @@ from autosurf.automations.pt_signin import (
     extract_text_signin_history,
     normalize_site_signin_history,
     normalize_pt_profile_stats,
+    sanitize_pt_profile_stats,
     profile_url_from_cookies,
     pt_signin_history_url,
     pttime_history_url_from_profile,
@@ -112,6 +113,22 @@ def test_pt_profile_stats_normalization_supports_nexusphp_labels():
         "seeding_count": "8",
         "seeding_size": "4.2 TiB",
     }
+    assert sanitize_pt_profile_stats({
+        "username": "fenger💾[用户可用][考核通过] 修改此项",
+        "user_level": "(小学)Power User 🩺校验等级加群参考",
+    }) == {"username": "fenger", "user_level": "Power User"}
+    assert sanitize_pt_profile_stats({
+        "user_level": "[签到得魔力] 当前时间: 0:0",
+    }) == {}
+    assert sanitize_pt_profile_stats({
+        "uploaded": "[签到得魔力] 当前时间: 0 0",
+        "bonus": "[签到得魔力] 当前时间: 0 0",
+        "seeding_count": "[显示/隐藏] [在种子列表查看]",
+    }) == {}
+    assert sanitize_pt_profile_stats({
+        "uploaded": "上传量 10.92TB",
+        "seeding_count": "共有0记录",
+    }) == {"uploaded": "10.92TB", "seeding_count": "0"}
 
 
 @pytest.mark.asyncio

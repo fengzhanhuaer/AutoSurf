@@ -62,6 +62,8 @@ h2 { font-size: 16px; line-height: 1.35; font-weight: 700; }
 .settings-tab.active { color: var(--primary); }
 .settings-tab.active::after { background: var(--primary); }
 .settings-panel[hidden] { display: none; }
+.signin-tabs { margin-top: 2px; }
+.signin-subpanel[hidden] { display: none; }
 
 .summary-strip { display: grid; grid-template-columns: 1fr 1fr 1.5fr; margin-bottom: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .summary-item { min-height: 78px; padding: 16px 20px; display: flex; flex-direction: column; justify-content: center; border-right: 1px solid var(--border); }

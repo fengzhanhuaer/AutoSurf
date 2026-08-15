@@ -9,6 +9,7 @@ const state = {
   selected: "",
   activeView: "pt-signin",
   activePtTab: "signin",
+  activeSigninTab: "tasks",
 };
 
 const elements = {
@@ -20,7 +21,10 @@ const elements = {
   ptTabList: document.querySelector("#pt-tabs"),
   settingsTabs: document.querySelectorAll("[data-settings-tab]"),
   ptTabs: document.querySelectorAll("[data-pt-tab]"),
+  signinTabs: document.querySelectorAll("[data-signin-tab]"),
   ptPanel: document.querySelector("#pt-signin-panel"),
+  ptTasksPanel: document.querySelector("#pt-tasks-panel"),
+  ptHistoryPanel: document.querySelector("#pt-history-panel"),
   ptStatsPanel: document.querySelector("#pt-stats-panel"),
   ptStatsRows: document.querySelector("#pt-stats-rows"),
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
@@ -188,6 +192,18 @@ function setActivePtTab(value) {
   elements.ptStatsPanel.hidden = systemView || state.activePtTab !== "stats";
   for (const button of elements.ptTabs) {
     const active = button.dataset.ptTab === state.activePtTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  }
+}
+
+function setActiveSigninTab(value) {
+  state.activeSigninTab = value === "history" ? "history" : "tasks";
+  elements.ptTasksPanel.hidden = state.activeSigninTab !== "tasks";
+  elements.ptHistoryPanel.hidden = state.activeSigninTab !== "history";
+  for (const button of elements.signinTabs) {
+    const active = button.dataset.signinTab === state.activeSigninTab;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
@@ -699,8 +715,9 @@ function renderSelected() {
   elements.uuid.value = uuid;
   elements.uuid.disabled = Boolean(source);
   elements.password.value = "";
+  elements.password.placeholder = source?.password_configured ? "已保存（不自动回显）" : "";
   elements.password.required = !source?.password_configured;
-  elements.passwordHint.textContent = source?.password_configured ? "已设置；留空将保留当前密码" : "新配置必须填写密码";
+  elements.passwordHint.textContent = source?.password_configured ? "已加密保存；留空将保留当前密码" : "新配置必须填写密码";
   updateCredentialCopyControls();
   elements.autoImport.checked = source ? source.auto_import : true;
   elements.importButton.disabled = !source?.configured || !source?.password_configured || !source?.blob_updated_at;
@@ -715,7 +732,11 @@ function renderSelected() {
 
 function updateCredentialCopyControls() {
   elements.copyUuidButton.disabled = !elements.uuid.value.trim();
-  elements.copyPasswordButton.disabled = !elements.password.value;
+  const savedPasswordAvailable = Boolean(sourceByUuid(state.selected)?.password_configured);
+  elements.copyPasswordButton.disabled = !elements.password.value && !savedPasswordAvailable;
+  const label = elements.password.value ? "复制当前输入的 CookieCloud 密码" : "复制已保存的 CookieCloud 密码";
+  elements.copyPasswordButton.title = label;
+  elements.copyPasswordButton.setAttribute("aria-label", label);
 }
 
 async function copyCredentialValue(value, successMessage) {
@@ -963,9 +984,23 @@ elements.password.addEventListener("input", updateCredentialCopyControls);
 elements.copyUuidButton.addEventListener("click", () => (
   copyCredentialValue(elements.uuid.value.trim(), "UUID 已复制")
 ));
-elements.copyPasswordButton.addEventListener("click", () => (
-  copyCredentialValue(elements.password.value, "CookieCloud 密码已复制")
-));
+elements.copyPasswordButton.addEventListener("click", async () => {
+  try {
+    let password = elements.password.value;
+    if (!password) {
+      const uuid = state.selected;
+      if (!uuid) return;
+      const result = await api(
+        `/api/v1/cookiecloud/sources/${encodeURIComponent(uuid)}/password/reveal`,
+        { method: "POST", body: "{}", cache: "no-store" },
+      );
+      password = result.password;
+    }
+    await copyCredentialValue(password, "CookieCloud 密码已复制");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+});
 elements.logoutButton.addEventListener("click", async () => {
   try { await fetch("/api/auth/logout", { method: "POST" }); } finally { location.replace("/login"); }
 });
@@ -1012,7 +1047,23 @@ ptTabs.forEach((button, index) => {
     setActivePtTab(ptTabs[nextIndex].dataset.ptTab);
   });
 });
+const signinTabs = [...elements.signinTabs];
+signinTabs.forEach((button, index) => {
+  button.addEventListener("click", () => setActiveSigninTab(button.dataset.signinTab));
+  button.addEventListener("keydown", (event) => {
+    let nextIndex = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % signinTabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + signinTabs.length) % signinTabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = signinTabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    signinTabs[nextIndex].focus();
+    setActiveSigninTab(signinTabs[nextIndex].dataset.signinTab);
+  });
+});
 window.addEventListener("hashchange", () => setActiveView(location.hash.slice(1), { syncHash: false }));
 
+setActiveSigninTab("tasks");
 setActiveView(location.hash.slice(1));
 refresh({ quiet: true });

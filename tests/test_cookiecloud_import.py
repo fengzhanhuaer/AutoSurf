@@ -115,6 +115,18 @@ async def test_cookiecloud_source_list_hides_password_and_preserves_it_on_update
         }
         assert "\"password\":\"password\"" not in created.text
 
+        unauthenticated_reveal = await client.post(
+            "/api/v1/cookiecloud/sources/test-id/password/reveal"
+        )
+        revealed = await client.post(
+            "/api/v1/cookiecloud/sources/test-id/password/reveal", auth=auth
+        )
+        assert unauthenticated_reveal.status_code == 401
+        assert revealed.status_code == 200
+        assert revealed.json() == {"password": "password"}
+        assert revealed.headers["cache-control"] == "no-store"
+        assert revealed.headers["pragma"] == "no-cache"
+
         updated = await client.patch("/api/v1/cookiecloud/sources/test-id/settings", auth=auth, json={
             "auto_import": False,
         })

@@ -61,6 +61,16 @@ class CookieCloudStore:
             session.flush()
             return source
 
+    def password_for(self, uuid: str) -> str:
+        with self.sessions() as session:
+            source = session.get(CookieCloudSource, uuid)
+            if source is None or not source.encrypted_password:
+                raise ValueError("CookieCloud password has not been configured")
+            password = self.secrets.decrypt_json(source.encrypted_password)
+        if not isinstance(password, str) or not password:
+            raise ValueError("CookieCloud password is invalid")
+        return password
+
     def import_credentials(self, uuid: str, password: str | None = None) -> dict[str, Any]:
         with self.sessions() as session:
             blob = session.get(CookieCloudBlob, uuid)

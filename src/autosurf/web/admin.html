@@ -83,6 +83,20 @@
           </div>
         </section>
 
+        <div class="settings-tabs signin-tabs" id="pt-signin-tabs" role="tablist" aria-label="站点签到">
+          <button class="settings-tab active" id="pt-signin-tab-tasks" type="button" role="tab"
+                  aria-selected="true" aria-controls="pt-tasks-panel" data-signin-tab="tasks">
+            签到任务
+          </button>
+          <button class="settings-tab" id="pt-signin-tab-history" type="button" role="tab"
+                  aria-selected="false" aria-controls="pt-history-panel" data-signin-tab="history" tabindex="-1">
+            执行记录
+          </button>
+        </div>
+
+        <section class="signin-subpanel" id="pt-tasks-panel" role="tabpanel"
+                 aria-labelledby="pt-signin-tab-tasks">
+
         <section class="panel discovery-panel" aria-labelledby="pt-discovery-title">
           <div class="panel-heading discovery-heading">
             <div>
@@ -216,6 +230,10 @@
           </div>
         </section>
 
+        </section>
+
+        <section class="signin-subpanel" id="pt-history-panel" role="tabpanel"
+                 aria-labelledby="pt-signin-tab-history" hidden>
         <section class="table-section" aria-labelledby="pt-history-title">
           <div class="section-heading">
             <div><h2 id="pt-history-title">执行记录</h2></div>
@@ -226,6 +244,7 @@
               <tbody id="pt-history-rows"><tr><td class="empty" colspan="9">暂无签到任务</td></tr></tbody>
             </table>
           </div>
+        </section>
         </section>
       </section>
 
@@ -310,7 +329,7 @@
               <span class="field-with-action">
                 <input id="password" name="password" type="password" maxlength="1024" autocomplete="new-password">
                 <button class="icon-button small" id="copy-password-button" type="button"
-                        title="复制当前输入的密码" aria-label="复制当前输入的 CookieCloud 密码" disabled>⧉</button>
+                        title="复制 CookieCloud 密码" aria-label="复制 CookieCloud 密码" disabled>⧉</button>
               </span>
               <small id="password-hint">新配置必须填写密码</small>
             </label>

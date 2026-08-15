@@ -354,7 +354,7 @@ def normalize_pt_profile_stats(value: Any) -> dict[str, str]:
     result: dict[str, str] = {}
     for key, labels in aliases.items():
         for label, text in normalized_pairs:
-            if any(alias.casefold() == label or alias.casefold() in label for alias in labels):
+            if any(alias.casefold() == label for alias in labels):
                 result[key] = text
                 break
 
@@ -381,6 +381,56 @@ def normalize_pt_profile_stats(value: Any) -> dict[str, str]:
         match = re.search(pattern, body, re.IGNORECASE)
         if match:
             result[key] = match.group(1).strip()
+    return sanitize_pt_profile_stats(result)
+
+
+def sanitize_pt_profile_stats(value: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    allowed = {
+        "username", "user_level", "uploaded", "downloaded", "ratio",
+        "bonus", "seeding_count", "seeding_size",
+    }
+    for key, raw in value.items():
+        if key not in allowed or raw is None:
+            continue
+        text = re.sub(r"\s+", " ", str(raw)).strip()
+        if not text:
+            continue
+        if key == "username":
+            match = re.match(r"[\w.-]{1,40}", text, re.UNICODE)
+            if not match:
+                continue
+            text = match.group(0)
+        elif key == "user_level":
+            text = re.split(
+                r"签到(?:得)?魔力|当前时间|校验等级|等级参考|修改此项|参考《|"
+                r"[\U0001F000-\U0001FAFF]",
+                text,
+                maxsplit=1,
+            )[0].strip(" []【】|·:：-")
+            text = re.sub(r"^[（(][^()（）]{1,20}[)）]\s*", "", text)
+            if not text or len(text) > 60 or not re.search(r"[\w\u4e00-\u9fff]", text):
+                continue
+        elif re.search(r"签到(?:得)?魔力|当前时间|显示/隐藏|种子列表查看", text):
+            continue
+        elif key in {"uploaded", "downloaded", "seeding_size"}:
+            match = re.search(r"\d[\d,.]*\s*[KMGTPE](?:i?B)?", text, re.IGNORECASE)
+            if not match:
+                continue
+            text = match.group(0)
+        elif key in {"ratio", "bonus"}:
+            match = re.search(r"(?:\d[\d,.]*|∞|Inf)", text, re.IGNORECASE)
+            if not match:
+                continue
+            text = match.group(0)
+        elif key == "seeding_count":
+            match = re.search(r"\d+", text)
+            if not match:
+                continue
+            text = match.group(0)
+        else:
+            text = text[:80]
+        result[key] = text
     return result
 
 
