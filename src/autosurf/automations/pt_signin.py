@@ -17,10 +17,13 @@ DEFAULT_ALREADY_PATTERNS = (
     r"今日已签到",
     r"今天已签到",
     r"已经签到",
+    r"今天已经签过到了",
+    r"\[已签到\]",
     r"已签到.{0,20}无需再签",
     r"签到已得",
     r"already\s+(?:checked|signed)",
     r"checked\s+in\s+today",
+    r"\bchecked\s+in\b",
 )
 DEFAULT_SUCCESS_PATTERNS = (
     r"签到成功",
@@ -50,7 +53,7 @@ CHALLENGE_PATTERNS = (
     r"验证您是真人",
 )
 COMMON_BUTTON_PATTERNS = (
-    re.compile(r"^\s*(?:每日|今日)?\s*(?:签到|打卡)(?:领奖)?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$", re.IGNORECASE),
     re.compile(r"^\s*(?:check\s*in|sign\s*in)\s*$", re.IGNORECASE),
 )
 
@@ -134,6 +137,95 @@ async def complete_52pt_slider(page: Any) -> bool:
     await page.mouse.up()
     await page.wait_for_timeout(100)
     return bool(await captcha.input_value()) and not await submit.is_disabled()
+
+
+class BtschoolAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "btschool.club" or hostname.endswith(".btschool.club")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome:
+            return await _classified_page_result(page, outcome, page.url, None, context=context)
+        if "欢迎回来" in body and "action=addbonus" in page.url.lower():
+            return await _classified_page_result(
+                page, RunOutcome.ALREADY_DONE, page.url, None, context=context,
+            )
+        return RunResult(
+            RunOutcome.FAILED,
+            "BTSchool 签到接口没有返回可识别结果",
+            {"url": page.url},
+        )
+
+
+class OpenCdAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "open.cd" or hostname.endswith(".open.cd")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome:
+            return await _classified_page_result(page, outcome, page.url, None, context=context)
+        target = page.locator("a").filter(has_text=re.compile(r"^\s*簽到\s*$")).first
+        if not await target.is_visible():
+            return RunResult(RunOutcome.FAILED, "OpenCD 首页没有找到签到入口", {"url": page.url})
+        async with page.expect_response(
+            lambda response: response.url.endswith("/plugin_sign-in.php")
+        ) as pending:
+            await target.click()
+        response = await pending.value
+        response_body = (await response.text())[:1_000_000]
+        if "name=\"imagehash\"" in response_body and "name=\"imagestring\"" in response_body:
+            return RunResult(
+                RunOutcome.BLOCKED,
+                "OpenCD 签到需要图片验证码",
+                {"url": response.url, "status_code": response.status},
+            )
+        outcome = classify_pt_page(response.url, response.status, response_body, context.config)
+        if outcome:
+            return _classified_result(outcome, response.url, response.status, clicked=True)
+        return RunResult(
+            RunOutcome.FAILED,
+            "OpenCD 签到接口没有返回可识别结果",
+            {"url": response.url, "status_code": response.status, "clicked": True},
+        )
+
+
+class TjuptAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "tjupt.org" or hostname.endswith(".tjupt.org")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome != RunOutcome.FAILED:
+            if outcome:
+                return await _classified_page_result(page, outcome, page.url, None, context=context)
+            return RunResult(RunOutcome.FAILED, "TJUPT 签到页面没有返回可识别结果", {"url": page.url})
+
+        supplement = page.locator('a[href*="action=confirm"]').first
+        if not await supplement.is_visible():
+            return await _classified_page_result(page, outcome, page.url, None, context=context)
+        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+            await supplement.click()
+        response = await navigation.value
+        status_code = response.status if response else None
+        body = (await page.locator("body").inner_text())[:1_000_000]
+        outcome = classify_pt_page(page.url, status_code, body, context.config)
+        if outcome:
+            return await _classified_page_result(
+                page, outcome, page.url, status_code, clicked=True, context=context,
+            )
+        return RunResult(
+            RunOutcome.FAILED,
+            "TJUPT 补签后没有返回可识别结果",
+            {"url": page.url, "status_code": status_code, "clicked": True},
+        )
 
 
 class PtSignInHandler:

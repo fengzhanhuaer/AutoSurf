@@ -7,8 +7,11 @@ import pytest
 from sqlalchemy import select
 
 from autosurf.automations.pt_signin import (
+    BtschoolAdapter,
     FiftyTwoPtAdapter,
+    OpenCdAdapter,
     PtSignInHandler,
+    TjuptAdapter,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
@@ -59,6 +62,15 @@ def test_pt_page_classification_distinguishes_common_results():
     ) == RunOutcome.ALREADY_DONE
     assert classify_pt_page(
         "https://pttime.org/attendance.php", 200, "拒绝访问：已签到，无需再签"
+    ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://ptchdbits.co/bakatest.php", 200, "今天已经签过到了(已连续29天签到)"
+    ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://hdarea.club/", 200, "魔力值 [使用] [已签到] (32)"
+    ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://hdcity.city/", 200, "assignment_turned_in Checked in"
     ) == RunOutcome.ALREADY_DONE
     interrupted = (
         "已断签2天，当前可补签天数为113天，请点击选择补签弥补连续天数，"
@@ -239,6 +251,105 @@ def test_52pt_discovery_and_adapter_use_the_current_signin_page():
     assert adapter.matches(discovery.url) is True
     assert adapter.matches("https://www.52pt.site/52bakatest0818.php") is True
     assert adapter.matches("https://not52pt.site/52bakatest0818.php") is False
+
+
+@pytest.mark.asyncio
+async def test_btschool_adapter_treats_authenticated_empty_reward_as_already_done():
+    class Body:
+        async def inner_text(self):
+            return "BTSCHOOL 欢迎回来, mapleren"
+
+    class Page:
+        url = "https://pt.btschool.club/index.php?action=addbonus"
+
+        def locator(self, _selector):
+            return Body()
+
+    adapter = BtschoolAdapter()
+    result = await adapter.sign_in(Page(), RunContext(
+        "test", {"url": Page.url}, {"sid": "secret"},
+    ))
+
+    assert adapter.matches(Page.url) is True
+    assert result.outcome == RunOutcome.ALREADY_DONE
+
+
+@pytest.mark.asyncio
+async def test_opencd_adapter_reports_image_captcha_as_blocked():
+    class Locator:
+        first = None
+
+        def __init__(self, body=""):
+            self.body = body
+            self.first = self
+
+        def filter(self, **_kwargs):
+            return self
+
+        async def inner_text(self):
+            return self.body
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            return None
+
+    class Response:
+        url = "https://open.cd/plugin_sign-in.php"
+        status = 200
+
+        async def text(self):
+            return '<input name="imagehash"><input name="imagestring">'
+
+    class Pending:
+        @property
+        def value(self):
+            async def response():
+                return Response()
+            return response()
+
+    class ResponseContext:
+        async def __aenter__(self):
+            return Pending()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Page:
+        url = "https://open.cd/"
+
+        def locator(self, selector):
+            return Locator("OpenCD 欢迎回来") if selector == "body" else Locator()
+
+        def expect_response(self, _predicate):
+            return ResponseContext()
+
+    result = await OpenCdAdapter().sign_in(Page(), RunContext(
+        "test", {"url": Page.url}, {"sid": "secret"},
+    ))
+
+    assert result.outcome == RunOutcome.BLOCKED
+    assert result.message == "OpenCD 签到需要图片验证码"
+
+
+def test_known_pt_routes_and_adapter_domains_are_explicit():
+    expected = {
+        "pt.btschool.club": "https://pt.btschool.club/index.php?action=addbonus",
+        "ptchdbits.co": "https://ptchdbits.co/bakatest.php",
+        "hdarea.club": "https://hdarea.club/",
+        "hdcity.city": "https://hdcity.city/",
+        "hdsky.me": "https://hdsky.me/",
+        "open.cd": "https://open.cd/",
+    }
+    for domain, url in expected.items():
+        discovery = discover_pt_site(domain, {"sid"})
+        assert discovery is not None
+        assert discovery.url == url
+
+    assert BtschoolAdapter().matches(expected["pt.btschool.club"])
+    assert OpenCdAdapter().matches(expected["open.cd"])
+    assert TjuptAdapter().matches("https://tjupt.org/attendance.php")
 
 
 @pytest.mark.asyncio
@@ -672,6 +783,58 @@ def test_pt_reconciliation_updates_catalog_url_only_for_discovered_tasks(setting
     with app.state.sessions() as session:
         manual_config = json.loads(session.get(AutomationRecord, discovered.id).config_json)
         assert manual_config["url"] == "https://52pt.site/custom-signin.php"
+
+
+def test_pt_reconciliation_migrates_capabilities_and_cancels_unsupported_tasks(settings):
+    app = create_app(settings)
+    refresh_credential = app.state.credentials.upsert(
+        "cookiecloud:test:nanyangpt.com", "nanyangpt.com", {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    parked_credential = app.state.credentials.upsert(
+        "cookiecloud:test:pterclub.com", "pterclub.com", {"sid": "secret"},
+        provider="cookiecloud",
+    )
+    refresh_task = app.state.automations.create(
+        "nanyangpt.com", "pt_signin", 86400, {
+            "url": "https://nanyangpt.com/attendance.php",
+            "credential_domain": "nanyangpt.com",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": False,
+            "sign_in_supported": True,
+            "profile_refresh_supported": True,
+            "discovered": True,
+        }, refresh_credential.id,
+    )
+    parked_task = app.state.automations.create(
+        "PterClub", "pt_signin", 86400, {
+            "url": "https://pterclub.com/attendance.php",
+            "credential_domain": "pterclub.com",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+            "sign_in_supported": True,
+            "profile_refresh_supported": True,
+            "discovered": True,
+        }, parked_credential.id,
+    )
+    parked_execution = app.state.queue.enqueue_now(parked_task.id)
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        refreshed = session.get(AutomationRecord, refresh_task.id)
+        refresh_config = json.loads(refreshed.config_json)
+        parked = session.get(AutomationRecord, parked_task.id)
+        parked_config = json.loads(parked.config_json)
+        execution = session.get(ExecutionRecord, parked_execution.id)
+        assert refresh_config["url"] == "https://nanyangpt.com/"
+        assert refresh_config["sign_in_enabled"] is False
+        assert refresh_config["profile_refresh_enabled"] is True
+        assert refresh_config["sign_in_supported"] is False
+        assert parked.enabled is False
+        assert parked_config["sign_in_supported"] is False
+        assert parked_config["profile_refresh_supported"] is False
+        assert execution.status == "cancelled"
 
 
 def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(settings):

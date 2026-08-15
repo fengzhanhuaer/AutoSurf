@@ -23,7 +23,13 @@ from autosurf.application.services import (
 )
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
-from autosurf.automations.pt_signin import FiftyTwoPtAdapter, PtSignInHandler
+from autosurf.automations.pt_signin import (
+    BtschoolAdapter,
+    FiftyTwoPtAdapter,
+    OpenCdAdapter,
+    PtSignInHandler,
+    TjuptAdapter,
+)
 from autosurf.config import Settings, get_settings
 from autosurf.infrastructure.cookiecloud import CookieCloudStore
 from autosurf.infrastructure.crypto import SecretBox
@@ -42,7 +48,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry = HandlerRegistry()
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
-    registry.register(PtSignInHandler([FiftyTwoPtAdapter()]))
+    registry.register(PtSignInHandler([
+        FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), TjuptAdapter(),
+    ]))
     secrets = SecretBox(settings.secret_key)
     credentials = CredentialService(sessions, secrets)
     automations = AutomationService(sessions, registry)

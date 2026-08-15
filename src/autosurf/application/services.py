@@ -423,10 +423,45 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
             except (TypeError, ValueError):
                 config = {}
             discovery = discover_pt_site(credential.domain, set())
-            if discovery and config.get("discovered") and config.get("url") != discovery.url:
-                config["url"] = discovery.url
-                automation.name = discovery.name
-                automation.config_json = json.dumps(config, ensure_ascii=False)
+            if discovery and config.get("discovered"):
+                changed = False
+                if config.get("url") != discovery.url:
+                    config["url"] = discovery.url
+                    changed = True
+                if automation.name != discovery.name:
+                    automation.name = discovery.name
+                    changed = True
+                previous_sign_in_supported = bool(config.get("sign_in_supported", True))
+                if config.get("sign_in_supported") != discovery.sign_in_supported:
+                    config["sign_in_supported"] = discovery.sign_in_supported
+                    changed = True
+                if config.get("profile_refresh_supported") != discovery.profile_refresh_supported:
+                    config["profile_refresh_supported"] = discovery.profile_refresh_supported
+                    changed = True
+                if not discovery.sign_in_supported and config.get("sign_in_enabled", True):
+                    config["sign_in_enabled"] = False
+                    changed = True
+                    if discovery.profile_refresh_supported and previous_sign_in_supported:
+                        config["profile_refresh_enabled"] = True
+                if not discovery.supported and automation.enabled:
+                    automation.enabled = False
+                    changed = True
+                if changed:
+                    automation.config_json = json.dumps(config, ensure_ascii=False)
+                if not discovery.supported:
+                    active = session.scalars(select(ExecutionRecord).where(
+                        ExecutionRecord.automation_id == automation.id,
+                        ExecutionRecord.status.in_([
+                            ExecutionStatus.PENDING,
+                            ExecutionStatus.RUNNING,
+                            ExecutionStatus.RETRY_WAIT,
+                        ]),
+                    )).all()
+                    for execution in active:
+                        execution.status = ExecutionStatus.CANCELLED
+                        execution.lease_until = None
+                        execution.finished_at = now
+                        execution.error = "站点当前没有可自动执行的操作"
             if config.get("credential_aliases_merged"):
                 continue
             aliases = pt_site_domain_aliases(credential.domain)
