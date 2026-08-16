@@ -178,7 +178,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
 
   if (systemView) {
     elements.pageTitle.textContent = "系统设置";
-    elements.pageDescription.textContent = "CookieCloud、Token、程序与浏览器运行时";
+    elements.pageDescription.textContent = "CookieCloud、Web 凭据、程序与浏览器运行时";
   } else {
     elements.pageTitle.textContent = "PT 站点";
     elements.pageDescription.textContent = "站点管理与自动化";
@@ -186,7 +186,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   const refreshLabels = {
     "pt-signin": "刷新签到任务",
     cookiecloud: "刷新 CookieCloud 状态",
-    "web-credentials": "刷新 Token 同步状态",
+    "web-credentials": "刷新 Web 凭据同步状态",
     upgrade: "刷新升级状态",
   };
   elements.refreshButton.title = refreshLabels[activeView];
@@ -662,12 +662,12 @@ async function deletePtSite(site) {
 function renderWebCredential(status) {
   state.webCredential = status;
   elements.tokenSyncState.textContent = status.token_configured ? "同步正常"
-    : status.script_configured ? "等待 Token" : "未配置";
+    : status.script_configured ? "等待凭据" : "未配置";
   elements.tokenSyncState.className = `status-badge${status.token_configured ? " succeeded" : ""}`;
   elements.tokenScriptState.textContent = status.script_configured ? "已生成" : "未生成";
   elements.tokenValueState.textContent = status.token_configured ? "已加密保存" : "未同步";
   elements.tokenLastSync.textContent = formatDate(status.last_sync_at);
-  elements.tokenScriptButton.textContent = status.script_configured ? "重新生成油猴脚本" : "生成油猴脚本";
+  elements.tokenScriptButton.textContent = status.script_configured ? "重新生成同步脚本" : "生成同步脚本";
   elements.tokenClearButton.disabled = !status.token_configured;
 }
 
@@ -1071,13 +1071,13 @@ elements.tokenScriptButton.addEventListener("click", async () => {
     const blobUrl = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = blobUrl;
-    link.download = "autosurf-rousi-token.user.js";
+    link.download = "autosurf-web-credential-sync.user.js";
     document.body.append(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(blobUrl);
     await loadWebCredentialStatus();
-    showToast("油猴脚本已生成；旧脚本的上传密钥同时失效");
+    showToast("同步脚本已生成；旧脚本的上传密钥同时失效");
   } catch (error) {
     if (error.status === 401) goToLogin();
     else showToast(error.message, true);
@@ -1086,12 +1086,12 @@ elements.tokenScriptButton.addEventListener("click", async () => {
   }
 });
 elements.tokenClearButton.addEventListener("click", async () => {
-  if (!window.confirm("清除 AutoSurf 中已同步的 Rousi Token？")) return;
+  if (!window.confirm("清除 AutoSurf 中已同步的 Rousi Web 凭据？")) return;
   setBusy(true);
   try {
     await api("/api/v1/web-credentials/rousi/token", { method: "DELETE" });
     await loadWebCredentialStatus();
-    showToast("Rousi Token 已清除");
+    showToast("Rousi Web 凭据已清除");
   } catch (error) {
     showToast(error.message, true);
   } finally {

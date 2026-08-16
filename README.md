@@ -130,11 +130,11 @@ Invoke-RestMethod -Method Post `
 
 Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported. Imported credential names use `cookiecloud:<uuid>:<domain>`. Browser cookie attributes including domain, path, expiry, Secure, HttpOnly, and SameSite are retained in the encrypted credential payload.
 
-### Browser Token sync
+### Web credential sync
 
-Rousi stores its login state in `localStorage.token` rather than a browser cookie. Open **系统设置 > Token 同步**, enter the AutoSurf root URL that the browser running Tampermonkey can reach, and generate the Rousi userscript. The default is the current management-page origin; use a LAN address or HTTPS reverse-proxy address when the browser runs on another machine.
+Some sites store login state in browser Web Storage rather than cookies. Open **系统设置 > Web 凭据**, choose the site, enter the AutoSurf root URL that the browser running Tampermonkey can reach, and generate its synchronization script. The default is the current management-page origin; use a LAN address or HTTPS reverse-proxy address when the browser runs on another machine. Rousi is the first supported source and uses `localStorage.token`; future sources share the same management surface.
 
-The userscript adds an **A** button to the right edge of `rousi.pro`. Its panel detects the Token, masks it by default, supports explicit reveal/copy, and uploads only when the value changes or the user chooses **立即同步**. Generating the script rotates a write-only upload key and invalidates older scripts. AutoSurf stores only the key digest and encrypts the Token with `AUTOSURF_SECRET_KEY`; management status endpoints never return the Token.
+The neutral AutoSurf Web credential userscript adds an **A** button to the right edge of the configured site. Its panel identifies the current source, masks the credential by default, supports explicit reveal/copy, and uploads only when the value changes or the user chooses **立即同步**. Generating the script rotates a write-only upload key and invalidates older scripts. AutoSurf stores only the key digest and encrypts the credential with `AUTOSURF_SECRET_KEY`; management status endpoints never return the credential value.
 
 ### PT sign-in
 

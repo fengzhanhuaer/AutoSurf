@@ -68,6 +68,7 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
         )
         status = await client.get("/api/v1/web-credentials/rousi", auth=auth)
         candidates = await client.get("/api/v1/pt-signin/candidates", auth=auth)
+        sites = await client.get("/api/v1/pt-signin/sites", auth=auth)
         regenerated = await client.post(
             "/api/v1/web-credentials/rousi/userscript",
             auth=auth,
@@ -87,16 +88,23 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
 
     assert initial.json()["token_configured"] is False
     assert generated.status_code == 200
-    assert 'filename="autosurf-rousi-token.user.js"' in generated.headers["content-disposition"]
+    assert 'filename="autosurf-web-credential-sync.user.js"' in generated.headers["content-disposition"]
+    assert "// @name         AutoSurf Web 凭据同步" in script
+    assert "// @match        https://rousi.pro/*" in script
+    assert 'const sourceName = "Rousi";' in script
     assert "// @connect      192.168.1.50" in script
     assert "http://192.168.1.50:18980/api/web-credentials/rousi/token" in script
     assert 'class="trigger"' in script
     assert 'class="token" type="password"' in script
+    assert "AutoSurf Web 凭据同步" in script
     assert token not in script
     assert denied.status_code == 401
     assert uploaded.json()["changed"] is True
     assert status.json()["token_configured"] is True
     assert status.json()["last_sync_at"]
+    rebound_site = next(item for item in sites.json()["items"] if item["id"] == legacy_task.id)
+    assert rebound_site["config"]["sign_in_supported"] is True
+    assert rebound_site["config"]["sign_in_enabled"] is True
     assert first_key != second_key
     assert old_key.status_code == 401
     assert new_key.status_code == 200

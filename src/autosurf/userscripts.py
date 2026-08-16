@@ -1,10 +1,33 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 
-def build_rousi_userscript(endpoint: str, upload_key: str) -> str:
+@dataclass(frozen=True)
+class WebCredentialScriptSource:
+    key: str
+    name: str
+    matches: tuple[str, ...]
+    storage_key: str
+
+
+WEB_CREDENTIAL_SCRIPT_SOURCES = {
+    "rousi": WebCredentialScriptSource(
+        key="rousi",
+        name="Rousi",
+        matches=("https://rousi.pro/*",),
+        storage_key="token",
+    ),
+}
+
+
+def build_web_credential_userscript(source_key: str, endpoint: str, upload_key: str) -> str:
+    try:
+        source = WEB_CREDENTIAL_SCRIPT_SOURCES[source_key]
+    except KeyError as exc:
+        raise ValueError("unknown web credential source") from exc
     parsed = urlparse(endpoint)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("userscript endpoint must be HTTP(S)")
@@ -14,15 +37,23 @@ def build_rousi_userscript(endpoint: str, upload_key: str) -> str:
         "__AUTOSURF_UPLOAD_KEY__", json.dumps(upload_key),
     ).replace(
         "__AUTOSURF_CONNECT_HOST__", parsed.hostname,
+    ).replace(
+        "__AUTOSURF_MATCHES__", "\n".join(f"// @match        {item}" for item in source.matches),
+    ).replace(
+        "__AUTOSURF_SOURCE_NAME__", json.dumps(source.name),
+    ).replace(
+        "__AUTOSURF_STORAGE_KEY__", json.dumps(source.storage_key),
+    ).replace(
+        "__AUTOSURF_MARKER_KEY__", json.dumps(f"autosurf_web_credential_{source.key}_marker"),
     )
 
 
 _ROUSI_USERSCRIPT = r'''// ==UserScript==
-// @name         AutoSurf Rousi Token 同步
+// @name         AutoSurf Web 凭据同步
 // @namespace    https://github.com/fengzhanhuaer/AutoSurf
 // @version      1.0.0
-// @description  将 Rousi 登录 Token 安全同步到 AutoSurf
-// @match        https://rousi.pro/*
+// @description  将当前站点的 Web 登录凭据安全同步到 AutoSurf
+__AUTOSURF_MATCHES__
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -36,7 +67,9 @@ _ROUSI_USERSCRIPT = r'''// ==UserScript==
 
   const endpoint = __AUTOSURF_ENDPOINT__;
   const uploadKey = __AUTOSURF_UPLOAD_KEY__;
-  const markerKey = "autosurf_rousi_token_marker";
+  const sourceName = __AUTOSURF_SOURCE_NAME__;
+  const storageKey = __AUTOSURF_STORAGE_KEY__;
+  const markerKey = __AUTOSURF_MARKER_KEY__;
   let status = "正在检测";
   let detail = "等待读取浏览器登录状态";
   let syncing = false;
@@ -85,20 +118,20 @@ _ROUSI_USERSCRIPT = r'''// ==UserScript==
       @media (max-width: 520px) { .dock { top: auto; bottom: 72px; transform: none; } }
     </style>
     <div class="dock">
-      <section class="panel" hidden aria-label="AutoSurf Token 同步">
-        <div class="heading"><strong>AutoSurf Token 同步</strong><button class="close" type="button" aria-label="关闭">×</button></div>
+      <section class="panel" hidden aria-label="AutoSurf Web 凭据同步">
+        <div class="heading"><strong>AutoSurf Web 凭据同步</strong><button class="close" type="button" aria-label="关闭">×</button></div>
         <div class="body">
-          <div class="state"><span>Rousi</span><span class="badge">正在检测</span></div>
+          <div class="state"><span class="source-name"></span><span class="badge">正在检测</span></div>
           <p class="detail">等待读取浏览器登录状态</p>
           <div class="token-row">
-            <input class="token" type="password" readonly aria-label="Rousi Token">
+            <input class="token" type="password" readonly aria-label="Web 登录凭据">
             <button class="token-action reveal" type="button">显示</button>
             <button class="token-action copy" type="button">复制</button>
           </div>
           <button class="sync" type="button">立即同步</button>
         </div>
       </section>
-      <button class="trigger" type="button" title="AutoSurf Token 同步" aria-label="打开 AutoSurf Token 同步">A</button>
+      <button class="trigger" type="button" title="AutoSurf Web 凭据同步" aria-label="打开 AutoSurf Web 凭据同步">A</button>
     </div>`;
 
   const panel = root.querySelector(".panel");
@@ -118,7 +151,8 @@ _ROUSI_USERSCRIPT = r'''// ==UserScript==
     syncButton.disabled = syncing;
     syncButton.textContent = syncing ? "同步中..." : "立即同步";
   };
-  const token = () => unsafeWindow.localStorage.getItem("token") || "";
+  root.querySelector(".source-name").textContent = sourceName;
+  const token = () => unsafeWindow.localStorage.getItem(storageKey) || "";
   const marker = async (value) => {
     const data = new TextEncoder().encode(value);
     const digest = await crypto.subtle.digest("SHA-256", data);
@@ -149,7 +183,7 @@ _ROUSI_USERSCRIPT = r'''// ==UserScript==
     const value = token();
     if (!value) {
       status = "未登录";
-      detail = "浏览器中没有检测到 Rousi Token";
+      detail = `浏览器中没有检测到 ${sourceName} 登录凭据`;
       render("error");
       return;
     }

@@ -31,7 +31,7 @@ from autosurf.infrastructure.database import (
     ExecutionRecord,
 )
 from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site
-from autosurf.userscripts import build_rousi_userscript
+from autosurf.userscripts import build_web_credential_userscript
 
 
 class CredentialInput(BaseModel):
@@ -966,7 +966,7 @@ def _pt_signin_site_view(record: AutomationRecord | None,
     config = json.loads(record.config_json)
     sign_in_supported, profile_refresh_supported = _pt_site_capabilities(record, config)
     credential = record.credential
-    discovery = discover_pt_site(credential.domain, set()) if credential else None
+    discovery = _pt_discovery_for_credential(credential)
     legacy_profile_refresh_default = bool(
         discovery
         and discovery.default_profile_refresh_enabled
@@ -1010,7 +1010,7 @@ def _pt_signin_site_view(record: AutomationRecord | None,
 
 def _pt_site_capabilities(record: AutomationRecord, config: dict[str, Any]) -> tuple[bool, bool]:
     credential = record.credential
-    discovery = discover_pt_site(credential.domain, set()) if credential else None
+    discovery = _pt_discovery_for_credential(credential)
     catalog_sign_in_supported = discovery.sign_in_supported if discovery else True
     catalog_profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
     return (
@@ -1021,6 +1021,13 @@ def _pt_site_capabilities(record: AutomationRecord, config: dict[str, Any]) -> t
             "profile_refresh_supported", catalog_profile_refresh_supported,
         )) and catalog_profile_refresh_supported,
     )
+
+
+def _pt_discovery_for_credential(credential: CredentialRecord | None):
+    if credential is None:
+        return None
+    markers = {"token"} if credential.provider == "web_storage" else set()
+    return discover_pt_site(credential.domain, markers)
 
 
 def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
@@ -1178,15 +1185,15 @@ def create_rousi_userscript(data: WebCredentialScriptInput, request: Request) ->
     base_url = _web_credential_base_url(data.base_url)
     upload_key = secrets.token_urlsafe(32)
     request.app.state.web_credentials.rotate_upload_key(upload_key)
-    script = build_rousi_userscript(
-        f"{base_url}/api/web-credentials/rousi/token", upload_key,
+    script = build_web_credential_userscript(
+        "rousi", f"{base_url}/api/web-credentials/rousi/token", upload_key,
     )
     return Response(
         script,
         media_type="text/javascript; charset=utf-8",
         headers={
             "Cache-Control": "no-store",
-            "Content-Disposition": 'attachment; filename="autosurf-rousi-token.user.js"',
+            "Content-Disposition": 'attachment; filename="autosurf-web-credential-sync.user.js"',
         },
     )
 

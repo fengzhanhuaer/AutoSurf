@@ -137,9 +137,15 @@ async def _rousi_api(page: Any, path: str, token: str) -> dict[str, Any]:
             headers: {Authorization: `Bearer ${token}`},
             credentials: "same-origin",
           });
-          let body = null;
-          try { body = await response.json(); } catch (_) {}
-          return {status: response.status, body};
+          let payload = null;
+          try { payload = await response.json(); } catch (_) {}
+          const wrapped = payload && typeof payload === "object" && "data" in payload;
+          return {
+            status: response.status,
+            code: wrapped ? payload.code : null,
+            message: wrapped ? payload.message : null,
+            body: wrapped ? payload.data : payload,
+          };
         }""",
         {"path": path, "token": token},
     )
@@ -416,16 +422,19 @@ class PtSignInHandler:
                 if sign_in_enabled:
                     response = home_response
                     if (parsed.path or "/") != "/" or parsed.query:
-                        response = await page.goto(
-                            url, wait_until="domcontentloaded", timeout=timeout_ms,
+                        sign_in_result = await _classify_pt_homepage(
+                            page, context, response.status if response else None,
                         )
-                    adapter = next((item for item in self.adapters if item.matches(url)), None)
-                    if adapter:
-                        sign_in_result = await adapter.sign_in(page, context)
-                    else:
-                        sign_in_result = await self._generic_sign_in(
-                            page, context, response.status if response else None, screenshot
-                        )
+                        if sign_in_result is None:
+                            response = await _open_pt_signin_page(page, url, timeout_ms)
+                    if sign_in_result is None:
+                        adapter = next((item for item in self.adapters if item.matches(url)), None)
+                        if adapter:
+                            sign_in_result = await adapter.sign_in(page, context)
+                        else:
+                            sign_in_result = await self._generic_sign_in(
+                                page, context, response.status if response else None, screenshot
+                            )
                 profile_result = None
                 if profile_refresh_enabled:
                     profile_result = await refresh_pt_profile_page(
@@ -507,6 +516,46 @@ class PtSignInHandler:
 def pt_home_url(site_url: str) -> str:
     parsed = validated_http_url(site_url)
     return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+async def _classify_pt_homepage(page: Any, context: RunContext,
+                                status_code: int | None) -> RunResult | None:
+    body = await page_body_text(page)
+    body += "\n" + await rendered_signin_status_text(page)
+    outcome = classify_pt_page(page.url, status_code, body, context.config)
+    if outcome not in {
+        RunOutcome.ALREADY_DONE,
+        RunOutcome.AUTH_EXPIRED,
+        RunOutcome.BLOCKED,
+        RunOutcome.FAILED,
+    }:
+        return None
+    return await _classified_page_result(
+        page, outcome, page.url, status_code, context=context,
+    )
+
+
+async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
+    expected = validated_http_url(url)
+    link = page.locator('a[href*="attendance"]').filter(
+        has_text=re.compile(r"签到|簽到", re.IGNORECASE),
+    ).first
+    clicked = False
+    with suppress(Exception):
+        if await link.is_visible():
+            href = str(await link.get_attribute("href") or "")
+            target = urljoin(page.url, href)
+            target_host = (urlparse(target).hostname or "").lower().rstrip(".")
+            if target_host == (expected.hostname or "").lower().rstrip("."):
+                async with page.expect_navigation(
+                    wait_until="domcontentloaded", timeout=timeout_ms,
+                ) as navigation:
+                    clicked = True
+                    await link.click()
+                return await navigation.value
+    if clicked and page.url != pt_home_url(url):
+        return None
+    return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
 
 def classify_pt_page(url: str, status_code: int | None, body: str,

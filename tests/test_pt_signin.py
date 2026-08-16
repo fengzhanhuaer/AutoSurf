@@ -12,6 +12,7 @@ from autosurf.automations.pt_signin import (
     OpenCdAdapter,
     PtSignInHandler,
     TjuptAdapter,
+    _classify_pt_homepage,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
@@ -54,6 +55,39 @@ def test_pt_page_classification_distinguishes_common_results():
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 403, "Just a moment... cf-chl-token"
     ) == RunOutcome.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_homepage_already_done_skips_hdkylin_challenge_page():
+    class Locator:
+        async def inner_text(self):
+            return "控制面板 [签到已得65, 补签卡: 0]"
+
+        async def count(self):
+            return 0
+
+    class Page:
+        url = "https://www.hdkyl.in/"
+        frames = []
+
+        def locator(self, _selector):
+            return Locator()
+
+        async def evaluate(self, _script):
+            return []
+
+    page = Page()
+    page.frames = [page]
+    result = await _classify_pt_homepage(
+        page,
+        RunContext(
+            "test", {"url": "https://www.hdkyl.in/attendance.php"}, {"sid": "secret"},
+        ),
+        200,
+    )
+    assert result is not None
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    assert result.details["url"] == "https://www.hdkyl.in/"
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "今日已签到"
     ) == RunOutcome.ALREADY_DONE
