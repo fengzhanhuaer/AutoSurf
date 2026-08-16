@@ -222,6 +222,12 @@ class TjuptAdapter:
             response = await navigation.value
             status_code = response.status if response else None
             body = (await page.locator("body").inner_text())[:1_000_000]
+            if "签到验证码" in body and "影视名称" in body:
+                return RunResult(
+                    RunOutcome.BLOCKED,
+                    "TJUPT 重新签到需要图片验证码",
+                    {"url": page.url, "status_code": status_code, "clicked": True},
+                )
             outcome = classify_pt_page(page.url, status_code, body, context.config)
             if outcome:
                 return await _classified_page_result(

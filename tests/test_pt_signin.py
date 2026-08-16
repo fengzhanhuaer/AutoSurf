@@ -434,7 +434,7 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 
 
 @pytest.mark.asyncio
-async def test_tjupt_broken_streak_restarts_without_spending_makeup():
+async def test_tjupt_broken_streak_opens_restart_captcha_without_spending_makeup():
     class Locator:
         first = None
 
@@ -445,7 +445,7 @@ async def test_tjupt_broken_streak_restarts_without_spending_makeup():
 
         async def inner_text(self):
             if self.page.restarted:
-                return "签到成功，本次签到获得 100 魔力值"
+                return "签到验证码 请选择与左侧图片对应的影视名称"
             return "已断签 2 天，请点击选择补签或放弃补签重新开始签到"
 
         async def is_visible(self):
@@ -493,7 +493,8 @@ async def test_tjupt_broken_streak_restarts_without_spending_makeup():
         "test", {"url": page.url}, {"sid": "secret"},
     ))
 
-    assert result.outcome == RunOutcome.SUCCESS
+    assert result.outcome == RunOutcome.BLOCKED
+    assert result.message == "TJUPT 重新签到需要图片验证码"
     assert result.details["clicked"] is True
     assert page.restarted is True
     assert page.url.endswith("action=cancel")
