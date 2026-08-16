@@ -16,6 +16,7 @@ from autosurf.automations.pt_signin import (
     TjuptAdapter,
     ZhuqueAdapter,
     _classify_pt_homepage,
+    _enrich_0ff_calendar_history,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
@@ -97,36 +98,66 @@ async def test_homepage_already_done_skips_hdkylin_challenge_page():
 
 
 @pytest.mark.asyncio
-async def test_0ff_homepage_already_done_continues_to_calendar_page():
+async def test_0ff_homepage_already_done_is_enriched_from_calendar_page():
     class Locator:
+        first = None
+
+        def __init__(self, selector):
+            self.selector = selector
+            self.first = self
+
         async def inner_text(self):
             return "今日已签到"
 
         async def count(self):
             return 0
 
+        async def wait_for(self, **_kwargs):
+            return None
+
+    class Response:
+        status = 200
+
     class Page:
         url = "https://pt.0ff.cc/"
         frames = []
 
-        def locator(self, _selector):
-            return Locator()
+        def locator(self, selector):
+            return Locator(selector)
 
-        async def evaluate(self, _script):
+        async def evaluate(self, script):
+            if "eventSelector" in script:
+                return [{"date": "2026-08-16", "reward": "15"}]
             return []
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+            return Response()
 
     page = Page()
     page.frames = [page]
 
-    result = await _classify_pt_homepage(
+    homepage = await _classify_pt_homepage(
         page,
         RunContext(
             "test", {"url": "https://pt.0ff.cc/attendance.php"}, {"sid": "secret"},
         ),
         200,
     )
+    assert homepage is not None
 
-    assert result is None
+    result = await _enrich_0ff_calendar_history(
+        page,
+        RunContext(
+            "test", {"url": "https://pt.0ff.cc/attendance.php"}, {"sid": "secret"},
+        ),
+        homepage,
+        60_000,
+    )
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    assert result.details["url"] == "https://pt.0ff.cc/attendance.php"
+    assert result.details["site_history"] == [{"date": "2026-08-16", "reward": "15"}]
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "今日已签到"
     ) == RunOutcome.ALREADY_DONE
@@ -679,6 +710,51 @@ async def test_sunnypt_adapter_clicks_and_confirms_today_status():
 
 
 @pytest.mark.asyncio
+async def test_sunnypt_missing_button_reports_expired_profile_session():
+    class Body:
+        async def inner_text(self):
+            return "正在加载..."
+
+    class Button:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        async def wait_for(self, **_kwargs):
+            return None
+
+        async def is_visible(self):
+            return False
+
+    class Page:
+        url = "https://sunnypt.top/user/attendance"
+        frames = None
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def get_by_role(self, role, name):
+            assert role == "button"
+            assert name.search("立即签到")
+            return Button()
+
+        async def evaluate(self, script):
+            assert "/api/v1/user/basic-info" in script
+            return {"status": 404, "authenticated": False, "profile": None}
+
+    result = await SunnyPtAdapter().sign_in(
+        Page(), RunContext("test", {"url": Page.url}, {"sid": "expired"}, []),
+    )
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
+    assert result.message == "SunnyPT 登录状态已失效"
+    assert result.details["status_code"] == 404
+    assert result.details["clicked"] is False
+
+
+@pytest.mark.asyncio
 async def test_sunnypt_adapter_refreshes_current_basic_info_api():
     class Page:
         url = "https://sunnypt.top/user/attendance"
@@ -719,6 +795,13 @@ async def test_sunnypt_adapter_refreshes_current_basic_info_api():
 async def test_zhuque_adapter_refreshes_profile_from_site_api():
     class Page:
         url = "https://zhuque.in/"
+
+        async def goto(self, url, **_kwargs):
+            assert url == "https://zhuque.in/user/info"
+            self.url = url
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
 
         async def evaluate(self, script):
             assert "/api/user/getInfo" in script
@@ -762,6 +845,12 @@ async def test_site_profile_api_reports_expired_login(adapter):
 
         async def evaluate(self, _script):
             return {"status": 401, "authenticated": False, "profile": None}
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
 
     result = await adapter.refresh_profile(
         Page(), RunContext("test", {"url": Page.url}, {"sid": "expired"}, []),

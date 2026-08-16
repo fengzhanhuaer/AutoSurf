@@ -228,7 +228,8 @@
 | DEF-012 | REQ-011 / TEST-008 | 高 | SunnyPT 当前已登录页面可见“立即签到”，需补充站点级成功确认，避免继续受旧会话失效结论阻塞 | `已完成` | `pt_signin.py`、`main.py`、测试 | 点击确认、API 刷新和 401 分类测试通过 |
 | DEF-013 | REQ-013 / TEST-008 | 高 | Rousi、SunnyPT、Zhuque 统计为空；TJUPT 等级为导航文案；Audiences 卡片值被表格错配覆盖 | `已完成` | `pt_signin.py`、`pt_discovery.py`、`main.py`、测试 | 真实接口形状与固定页面样本断言通过 |
 | DEF-014 | REQ-014 / TEST-010 | 高 | 首次部署后候选接口已识别 M-Team/Rousi 新能力，但启动协调器跳过 `web_storage` 任务，正式旧任务仍保留旧能力配置 | `修复中` | `application/services.py`、`tests/test_web_credentials.py` | 待重新发布并核验正式任务配置 |
-| DEF-015 | REQ-014 / TEST-010 | 中 | 0ff 首页已签到状态会在进入 `/attendance.php` 前短路，动态日历解析器无法执行 | `修复中` | `pt_signin.py`、`tests/test_pt_signin.py` | 待重新发布并核验 `site_history` |
+| DEF-015 | REQ-014 / TEST-010 | 中 | 0ff 首页已签到状态会在进入 `/attendance.php` 前短路，动态日历解析器无法执行 | `修复中` | `pt_signin.py`、`tests/test_pt_signin.py` | 已改为保留首页结论并补读日历，待发布核验 |
+| DEF-016 | REQ-014 / TEST-010 | 中 | Zhuque 在 `/index` 直接请求资料 API 返回 400，SunnyPT 失效会话的资料 API 返回 404 且被误归为普通失败 | `修复中` | `pt_signin.py`、`tests/test_pt_signin.py` | 待发布核验 |
 
 ## 九、回滚方案
 

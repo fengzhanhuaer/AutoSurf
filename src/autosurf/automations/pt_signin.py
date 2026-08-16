@@ -446,6 +446,13 @@ class SunnyPtAdapter:
         with suppress(Exception):
             await button.wait_for(state="visible", timeout=5_000)
         if not await button.is_visible():
+            session = await _sunnypt_profile_api(page)
+            if session["status"] in {401, 403, 404} or not session.get("authenticated"):
+                return RunResult(
+                    RunOutcome.AUTH_EXPIRED,
+                    "SunnyPT 登录状态已失效",
+                    {"url": page.url, "status_code": session["status"], "clicked": False},
+                )
             return RunResult(
                 RunOutcome.FAILED,
                 "SunnyPT 签到页没有找到立即签到按钮",
@@ -474,7 +481,7 @@ class SunnyPtAdapter:
 
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
         response = await _sunnypt_profile_api(page)
-        if response["status"] in {401, 403}:
+        if response["status"] in {401, 403, 404}:
             return RunResult(
                 RunOutcome.AUTH_EXPIRED, "SunnyPT 登录状态已失效",
                 {"url": page.url, "status_code": response["status"]},
@@ -537,6 +544,11 @@ class ZhuqueAdapter:
         return hostname == "zhuque.in" or hostname.endswith(".zhuque.in")
 
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
+        await page.goto(
+            urljoin(page.url, "/user/info"), wait_until="domcontentloaded",
+        )
+        with suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=3_000)
         response = await _zhuque_profile_api(page)
         if response["status"] in {401, 403}:
             return RunResult(
@@ -865,6 +877,10 @@ class PtSignInHandler:
                             sign_in_result = await _classify_pt_homepage(
                                 page, context, response.status if response else None,
                             )
+                            if sign_in_result is not None:
+                                sign_in_result = await _enrich_0ff_calendar_history(
+                                    page, context, sign_in_result, timeout_ms,
+                                )
                             if sign_in_result is None:
                                 response = await _open_pt_signin_page(page, url, timeout_ms)
                         if sign_in_result is None:
@@ -980,12 +996,32 @@ async def _classify_pt_homepage(page: Any, context: RunContext,
         RunOutcome.FAILED,
     }:
         return None
-    target_host = (urlparse(str(context.config.get("url") or "")).hostname or "").lower()
-    if outcome == RunOutcome.ALREADY_DONE and target_host == "pt.0ff.cc":
-        return None
     # The homepage is also the safe fallback for sites whose attendance page is
     # protected by a WAF. Do not navigate away just to collect optional history.
     return _classified_result(outcome, page.url, status_code)
+
+
+async def _enrich_0ff_calendar_history(
+    page: Any, context: RunContext, result: RunResult, timeout_ms: int,
+) -> RunResult:
+    target = str(context.config.get("url") or "")
+    hostname = (urlparse(target).hostname or "").lower()
+    if result.outcome != RunOutcome.ALREADY_DONE or hostname != "pt.0ff.cc":
+        return result
+    try:
+        response = await page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+        history = await extract_site_signin_history(page)
+    except Exception:
+        return result
+    if not history:
+        return result
+    details = dict(result.details or {})
+    details.update({
+        "url": page.url,
+        "status_code": response.status if response else None,
+        "site_history": history,
+    })
+    return RunResult(result.outcome, result.message, details)
 
 
 async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
