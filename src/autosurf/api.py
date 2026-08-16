@@ -34,7 +34,6 @@ from autosurf.infrastructure.database import (
 from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site, is_ignored_pt_domain
 from autosurf.userscripts import (
     WEB_CREDENTIAL_SCRIPT_SOURCES,
-    build_web_credential_userscript,
     build_web_credential_userscript_bundle,
 )
 
@@ -1206,11 +1205,14 @@ def web_credential_statuses(request: Request) -> dict[str, Any]:
 @router.post("/web-credentials/rousi/userscript")
 def create_rousi_userscript(data: WebCredentialScriptInput, request: Request) -> Response:
     base_url = _web_credential_base_url(data.base_url)
-    upload_key = secrets.token_urlsafe(32)
-    request.app.state.web_credentials.rotate_upload_key(upload_key)
-    script = build_web_credential_userscript(
-        "rousi", f"{base_url}/api/web-credentials/rousi/token", upload_key,
-    )
+    configurations: dict[str, tuple[str, str]] = {}
+    for source_key in WEB_CREDENTIAL_SCRIPT_SOURCES:
+        upload_key = secrets.token_urlsafe(32)
+        request.app.state.web_credentials.rotate_upload_key(source_key, upload_key)
+        configurations[source_key] = (
+            f"{base_url}/api/web-credentials/{source_key}/values", upload_key,
+        )
+    script = build_web_credential_userscript_bundle(configurations)
     return Response(
         script,
         media_type="text/javascript; charset=utf-8",

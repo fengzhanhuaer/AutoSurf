@@ -90,7 +90,7 @@ def web_credential_script_source(source_key: str) -> WebCredentialScriptSource:
 _WEB_CREDENTIAL_USERSCRIPT = r'''// ==UserScript==
 // @name         AutoSurf Web 凭据同步
 // @namespace    https://github.com/fengzhanhuaer/AutoSurf
-// @version      1.1.0
+// @version      1.2.0
 // @description  将当前站点的 Web 登录凭据安全同步到 AutoSurf
 __AUTOSURF_MATCHES__
 // @grant        GM_xmlhttpRequest

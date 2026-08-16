@@ -57,14 +57,14 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
         script = generated.text
         first_key = re.search(r'"uploadKey": "([^"]+)"', script).group(1)
         denied = await client.post(
-            "/api/web-credentials/rousi/token",
+            "/api/web-credentials/rousi/values",
             headers={"Authorization": "Bearer wrong"},
-            json={"token": token},
+            json={"values": {"token": token}},
         )
         uploaded = await client.post(
-            "/api/web-credentials/rousi/token",
+            "/api/web-credentials/rousi/values",
             headers={"Authorization": f"Bearer {first_key}"},
-            json={"token": token},
+            json={"values": {"token": token}},
         )
         status = await client.get("/api/v1/web-credentials/rousi", auth=auth)
         candidates = await client.get("/api/v1/pt-signin/candidates", auth=auth)
@@ -76,24 +76,28 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
         )
         second_key = re.search(r'"uploadKey": "([^"]+)"', regenerated.text).group(1)
         old_key = await client.post(
-            "/api/web-credentials/rousi/token",
+            "/api/web-credentials/rousi/values",
             headers={"Authorization": f"Bearer {first_key}"},
-            json={"token": token},
+            json={"values": {"token": token}},
         )
         new_key = await client.post(
-            "/api/web-credentials/rousi/token",
+            "/api/web-credentials/rousi/values",
             headers={"Authorization": f"Bearer {second_key}"},
-            json={"token": token},
+            json={"values": {"token": token}},
         )
 
     assert initial.json()["token_configured"] is False
     assert generated.status_code == 200
     assert 'filename="autosurf-web-credential-sync.user.js"' in generated.headers["content-disposition"]
     assert "// @name         AutoSurf Web 凭据同步" in script
+    assert "// @version      1.2.0" in script
     assert "// @match        https://rousi.pro/*" in script
+    assert "// @match        https://kp.m-team.cc/*" in script
     assert '"name": "Rousi"' in script
+    assert '"name": "M-Team"' in script
     assert "// @connect      192.168.1.50" in script
-    assert "http://192.168.1.50:18980/api/web-credentials/rousi/token" in script
+    assert "http://192.168.1.50:18980/api/web-credentials/rousi/values" in script
+    assert "http://192.168.1.50:18980/api/web-credentials/mteam/values" in script
     assert 'class="trigger"' in script
     assert 'class="token" type="password"' in script
     assert "AutoSurf Web 凭据同步" in script
