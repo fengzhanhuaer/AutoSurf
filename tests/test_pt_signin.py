@@ -1405,6 +1405,14 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
 
     with app.state.sessions.begin() as session:
         session.add_all([
+            ExecutionRecord(
+                id=str(uuid4()), automation_id=site.id,
+                scheduled_at=today_start_utc - timedelta(days=2), status="succeeded",
+                attempts=1, available_at=today_start_utc - timedelta(days=2),
+                result_json=json.dumps({
+                    "outcome": "success", "message": "旧记录", "details": None,
+                }),
+            ),
             execution(yesterday_start_utc + timedelta(hours=3), "retry_wait"),
             execution(today_start_utc + timedelta(hours=1), "failed"),
             execution(today_start_utc + timedelta(hours=2), "succeeded", "签到成功", [
@@ -1446,7 +1454,7 @@ async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     assert len(payload["days"]) == 7
     assert payload["days"][0]["is_today"] is True
     by_id = {item["automation_id"]: item for item in payload["items"]}
-    assert by_id[site.id]["record_count"] == 3
+    assert by_id[site.id]["record_count"] == 4
     assert by_id[site.id]["executions"][local_today.isoformat()]["status"] == "succeeded"
     assert by_id[site.id]["executions"][local_today.isoformat()]["result"]["message"] == "签到成功"
     assert by_id[site.id]["site_history"] == {

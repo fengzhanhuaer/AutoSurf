@@ -824,8 +824,17 @@ def pt_signin_history(
                 continue
             with suppress(ValueError, TypeError):
                 result = json.loads(execution.result_json)
-                reported = result.get("details", {}).get("site_history", [])
+                if not isinstance(result, dict):
+                    continue
+                details = result.get("details")
+                if not isinstance(details, dict):
+                    continue
+                reported = details.get("site_history")
+                if not isinstance(reported, list):
+                    continue
                 for item in reported:
+                    if not isinstance(item, dict):
+                        continue
                     reported_day = str(item.get("date") or "")
                     if reported_day not in date_keys:
                         continue
