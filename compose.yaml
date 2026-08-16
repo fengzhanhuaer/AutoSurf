@@ -16,11 +16,10 @@ services:
       - ./data:/app/data
       - ./autosurf_program:/app/program
       - ./browser:/app/browser
+      # Writable, host-visible temp space while the container root remains read-only.
+      - ./tmp:/tmp
       - ./docker/entrypoint.sh:/app/bootstrap/entrypoint.sh:ro
       - ./docker/autosurf-upgrade:/app/bootstrap/autosurf-upgrade:ro
-    tmpfs:
-      # First-run dependency installation and Chromium both need writable temp space.
-      - /tmp:size=512m,mode=1777
     environment:
       HOME: /tmp/home
       TZ: Asia/Taipei

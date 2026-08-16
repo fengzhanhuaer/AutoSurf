@@ -44,7 +44,7 @@ docker compose up -d
 
 The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin a release by replacing the image tag in `compose.yaml`.
 
-The Docker image is a stable runtime shell. Application source and its Linux Python environment live in `./autosurf_program`, while Playwright's Chromium runtime lives in `./browser`. Both directories are mounted from the host and can be upgraded without replacing the container. On first start, the shell initializes any missing program or browser files. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
+The Docker image is a stable runtime shell. Application source and its Linux Python environment live in `./autosurf_program`, while Playwright's Chromium runtime lives in `./browser`. Both directories are mounted from the host and can be upgraded without replacing the container. The read-only shell also mounts host-visible temporary space from `./tmp` to `/tmp`; its contents are disposable and ignored by Git. On first start, the shell initializes any missing program or browser files. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
 
 AutoSurf pins the matching Playwright Python package and installs Chromium into the persistent browser mount. The Web upgrade action updates application code, Python dependencies, and that matching Chromium runtime together. Rebuild the shell only when Python itself or Chromium's required operating-system libraries change.
 
@@ -130,9 +130,15 @@ Invoke-RestMethod -Method Post `
 
 Both CookieCloud `legacy` and `aes-128-cbc-fixed` encryption modes are supported. Imported credential names use `cookiecloud:<uuid>:<domain>`. Browser cookie attributes including domain, path, expiry, Secure, HttpOnly, and SameSite are retained in the encrypted credential payload.
 
+### Browser Token sync
+
+Rousi stores its login state in `localStorage.token` rather than a browser cookie. Open **系统设置 > Token 同步**, enter the AutoSurf root URL that the browser running Tampermonkey can reach, and generate the Rousi userscript. The default is the current management-page origin; use a LAN address or HTTPS reverse-proxy address when the browser runs on another machine.
+
+The userscript adds an **A** button to the right edge of `rousi.pro`. Its panel detects the Token, masks it by default, supports explicit reveal/copy, and uploads only when the value changes or the user chooses **立即同步**. Generating the script rotates a write-only upload key and invalidates older scripts. AutoSurf stores only the key digest and encrypts the Token with `AUTOSURF_SECRET_KEY`; management status endpoints never return the Token.
+
 ### PT sign-in
 
-Open **PT 站点** and select the **站点签到** tab in the management interface. AutoSurf discovers PT candidates from its built-in site catalog and high-confidence PT cookie signatures, then lets you select and add all supported sites in one operation. Cookie names and values are never returned by the discovery API. The candidate list and credential selector only show high-confidence PT sites that have not already been added, so unrelated CookieCloud domains such as search engines do not appear. Root and `www` credentials for the same tracker are grouped into one candidate; their CookieCloud records are merged into the immutable execution snapshot so host-only login cookies and root-domain challenge cookies remain available together. Sites that require a dedicated API adapter, including Rousi and M-Team, are recognized and shown but cannot be bulk-added.
+Open **PT 站点** and select the **站点签到** tab in the management interface. AutoSurf discovers PT candidates from its built-in site catalog and high-confidence PT cookie signatures, then lets you select and add all supported sites in one operation. Cookie names and values are never returned by the discovery API. The candidate list and credential selector only show high-confidence PT sites that have not already been added, so unrelated CookieCloud domains such as search engines do not appear. Root and `www` credentials for the same tracker are grouped into one candidate; their CookieCloud records are merged into the immutable execution snapshot so host-only login cookies and root-domain challenge cookies remain available together. Rousi becomes addable only after its dedicated browser Token has been synchronized; M-Team remains recognized but requires a dedicated adapter.
 
 Use **手动添加自定义站点** to adjust the URL or recognition rules for an available PT credential. AutoSurf suggests `https://<credential-domain>/attendance.php`; the URL must remain on the selected credential domain or one of its subdomains.
 
@@ -239,6 +245,7 @@ The command creates a timestamped SQLite backup under `data/backups`, fetches th
 - HTTP handlers support GET/POST and response-pattern matching.
 - CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
 - CookieCloud imports retain complete browser cookie attributes in the encrypted credential store.
+- The Rousi userscript synchronizes its browser Token through a revocable write-only key and encrypted credential record.
 - PT sign-in uses a real Playwright Chromium session and keeps site-specific behavior extensible through adapters.
 - The authenticated management interface configures CookieCloud sources and PT sign-in tasks without exposing cookie values.
 - Database upgrades run automatically through Alembic at application startup.

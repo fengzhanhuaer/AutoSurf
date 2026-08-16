@@ -82,7 +82,7 @@ class PtDiscovery:
 
     @property
     def sign_in_supported(self) -> bool:
-        return self.strategy == "generic_browser"
+        return self.strategy in {"generic_browser", "web_storage_browser"}
 
     @property
     def profile_refresh_supported(self) -> bool:
@@ -110,12 +110,15 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
         # still merged into the same site, but retired domains are never used as
         # automation targets.
         target_domain = definition.target_domain or definition.domain
+        strategy = definition.strategy
+        if definition.domain == "rousi.pro" and "token" in lowered_names:
+            strategy = "web_storage_browser"
         return PtDiscovery(
             site_key=definition.domain,
             name=definition.name,
             url=urljoin(f"https://{target_domain}/", definition.signin_path.lstrip("/")),
             reason="site_catalog",
-            strategy=definition.strategy,
+            strategy=strategy,
             profile_url=(
                 urljoin(f"https://{target_domain}/", definition.profile_path.lstrip("/"))
                 if definition.profile_path else None

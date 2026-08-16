@@ -4,5 +4,6 @@
 __pycache__/
 *.py[cod]
 data/
+tmp/
 dist/
 autosurf_program/

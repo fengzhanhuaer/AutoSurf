@@ -16,7 +16,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
@@ -31,6 +31,7 @@ from autosurf.infrastructure.database import (
     ExecutionRecord,
 )
 from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site
+from autosurf.userscripts import build_rousi_userscript
 
 
 class CredentialInput(BaseModel):
@@ -108,6 +109,14 @@ class PtSignInScheduleInput(BaseModel):
 class LoginInput(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=1024)
+
+
+class WebCredentialScriptInput(BaseModel):
+    base_url: str = Field(min_length=8, max_length=2048)
+
+
+class WebCredentialUploadInput(BaseModel):
+    token: str = Field(min_length=20, max_length=8192)
 
 
 SESSION_COOKIE = "autosurf_session"
@@ -193,6 +202,7 @@ def logout(response: Response) -> None:
 
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_login)])
+web_credential_router = APIRouter(prefix="/api/web-credentials")
 
 
 def _program_repository() -> Path:
@@ -495,8 +505,8 @@ def list_executions(request: Request, limit: int = 50) -> dict[str, Any]:
 def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, Any]:
     with request.app.state.sessions() as session:
         credential = session.get(CredentialRecord, data.credential_id)
-        if credential is None or credential.provider != "cookiecloud":
-            raise HTTPException(status_code=422, detail="请选择 CookieCloud 导入的凭据")
+        if credential is None or credential.provider not in {"cookiecloud", "web_storage"}:
+            raise HTTPException(status_code=422, detail="请选择受支持的站点凭据")
         _validate_pt_url(data.url, credential.domain)
         credential_domain = credential.domain
         try:
@@ -853,13 +863,13 @@ def _validate_pt_url(url: str, credential_domain: str) -> None:
     hostname = parsed.hostname.lower().rstrip(".")
     domain = credential_domain.lower().lstrip(".").rstrip(".")
     if hostname != domain and not hostname.endswith(f".{domain}"):
-        raise HTTPException(status_code=422, detail="签到地址必须属于所选 CookieCloud 凭据域名")
+        raise HTTPException(status_code=422, detail="签到地址必须属于所选凭据域名")
 
 
 def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[str, Any]]:
     with request.app.state.sessions() as session:
         credentials = session.scalars(select(CredentialRecord).where(
-            CredentialRecord.provider == "cookiecloud"
+            CredentialRecord.provider.in_(["cookiecloud", "web_storage"])
         ).order_by(CredentialRecord.domain, CredentialRecord.name)).all()
         automations = session.scalars(select(AutomationRecord).where(
             AutomationRecord.handler_type == "pt_signin"
@@ -883,6 +893,7 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
                     "id": credential.id,
                     "name": credential.name,
                     "domain": credential.domain,
+                    "provider": credential.provider,
                     "version": credential.version,
                     "updated_at": credential.updated_at,
                 },
@@ -904,6 +915,9 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
                 "configured": automation_id is not None,
                 "automation_id": automation_id,
                 "_score": (
+                    discovery is not None
+                    and discovery.strategy == "web_storage_browser"
+                    and credential.provider == "web_storage",
                     len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
                     len(cookie_names),
                     credential.domain.startswith("www."),
@@ -1152,6 +1166,67 @@ def execution_view(record: ExecutionRecord) -> dict[str, Any]:
     return {"id": record.id, "automation_id": record.automation_id, "scheduled_at": record.scheduled_at,
             "status": record.status, "attempts": record.attempts, "result": json.loads(record.result_json) if record.result_json else None,
             "error": record.error, "started_at": record.started_at, "finished_at": record.finished_at}
+
+
+@router.get("/web-credentials/rousi")
+def rousi_web_credential_status(request: Request) -> dict[str, Any]:
+    return request.app.state.web_credentials.status()
+
+
+@router.post("/web-credentials/rousi/userscript")
+def create_rousi_userscript(data: WebCredentialScriptInput, request: Request) -> Response:
+    base_url = _web_credential_base_url(data.base_url)
+    upload_key = secrets.token_urlsafe(32)
+    request.app.state.web_credentials.rotate_upload_key(upload_key)
+    script = build_rousi_userscript(
+        f"{base_url}/api/web-credentials/rousi/token", upload_key,
+    )
+    return Response(
+        script,
+        media_type="text/javascript; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'attachment; filename="autosurf-rousi-token.user.js"',
+        },
+    )
+
+
+@router.delete("/web-credentials/rousi/token", status_code=204)
+def clear_rousi_web_credential(request: Request) -> None:
+    request.app.state.web_credentials.clear_token()
+
+
+@web_credential_router.post("/rousi/token")
+def upload_rousi_web_credential(
+    data: WebCredentialUploadInput,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    prefix = "Bearer "
+    if not authorization or not authorization.startswith(prefix):
+        raise HTTPException(status_code=401, detail="invalid upload key")
+    try:
+        record, changed = request.app.state.web_credentials.update_token(
+            authorization[len(prefix):], data.token,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="invalid upload key") from exc
+    return {"status": "ok", "changed": changed, "updated_at": record.updated_at}
+
+
+def _web_credential_base_url(value: str) -> str:
+    parsed = urlparse(value.strip())
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(status_code=422, detail="上送地址必须是 HTTP(S) 服务根地址")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 cookiecloud_router = APIRouter(prefix="/cookiecloud")

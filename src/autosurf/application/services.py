@@ -38,6 +38,11 @@ class CredentialService:
         payload = {"format": "cookie_records_v1", "cookies": cookies}
         return self._upsert_payload(name, domain, payload, provider)
 
+    def upsert_web_storage(self, name: str, domain: str, payload: dict[str, Any]) -> CredentialRecord:
+        if payload.get("format") != "web_storage_v1" or not isinstance(payload.get("values"), dict):
+            raise ValueError("web storage credential payload is invalid")
+        return self._upsert_payload(name, domain, payload, "web_storage")
+
     def _upsert_payload(self, name: str, domain: str, payload: Any, provider: str) -> CredentialRecord:
         now = utc_now()
         with self.sessions.begin() as session:
@@ -84,6 +89,14 @@ class CredentialService:
             if not cookies:
                 raise ValueError("credential cookie records are empty")
             return cookies, browser_cookies
+        if isinstance(value, dict) and value.get("format") == "web_storage_v1":
+            values = value.get("values")
+            if not isinstance(values, dict) or not all(
+                isinstance(key, str) and isinstance(item, str)
+                for key, item in values.items()
+            ):
+                raise ValueError("web storage credential values are invalid")
+            return dict(values), []
         if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
             raise ValueError("credential payload is not a cookie mapping")
         return value, None

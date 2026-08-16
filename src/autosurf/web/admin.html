@@ -50,6 +50,11 @@
                 aria-selected="true" aria-controls="cookiecloud-settings-panel" data-settings-tab="cookiecloud">
           CookieCloud
         </button>
+        <button class="settings-tab" id="settings-tab-web-credentials" type="button" role="tab"
+                aria-selected="false" aria-controls="web-credentials-settings-panel"
+                data-settings-tab="web-credentials" tabindex="-1">
+          Token 同步
+        </button>
         <button class="settings-tab" id="settings-tab-upgrade" type="button" role="tab"
                 aria-selected="false" aria-controls="upgrade-settings-panel" data-settings-tab="upgrade" tabindex="-1">
           系统升级
@@ -391,6 +396,37 @@
             </tbody>
           </table>
         </div>
+        </section>
+      </section>
+
+      <section class="settings-panel" id="web-credentials-settings-panel" role="tabpanel"
+               aria-labelledby="settings-tab-web-credentials" hidden>
+        <section class="panel token-sync-panel" aria-labelledby="token-sync-title">
+          <div class="panel-heading">
+            <div>
+              <h2 id="token-sync-title">Rousi Token 同步</h2>
+              <p>生成油猴脚本，在 Rousi 页面右侧同步浏览器登录 Token。</p>
+            </div>
+            <span class="status-badge" id="token-sync-state">未配置</span>
+          </div>
+          <div class="token-sync-content">
+            <label class="field">
+              <span>上送地址</span>
+              <input id="token-sync-base-url" type="url" maxlength="2048"
+                     placeholder="http://127.0.0.1:18980" autocomplete="url">
+              <small>填写运行油猴脚本的浏览器能够访问到的 AutoSurf 服务根地址。</small>
+            </label>
+            <dl class="status-list token-sync-status">
+              <div><dt>站点</dt><dd>rousi.pro</dd></div>
+              <div><dt>脚本密钥</dt><dd id="token-script-state">未生成</dd></div>
+              <div><dt>Token</dt><dd id="token-value-state">未同步</dd></div>
+              <div><dt>最近同步</dt><dd id="token-last-sync">暂无</dd></div>
+            </dl>
+          </div>
+          <div class="token-sync-actions">
+            <button class="button secondary" id="token-clear-button" type="button" disabled>清除 Token</button>
+            <button class="button primary" id="token-script-button" type="button">生成油猴脚本</button>
+          </div>
         </section>
       </section>
 

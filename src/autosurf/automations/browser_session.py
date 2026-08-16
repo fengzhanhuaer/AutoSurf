@@ -16,7 +16,7 @@ def validated_http_url(value: str) -> ParseResult:
 def playwright_cookies(context: RunContext, url: str) -> list[dict[str, Any]]:
     parsed = validated_http_url(url)
     hostname = parsed.hostname or ""
-    if not context.browser_cookies:
+    if context.browser_cookies is None:
         return [
             {
                 "name": name,

@@ -100,6 +100,9 @@ async def test_management_session_login_and_logout(settings):
         assert "系统升级" in app_page.text
         assert "系统设置" in app_page.text
         assert 'id="settings-tab-cookiecloud"' in app_page.text
+        assert 'id="settings-tab-web-credentials"' in app_page.text
+        assert 'id="token-sync-base-url"' in app_page.text
+        assert 'id="token-script-button"' in app_page.text
         assert 'id="copy-uuid-button"' in app_page.text
         assert 'id="copy-password-button"' in app_page.text
         assert 'id="settings-tab-upgrade"' in app_page.text

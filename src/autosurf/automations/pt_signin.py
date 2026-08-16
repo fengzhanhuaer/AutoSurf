@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from contextlib import suppress
@@ -73,6 +74,95 @@ class PtSiteAdapter(Protocol):
     def matches(self, url: str) -> bool: ...
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult: ...
+
+
+class RousiAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "rousi.pro" or hostname.endswith(".rousi.pro")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        token = context.cookies.get("token", "")
+        if not token:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 尚未同步")
+
+        me = await _rousi_api(page, "/api/me", token)
+        if me["status"] in {401, 403}:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 已失效", {"url": page.url})
+        if me["status"] < 200 or me["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 登录状态检查失败",
+                {"url": page.url, "status_code": me["status"]},
+            )
+
+        before = await _rousi_api(page, "/api/points/init", token)
+        if before["status"] in {401, 403}:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 已失效", {"url": page.url})
+        if before["status"] < 200 or before["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 签到状态读取失败",
+                {"url": page.url, "status_code": before["status"]},
+            )
+        if _rousi_attended_today(before["body"]):
+            return RunResult(
+                RunOutcome.ALREADY_DONE, "Rousi 今日已经签到",
+                {"url": page.url, "clicked": False, "site_history": _rousi_history(before["body"])},
+            )
+
+        button = page.get_by_role("button", name=re.compile(r"^\s*签到\s*$")).first
+        with suppress(Exception):
+            await button.wait_for(state="visible", timeout=5_000)
+        if not await button.is_visible():
+            return RunResult(RunOutcome.FAILED, "Rousi 首页没有找到签到按钮", {"url": page.url})
+        await button.click()
+        after = {"status": 0, "body": None}
+        for _ in range(10):
+            await page.wait_for_timeout(500)
+            after = await _rousi_api(page, "/api/points/init", token)
+            if 200 <= after["status"] < 300 and _rousi_attended_today(after["body"]):
+                return RunResult(
+                    RunOutcome.SUCCESS, "Rousi 签到成功",
+                    {"url": page.url, "clicked": True, "site_history": _rousi_history(after["body"])},
+                )
+        return RunResult(
+            RunOutcome.FAILED, "Rousi 点击签到后未确认当天记录",
+            {"url": page.url, "clicked": True, "status_code": after["status"]},
+        )
+
+
+async def _rousi_api(page: Any, path: str, token: str) -> dict[str, Any]:
+    return await page.evaluate(
+        """async ({path, token}) => {
+          const response = await fetch(path, {
+            headers: {Authorization: `Bearer ${token}`},
+            credentials: "same-origin",
+          });
+          let body = null;
+          try { body = await response.json(); } catch (_) {}
+          return {status: response.status, body};
+        }""",
+        {"path": path, "token": token},
+    )
+
+
+def _rousi_attended_today(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    attendance = value.get("attendance")
+    if not isinstance(attendance, dict):
+        return False
+    today = str(attendance.get("server_today") or "")
+    dates = attendance.get("attended_dates")
+    return bool(today and isinstance(dates, list) and today in {str(item) for item in dates})
+
+
+def _rousi_history(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, dict) or not isinstance(value.get("attendance"), dict):
+        return []
+    dates = value["attendance"].get("attended_dates")
+    if not isinstance(dates, list):
+        return []
+    return [{"date": str(item), "reward": ""} for item in dates[-31:] if item]
 
 
 class FiftyTwoPtAdapter:
@@ -306,6 +396,15 @@ class PtSignInHandler:
                 viewport={"width": 1365, "height": 768},
             )
             await browser_context.add_cookies(playwright_cookies(context, url))
+            if discovery and discovery.strategy == "web_storage_browser":
+                token = context.cookies.get("token", "")
+                if token:
+                    await browser_context.add_init_script(
+                        "if (location.hostname === 'rousi.pro' || "
+                        "location.hostname.endsWith('.rousi.pro')) {"
+                        f"localStorage.setItem('token', {json.dumps(token)});"
+                        "}"
+                    )
             page = await browser_context.new_page()
             page.set_default_timeout(timeout_ms)
             try:

@@ -12,7 +12,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from autosurf import __version__
-from autosurf.api import auth_router, cookiecloud_router, require_login, router
+from autosurf.api import auth_router, cookiecloud_router, require_login, router, web_credential_router
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import (
     AutomationService,
@@ -28,6 +28,7 @@ from autosurf.automations.pt_signin import (
     FiftyTwoPtAdapter,
     OpenCdAdapter,
     PtSignInHandler,
+    RousiAdapter,
     TjuptAdapter,
 )
 from autosurf.config import Settings, get_settings
@@ -36,6 +37,7 @@ from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import create_session_factory
 from autosurf.infrastructure.gzip_request import GZipRequestMiddleware
 from autosurf.infrastructure.migrations import upgrade_database
+from autosurf.infrastructure.web_credentials import WebCredentialStore
 from autosurf.management import management_router
 from autosurf.upgrade import upgrade
 
@@ -49,7 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
     registry.register(PtSignInHandler([
-        FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), TjuptAdapter(),
+        FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), TjuptAdapter(), RousiAdapter(),
     ]))
     secrets = SecretBox(settings.secret_key)
     credentials = CredentialService(sessions, secrets)
@@ -90,10 +92,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.queue = queue
     app.state.execution = execution
     app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
+    app.state.web_credentials = WebCredentialStore(sessions, secrets, credentials)
     app.state.upgrade_guard = threading.Lock()
     app.state.upgrade_process = None
     app.include_router(router)
     app.include_router(cookiecloud_router)
+    app.include_router(web_credential_router)
     app.include_router(auth_router)
     app.include_router(management_router)
 

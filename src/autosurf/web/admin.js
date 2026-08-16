@@ -5,6 +5,7 @@ const state = {
   ptSites: [],
   ptHistory: { today: null, days: [], items: [], latest_execution: null },
   ptStats: [],
+  webCredential: null,
   ptSelection: new Set(),
   selected: "",
   activeView: "pt-signin",
@@ -28,6 +29,7 @@ const elements = {
   ptStatsPanel: document.querySelector("#pt-stats-panel"),
   ptStatsRows: document.querySelector("#pt-stats-rows"),
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
+  webCredentialsPanel: document.querySelector("#web-credentials-settings-panel"),
   upgradePanel: document.querySelector("#upgrade-settings-panel"),
   form: document.querySelector("#source-form"),
   selector: document.querySelector("#source-selector"),
@@ -86,9 +88,17 @@ const elements = {
   upgradeDependencies: document.querySelector("#upgrade-dependencies"),
   upgradeBrowser: document.querySelector("#upgrade-browser"),
   upgradeState: document.querySelector("#upgrade-state"),
+  tokenSyncBaseUrl: document.querySelector("#token-sync-base-url"),
+  tokenSyncState: document.querySelector("#token-sync-state"),
+  tokenScriptState: document.querySelector("#token-script-state"),
+  tokenValueState: document.querySelector("#token-value-state"),
+  tokenLastSync: document.querySelector("#token-last-sync"),
+  tokenScriptButton: document.querySelector("#token-script-button"),
+  tokenClearButton: document.querySelector("#token-clear-button"),
 };
 
 elements.endpoint.textContent = `${location.origin}/cookiecloud`;
+elements.tokenSyncBaseUrl.value = location.origin;
 
 function formatDate(value) {
   if (!value) return "暂无";
@@ -142,12 +152,13 @@ function goToLogin() {
 }
 
 async function setActiveView(value, { syncHash = true } = {}) {
-  const activeView = ["cookiecloud", "upgrade"].includes(value) ? value : "pt-signin";
+  const activeView = ["cookiecloud", "web-credentials", "upgrade"].includes(value) ? value : "pt-signin";
   state.activeView = activeView;
   const systemView = activeView !== "pt-signin";
   elements.ptPanel.hidden = systemView || state.activePtTab !== "signin";
   elements.ptStatsPanel.hidden = systemView || state.activePtTab !== "stats";
   elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
+  elements.webCredentialsPanel.hidden = activeView !== "web-credentials";
   elements.upgradePanel.hidden = activeView !== "upgrade";
   elements.settingsTabList.hidden = !systemView;
   elements.ptTabList.hidden = systemView;
@@ -167,7 +178,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
 
   if (systemView) {
     elements.pageTitle.textContent = "系统设置";
-    elements.pageDescription.textContent = "CookieCloud、程序与浏览器运行时";
+    elements.pageDescription.textContent = "CookieCloud、Token、程序与浏览器运行时";
   } else {
     elements.pageTitle.textContent = "PT 站点";
     elements.pageDescription.textContent = "站点管理与自动化";
@@ -175,6 +186,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   const refreshLabels = {
     "pt-signin": "刷新签到任务",
     cookiecloud: "刷新 CookieCloud 状态",
+    "web-credentials": "刷新 Token 同步状态",
     upgrade: "刷新升级状态",
   };
   elements.refreshButton.title = refreshLabels[activeView];
@@ -217,6 +229,8 @@ function setBusy(busy) {
   elements.ptSelectAllButton.disabled = busy || selectablePtCandidates().length === 0;
   elements.ptCollectButton.disabled = busy || state.ptSelection.size === 0;
   elements.refreshButton.disabled = busy;
+  elements.tokenScriptButton.disabled = busy;
+  elements.tokenClearButton.disabled = busy || !state.webCredential?.token_configured;
 }
 
 function statusLabel(status) {
@@ -645,6 +659,24 @@ async function deletePtSite(site) {
   }
 }
 
+function renderWebCredential(status) {
+  state.webCredential = status;
+  elements.tokenSyncState.textContent = status.token_configured ? "同步正常"
+    : status.script_configured ? "等待 Token" : "未配置";
+  elements.tokenSyncState.className = `status-badge${status.token_configured ? " succeeded" : ""}`;
+  elements.tokenScriptState.textContent = status.script_configured ? "已生成" : "未生成";
+  elements.tokenValueState.textContent = status.token_configured ? "已加密保存" : "未同步";
+  elements.tokenLastSync.textContent = formatDate(status.last_sync_at);
+  elements.tokenScriptButton.textContent = status.script_configured ? "重新生成油猴脚本" : "生成油猴脚本";
+  elements.tokenClearButton.disabled = !status.token_configured;
+}
+
+async function loadWebCredentialStatus() {
+  const status = await api("/api/v1/web-credentials/rousi", { cache: "no-store" });
+  renderWebCredential(status);
+  return status;
+}
+
 function renderUpgradeStatus(status) {
   const localRevision = status.local_revision || status.revision;
   elements.upgradeRevision.textContent = localRevision ? `${status.branch}@${localRevision.slice(0, 12)}` : "未知";
@@ -805,13 +837,14 @@ async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats] = await Promise.all([
+    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredential] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
       api("/api/v1/pt-signin/stats"),
+      api("/api/v1/web-credentials/rousi", { cache: "no-store" }),
     ]);
     state.sources = sources.items;
     state.credentials = credentials.items;
@@ -819,10 +852,12 @@ async function refresh({ quiet = false } = {}) {
     state.ptSites = ptSites.items;
     state.ptHistory = ptHistory;
     state.ptStats = ptStats.items;
+    state.webCredential = webCredential;
     if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
     if (!state.selected && state.sources.length === 1) state.selected = state.sources[0].uuid;
     renderCookieCloud();
     renderPt();
+    renderWebCredential(webCredential);
     if (!quiet) showToast("状态已刷新");
   } catch (error) {
     if (error.status === 401) goToLogin();
@@ -1014,6 +1049,53 @@ elements.copyPasswordButton.addEventListener("click", async () => {
     await copyCredentialValue(password, "CookieCloud 密码已复制");
   } catch (error) {
     showToast(error.message, true);
+  }
+});
+elements.tokenScriptButton.addEventListener("click", async () => {
+  const baseUrl = elements.tokenSyncBaseUrl.value.trim();
+  if (!baseUrl) return;
+  setBusy(true);
+  try {
+    const response = await fetch("/api/v1/web-credentials/rousi/userscript", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base_url: baseUrl }),
+    });
+    if (!response.ok) {
+      let message = `脚本生成失败 (${response.status})`;
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
+    }
+    const blobUrl = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = "autosurf-rousi-token.user.js";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+    await loadWebCredentialStatus();
+    showToast("油猴脚本已生成；旧脚本的上传密钥同时失效");
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+    else showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+elements.tokenClearButton.addEventListener("click", async () => {
+  if (!window.confirm("清除 AutoSurf 中已同步的 Rousi Token？")) return;
+  setBusy(true);
+  try {
+    await api("/api/v1/web-credentials/rousi/token", { method: "DELETE" });
+    await loadWebCredentialStatus();
+    showToast("Rousi Token 已清除");
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
   }
 });
 elements.logoutButton.addEventListener("click", async () => {
