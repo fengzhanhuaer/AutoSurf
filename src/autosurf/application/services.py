@@ -427,7 +427,7 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
         )).all()
         for automation in remaining:
             credential = automation.credential
-            if credential is None or credential.provider != "cookiecloud":
+            if credential is None or credential.provider not in {"cookiecloud", "web_storage"}:
                 continue
             try:
                 config = json.loads(automation.config_json)
@@ -456,37 +456,42 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                     execution.finished_at = now
                     execution.error = "站点已停用"
                 continue
-            discovery = discover_pt_site(credential.domain, set())
+            try:
+                credential_markers = set(credentials.cookies_for(credential))
+            except ValueError:
+                credential_markers = set()
+            discovery = discover_pt_site(credential.domain, credential_markers)
             if discovery and config.get("discovered"):
                 changed = False
-                aliases = pt_site_domain_aliases(credential.domain)
-                related = session.scalars(select(CredentialRecord).where(
-                    CredentialRecord.provider == "cookiecloud",
-                    CredentialRecord.domain.in_(aliases),
-                )).all()
-                current_credentials = [
-                    item for item in related
-                    if item.domain.removeprefix("www.") == discovery.site_key
-                ]
-                if current_credentials:
-                    def current_score(item: CredentialRecord) -> tuple[int, int, bool, Any, str]:
-                        try:
-                            cookie_names = set(credentials.cookies_for(item))
-                        except ValueError:
-                            cookie_names = set()
-                        return (
-                            len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
-                            len(cookie_names),
-                            item.domain.startswith("www."),
-                            item.updated_at,
-                            item.id,
-                        )
+                if credential.provider == "cookiecloud":
+                    aliases = pt_site_domain_aliases(credential.domain)
+                    related = session.scalars(select(CredentialRecord).where(
+                        CredentialRecord.provider == "cookiecloud",
+                        CredentialRecord.domain.in_(aliases),
+                    )).all()
+                    current_credentials = [
+                        item for item in related
+                        if item.domain.removeprefix("www.") == discovery.site_key
+                    ]
+                    if current_credentials:
+                        def current_score(item: CredentialRecord) -> tuple[int, int, bool, Any, str]:
+                            try:
+                                cookie_names = set(credentials.cookies_for(item))
+                            except ValueError:
+                                cookie_names = set()
+                            return (
+                                len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
+                                len(cookie_names),
+                                item.domain.startswith("www."),
+                                item.updated_at,
+                                item.id,
+                            )
 
-                    preferred = max(current_credentials, key=current_score)
-                    if automation.credential_id != preferred.id:
-                        automation.credential = preferred
-                        credential = preferred
-                        changed = True
+                        preferred = max(current_credentials, key=current_score)
+                        if automation.credential_id != preferred.id:
+                            automation.credential = preferred
+                            credential = preferred
+                            changed = True
                 if config.get("url") != discovery.url:
                     config["url"] = discovery.url
                     changed = True

@@ -356,3 +356,49 @@ async def test_rousi_adapter_refreshes_profile_from_me_api():
         "seeding_count": "0",
         "seeding_size": "0 B",
     }
+
+
+@pytest.mark.parametrize(
+    ("name", "domain", "values", "expected_strategy", "sign_in_supported"),
+    [
+        ("Rousi", "rousi.pro", {"token": "header.payload.signature"}, "web_storage_browser", True),
+        (
+            "M-Team",
+            "kp.m-team.cc",
+            {"auth": "auth-value", "did": "device", "visitorId": "visitor"},
+            "web_storage_profile_refresh_only",
+            False,
+        ),
+    ],
+)
+def test_startup_reconciles_existing_web_storage_task_capabilities(
+    settings, name, domain, values, expected_strategy, sign_in_supported,
+):
+    original = create_app(settings)
+    credential = original.state.credentials.upsert_web_storage(
+        f"web-storage:{domain}", domain,
+        {"format": "web_storage_v1", "values": values},
+    )
+    task = original.state.automations.create(
+        name, "pt_signin", 86400, {
+            "url": f"https://{domain}/",
+            "credential_domain": domain,
+            "discovery_strategy": "web_storage_browser",
+            "sign_in_supported": True,
+            "profile_refresh_supported": False,
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": False,
+            "discovered": True,
+        }, credential.id,
+    )
+
+    restarted = create_app(settings)
+
+    with restarted.state.sessions() as session:
+        record = session.get(AutomationRecord, task.id)
+        config = json.loads(record.config_json)
+        assert config["discovery_strategy"] == expected_strategy
+        assert config["sign_in_supported"] is sign_in_supported
+        assert config["sign_in_enabled"] is sign_in_supported
+        assert config["profile_refresh_supported"] is True
+        assert config["profile_refresh_enabled"] is True
