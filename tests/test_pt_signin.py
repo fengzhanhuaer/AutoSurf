@@ -16,6 +16,7 @@ from autosurf.automations.pt_signin import (
     TjuptAdapter,
     ZhuqueAdapter,
     _classify_pt_homepage,
+    _complete_0ff_slider,
     _enrich_0ff_calendar_history,
     classify_pt_page,
     combine_pt_action_results,
@@ -206,6 +207,66 @@ async def test_0ff_homepage_already_done_is_enriched_from_calendar_page():
     ) == RunOutcome.BLOCKED
 
 
+@pytest.mark.asyncio
+async def test_0ff_slider_completion_drags_the_fixed_track():
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+
+        async def is_visible(self):
+            return self.page.challenge_visible
+
+        async def bounding_box(self):
+            if self.selector == "#dragHandler":
+                return {"x": 100, "y": 50, "width": 40, "height": 30}
+            return {"x": 100, "y": 50, "width": 304, "height": 30}
+
+    class Mouse:
+        def __init__(self, page):
+            self.page = page
+            self.events = []
+
+        async def move(self, x, y, **kwargs):
+            self.events.append(("move", x, y, kwargs))
+
+        async def down(self):
+            self.events.append(("down",))
+
+        async def up(self):
+            self.events.append(("up",))
+            self.page.challenge_visible = False
+
+    class Page:
+        def __init__(self):
+            self.challenge_visible = True
+            self.mouse = Mouse(self)
+            self.loaded = False
+
+        def locator(self, selector):
+            assert selector in {"#dragHandler", "#dragContainer"}
+            return Locator(self, selector)
+
+        async def wait_for_timeout(self, timeout):
+            assert timeout == 250
+
+        async def wait_for_load_state(self, state, **kwargs):
+            assert state == "domcontentloaded"
+            assert kwargs == {"timeout": 10_000}
+            self.loaded = True
+
+    page = Page()
+
+    assert await _complete_0ff_slider(page) is True
+    assert page.mouse.events == [
+        ("move", 120, 65, {}),
+        ("down",),
+        ("move", 382, 65, {"steps": 32}),
+        ("up",),
+    ]
+    assert page.loaded is True
+
+
 def test_pt_profile_url_and_combined_action_results():
     assert profile_url_from_cookies(
         "https://tracker.test/attendance.php", {"c_secure_uid": "735"}
@@ -269,7 +330,7 @@ async def test_fullcalendar_history_keeps_reward_over_empty_background_event():
 
         async def evaluate(self, script):
             assert "const current = entries.get(value)" in script
-            assert "if (current?.reward && !text) return" in script
+            assert "if (!text) return" in script
             return [
                 {"date": "2026-08-15", "reward": "300"},
                 {"date": "2026-08-16", "reward": "300"},
@@ -793,32 +854,50 @@ async def test_sunnypt_adapter_refreshes_current_basic_info_api():
 
 @pytest.mark.asyncio
 async def test_zhuque_adapter_refreshes_profile_from_site_api():
+    class Request:
+        method = "GET"
+
+    class Response:
+        url = "https://zhuque.in/api/user/getInfo"
+        status = 200
+        request = Request()
+
+        async def json(self):
+            return {"data": {
+                "id": 7,
+                "username": "mapleren",
+                "class": {"name": "烧包"},
+                "upload": 5 * 1024 ** 4,
+                "download": 200 * 1024 ** 3,
+                "bonus": 723516.4,
+                "seeding": 0,
+                "seedSize": 0,
+            }}
+
+    class Pending:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return Response()
+            return resolve()
+
     class Page:
         url = "https://zhuque.in/"
+
+        def expect_response(self, predicate, **kwargs):
+            assert predicate(Response()) is True
+            assert kwargs == {"timeout": 30_000}
+            return Pending()
 
         async def goto(self, url, **_kwargs):
             assert url == "https://zhuque.in/user/info"
             self.url = url
-
-        async def wait_for_load_state(self, *_args, **_kwargs):
-            return None
-
-        async def evaluate(self, script):
-            assert "/api/user/getInfo" in script
-            return {
-                "status": 200,
-                "authenticated": True,
-                "profile": {
-                    "username": "mapleren",
-                    "user_level": "烧包",
-                    "uploaded": 5 * 1024 ** 4,
-                    "downloaded": 200 * 1024 ** 3,
-                    "ratio": 25.6,
-                    "bonus": 723516.4,
-                    "seeding_count": 0,
-                    "seeding_size": 0,
-                },
-            }
 
     result = await ZhuqueAdapter().refresh_profile(
         Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
@@ -840,17 +919,43 @@ async def test_zhuque_adapter_refreshes_profile_from_site_api():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("adapter", [SunnyPtAdapter(), ZhuqueAdapter()])
 async def test_site_profile_api_reports_expired_login(adapter):
+    class Request:
+        method = "GET"
+
+    class Response:
+        url = "https://tracker.test/api/user/getInfo"
+        status = 401
+        request = Request()
+
+        async def json(self):
+            return {"status": "unauthorized"}
+
+    class Pending:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return Response()
+            return resolve()
+
     class Page:
         url = "https://tracker.test/"
 
         async def evaluate(self, _script):
             return {"status": 401, "authenticated": False, "profile": None}
 
+        def expect_response(self, predicate, **kwargs):
+            assert predicate(Response()) is True
+            assert kwargs == {"timeout": 30_000}
+            return Pending()
+
         async def goto(self, url, **_kwargs):
             self.url = url
-
-        async def wait_for_load_state(self, *_args, **_kwargs):
-            return None
 
     result = await adapter.refresh_profile(
         Page(), RunContext("test", {"url": Page.url}, {"sid": "expired"}, []),

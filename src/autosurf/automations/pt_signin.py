@@ -544,11 +544,6 @@ class ZhuqueAdapter:
         return hostname == "zhuque.in" or hostname.endswith(".zhuque.in")
 
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
-        await page.goto(
-            urljoin(page.url, "/user/info"), wait_until="domcontentloaded",
-        )
-        with suppress(Exception):
-            await page.wait_for_load_state("networkidle", timeout=3_000)
         response = await _zhuque_profile_api(page)
         if response["status"] in {401, 403}:
             return RunResult(
@@ -577,28 +572,46 @@ class ZhuqueAdapter:
 
 
 async def _zhuque_profile_api(page: Any) -> dict[str, Any]:
-    return await page.evaluate(r"""async () => {
-      const response = await fetch('/api/user/getInfo', {credentials: 'same-origin'});
-      let payload = null;
-      try { payload = await response.json(); } catch (_) {}
-      const data = payload && typeof payload === 'object' && payload.data
-        && typeof payload.data === 'object' ? payload.data : null;
-      const memberClass = data && typeof data.class === 'object' ? data.class : {};
-      return {
-        status: response.status,
-        authenticated: Boolean(data && data.id && data.username),
-        profile: data ? {
-          username: data.username ?? '',
-          user_level: memberClass.name ?? memberClass.level ?? '',
-          uploaded: data.upload ?? '',
-          downloaded: data.download ?? '',
-          ratio: data.download > 0 ? data.upload / data.download : (data.upload > 0 ? 'Inf' : ''),
-          bonus: data.bonus ?? data.seedBonus ?? '',
-          seeding_count: data.seeding ?? '',
-          seeding_size: data.seedSize ?? '',
-        } : null,
-      };
-    }""")
+    target = urljoin(page.url, "/user/info")
+    async with page.expect_response(
+        lambda item: (
+            item.request.method == "GET"
+            and urlparse(item.url).path == "/api/user/getInfo"
+        ),
+        timeout=30_000,
+    ) as pending:
+        await page.goto(target, wait_until="domcontentloaded")
+    api_response = await pending.value
+    try:
+        payload = await api_response.json()
+    except Exception:
+        payload = None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        data = None
+    member_class = data.get("class") if data else None
+    if not isinstance(member_class, dict):
+        member_class = {}
+    uploaded = data.get("upload") if data else None
+    downloaded = data.get("download") if data else None
+    if isinstance(uploaded, (int, float)) and isinstance(downloaded, (int, float)):
+        ratio: Any = uploaded / downloaded if downloaded > 0 else ("Inf" if uploaded > 0 else "")
+    else:
+        ratio = ""
+    return {
+        "status": api_response.status,
+        "authenticated": bool(data and data.get("id") and data.get("username")),
+        "profile": {
+            "username": data.get("username", ""),
+            "user_level": member_class.get("name") or member_class.get("level") or "",
+            "uploaded": uploaded if uploaded is not None else "",
+            "downloaded": downloaded if downloaded is not None else "",
+            "ratio": ratio,
+            "bonus": data.get("bonus", data.get("seedBonus", "")),
+            "seeding_count": data.get("seeding", ""),
+            "seeding_size": data.get("seedSize", ""),
+        } if data else None,
+    }
 
 
 class FiftyTwoPtAdapter:
@@ -1010,6 +1023,11 @@ async def _enrich_0ff_calendar_history(
         return result
     try:
         response = await page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+        await _complete_0ff_slider(page)
+        with suppress(Exception):
+            await page.locator(".fc-event").first.wait_for(
+                state="attached", timeout=min(timeout_ms, 20_000),
+            )
         history = await extract_site_signin_history(page)
     except Exception:
         return result
@@ -1022,6 +1040,36 @@ async def _enrich_0ff_calendar_history(
         "site_history": history,
     })
     return RunResult(result.outcome, result.message, details)
+
+
+async def _complete_0ff_slider(page: Any) -> bool:
+    try:
+        handler = page.locator("#dragHandler")
+        container = page.locator("#dragContainer")
+        if not await handler.is_visible() or not await container.is_visible():
+            return False
+        handler_box = await handler.bounding_box()
+        container_box = await container.bounding_box()
+        if not handler_box or not container_box:
+            return False
+        start_x = handler_box["x"] + handler_box["width"] / 2
+        start_y = handler_box["y"] + handler_box["height"] / 2
+        end_x = container_box["x"] + container_box["width"] - handler_box["width"] / 2 - 2
+        if end_x <= start_x:
+            return False
+        await page.mouse.move(start_x, start_y)
+        await page.mouse.down()
+        await page.mouse.move(end_x, start_y, steps=32)
+        await page.mouse.up()
+        for _ in range(20):
+            await page.wait_for_timeout(250)
+            if not await handler.is_visible():
+                with suppress(Exception):
+                    await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+                return True
+    except Exception:
+        return False
+    return False
 
 
 async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
@@ -1588,8 +1636,8 @@ async def extract_site_signin_history(page: Any) -> list[dict[str, str]]:
             const value = String(date || '').slice(0, 10);
             if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return;
             const text = String(reward || '').replace(/\\s+/g, ' ').trim().slice(0, 100);
+            if (!text) return;
             const current = entries.get(value);
-            if (current?.reward && !text) return;
             entries.set(value, {date: value, reward: text});
           };
 
