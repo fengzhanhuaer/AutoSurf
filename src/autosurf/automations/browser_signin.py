@@ -4,7 +4,11 @@ import os
 import re
 from pathlib import Path
 
-from autosurf.automations.browser_session import playwright_cookies, validated_http_url
+from autosurf.automations.browser_session import (
+    persistent_chromium_session,
+    validated_http_url,
+    with_browser_details,
+)
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
 
 
@@ -25,42 +29,46 @@ class BrowserSignInHandler:
         screenshot = screenshot_dir / f"{context.execution_id}.png"
 
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            browser_context = await browser.new_context(
-                locale=str(config.get("locale", "zh-CN")),
-                user_agent=config.get("user_agent"),
-                viewport={"width": 1365, "height": 768},
-            )
-            await browser_context.add_cookies(playwright_cookies(context, url))
-            page = await browser_context.new_page()
-            page.set_default_timeout(timeout_ms)
-            try:
-                response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                if config.get("wait_for_selector"):
-                    await page.locator(str(config["wait_for_selector"])).wait_for(state="visible")
-                if config.get("click_selector"):
-                    await page.locator(str(config["click_selector"])).click()
-                if config.get("wait_after_click_ms"):
-                    await page.wait_for_timeout(min(max(int(config["wait_after_click_ms"]), 0), 30_000))
-                body = (await page.locator("body").inner_text())[:1_000_000]
-                status = response.status if response else None
-                if status in {401, 403}:
-                    return RunResult(RunOutcome.AUTH_EXPIRED, f"site returned HTTP {status}")
-                for pattern in config.get("already_patterns", []):
-                    if re.search(str(pattern), body, re.IGNORECASE):
-                        return RunResult(RunOutcome.ALREADY_DONE, "site reports this task is already complete")
-                for pattern in config.get("success_patterns", []):
-                    if re.search(str(pattern), body, re.IGNORECASE):
-                        return RunResult(RunOutcome.SUCCESS, "success pattern matched")
-                if not config.get("success_patterns"):
-                    return RunResult(RunOutcome.SUCCESS, "browser automation completed")
-                await page.screenshot(path=str(screenshot), full_page=True)
-                return RunResult(RunOutcome.FAILED, "no success pattern matched",
-                                 {"screenshot": str(screenshot)})
-            except PlaywrightTimeoutError as exc:
-                await page.screenshot(path=str(screenshot), full_page=True)
-                return RunResult(RunOutcome.BLOCKED, f"browser operation timed out: {exc}",
-                                 {"screenshot": str(screenshot)})
-            finally:
-                await browser_context.close()
-                await browser.close()
+            async with persistent_chromium_session(playwright, context, url) as browser_session:
+                browser_context = browser_session.context
+                page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
+                page.set_default_timeout(timeout_ms)
+                try:
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    if config.get("wait_for_selector"):
+                        await page.locator(str(config["wait_for_selector"])).wait_for(state="visible")
+                    if config.get("click_selector"):
+                        await page.locator(str(config["click_selector"])).click()
+                    if config.get("wait_after_click_ms"):
+                        await page.wait_for_timeout(min(max(int(config["wait_after_click_ms"]), 0), 30_000))
+                    body = (await page.locator("body").inner_text())[:1_000_000]
+                    status = response.status if response else None
+                    if status in {401, 403}:
+                        return with_browser_details(
+                            RunResult(RunOutcome.AUTH_EXPIRED, f"site returned HTTP {status}"),
+                            browser_session,
+                        )
+                    for pattern in config.get("already_patterns", []):
+                        if re.search(str(pattern), body, re.IGNORECASE):
+                            return with_browser_details(RunResult(
+                                RunOutcome.ALREADY_DONE, "site reports this task is already complete",
+                            ), browser_session)
+                    for pattern in config.get("success_patterns", []):
+                        if re.search(str(pattern), body, re.IGNORECASE):
+                            return with_browser_details(
+                                RunResult(RunOutcome.SUCCESS, "success pattern matched"), browser_session,
+                            )
+                    if not config.get("success_patterns"):
+                        return with_browser_details(
+                            RunResult(RunOutcome.SUCCESS, "browser automation completed"), browser_session,
+                        )
+                    await page.screenshot(path=str(screenshot), full_page=True)
+                    return with_browser_details(RunResult(
+                        RunOutcome.FAILED, "no success pattern matched", {"screenshot": str(screenshot)},
+                    ), browser_session)
+                except PlaywrightTimeoutError as exc:
+                    await page.screenshot(path=str(screenshot), full_page=True)
+                    return with_browser_details(RunResult(
+                        RunOutcome.BLOCKED, f"browser operation timed out: {exc}",
+                        {"screenshot": str(screenshot)},
+                    ), browser_session)

@@ -9,9 +9,13 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urljoin, urlparse
 
-from autosurf.automations.browser_session import playwright_cookies, validated_http_url
+from autosurf.automations.browser_session import (
+    persistent_chromium_session,
+    validated_http_url,
+    with_browser_details,
+)
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
-from autosurf.pt_discovery import discover_pt_site
+from autosurf.pt_discovery import canonical_pt_site_domain, discover_pt_site
 
 
 DEFAULT_ALREADY_PATTERNS = (
@@ -395,62 +399,59 @@ class PtSignInHandler:
         screenshot = artifact_dir / f"{context.execution_id}.png"
 
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            browser_context = await browser.new_context(
-                locale=str(config.get("locale", "zh-CN")),
-                user_agent=config.get("user_agent"),
-                viewport={"width": 1365, "height": 768},
-            )
-            await browser_context.add_cookies(playwright_cookies(context, url))
-            if discovery and discovery.strategy == "web_storage_browser":
-                token = context.cookies.get("token", "")
-                if token:
-                    await browser_context.add_init_script(
-                        "if (location.hostname === 'rousi.pro' || "
-                        "location.hostname.endsWith('.rousi.pro')) {"
-                        f"localStorage.setItem('token', {json.dumps(token)});"
-                        "}"
-                    )
-            page = await browser_context.new_page()
-            page.set_default_timeout(timeout_ms)
-            try:
-                origin = pt_home_url(url)
-                home_response = await page.goto(
-                    origin, wait_until="domcontentloaded", timeout=timeout_ms,
-                )
-                sign_in_result = None
-                if sign_in_enabled:
-                    response = home_response
-                    if (parsed.path or "/") != "/" or parsed.query:
-                        sign_in_result = await _classify_pt_homepage(
-                            page, context, response.status if response else None,
+            profile_key = discovery.site_key if discovery else canonical_pt_site_domain(parsed.hostname or "")
+            async with persistent_chromium_session(
+                playwright, context, url, profile_key=profile_key,
+            ) as browser_session:
+                browser_context = browser_session.context
+                if discovery and discovery.strategy == "web_storage_browser":
+                    token = context.cookies.get("token", "")
+                    if token:
+                        await browser_context.add_init_script(
+                            "if (location.hostname === 'rousi.pro' || "
+                            "location.hostname.endsWith('.rousi.pro')) {"
+                            f"localStorage.setItem('token', {json.dumps(token)});"
+                            "}"
                         )
-                        if sign_in_result is None:
-                            response = await _open_pt_signin_page(page, url, timeout_ms)
-                    if sign_in_result is None:
-                        adapter = next((item for item in self.adapters if item.matches(url)), None)
-                        if adapter:
-                            sign_in_result = await adapter.sign_in(page, context)
-                        else:
-                            sign_in_result = await self._generic_sign_in(
-                                page, context, response.status if response else None, screenshot
-                            )
-                profile_result = None
-                if profile_refresh_enabled:
-                    profile_result = await refresh_pt_profile_page(
-                        page, context, url, credential_domain, timeout_ms
+                page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
+                page.set_default_timeout(timeout_ms)
+                try:
+                    origin = pt_home_url(url)
+                    home_response = await page.goto(
+                        origin, wait_until="domcontentloaded", timeout=timeout_ms,
                     )
-                return combine_pt_action_results(sign_in_result, profile_result)
-            except PlaywrightTimeoutError as exc:
-                await _save_screenshot(page, screenshot)
-                return RunResult(
-                    RunOutcome.BLOCKED,
-                    "PT 站点响应超时",
-                    {"url": page.url or url, "screenshot": str(screenshot), "error": str(exc)[:500]},
-                )
-            finally:
-                await browser_context.close()
-                await browser.close()
+                    sign_in_result = None
+                    if sign_in_enabled:
+                        response = home_response
+                        if (parsed.path or "/") != "/" or parsed.query:
+                            sign_in_result = await _classify_pt_homepage(
+                                page, context, response.status if response else None,
+                            )
+                            if sign_in_result is None:
+                                response = await _open_pt_signin_page(page, url, timeout_ms)
+                        if sign_in_result is None:
+                            adapter = next((item for item in self.adapters if item.matches(url)), None)
+                            if adapter:
+                                sign_in_result = await adapter.sign_in(page, context)
+                            else:
+                                sign_in_result = await self._generic_sign_in(
+                                    page, context, response.status if response else None, screenshot
+                                )
+                    profile_result = None
+                    if profile_refresh_enabled:
+                        profile_result = await refresh_pt_profile_page(
+                            page, context, url, credential_domain, timeout_ms
+                        )
+                    return with_browser_details(
+                        combine_pt_action_results(sign_in_result, profile_result), browser_session,
+                    )
+                except PlaywrightTimeoutError as exc:
+                    await _save_screenshot(page, screenshot)
+                    return with_browser_details(RunResult(
+                        RunOutcome.BLOCKED,
+                        "PT 站点响应超时",
+                        {"url": page.url or url, "screenshot": str(screenshot), "error": str(exc)[:500]},
+                    ), browser_session)
 
     async def _generic_sign_in(self, page: Any, context: RunContext, status_code: int | None,
                                screenshot: Path) -> RunResult:

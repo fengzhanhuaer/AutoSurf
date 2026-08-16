@@ -23,6 +23,7 @@ from sqlalchemy import delete, select
 
 from autosurf.domain.models import utc_now
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
+from autosurf.automations.browser_session import persistent_browser_mode
 from autosurf.infrastructure.database import (
     AutomationRecord,
     CookieCloudBlob,
@@ -316,6 +317,7 @@ def _browser_runtime() -> dict[str, Any]:
         "installed": installed,
         "playwright_version": playwright_version,
         "persistent": bool(os.environ.get("PLAYWRIGHT_BROWSERS_PATH")),
+        "session_mode": persistent_browser_mode(),
         "chromium_revision": chromium_revision,
         "chromium_version": chromium_version,
     }

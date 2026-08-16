@@ -691,8 +691,9 @@ function renderUpgradeStatus(status) {
     ? `${item.name}: 未安装，要求 ${item.required}`
     : `${item.name}: 已安装 ${item.installed}，要求 ${item.required}`).join("\n");
   const browser = status.browser || {};
+  const browserMode = browser.session_mode === "persistent_headful" ? "持久有头" : "持久无头";
   elements.upgradeBrowser.textContent = browser.installed
-    ? `Chromium ${browser.chromium_version || browser.chromium_revision || "已安装"}` : "未安装";
+    ? `Chromium ${browser.chromium_version || browser.chromium_revision || "已安装"} · ${browserMode}` : "未安装";
   const lastState = status.last_upgrade?.state;
   elements.upgradeState.textContent = status.running ? "升级中"
     : status.version_check_error ? status.version_check_error
