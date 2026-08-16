@@ -921,6 +921,34 @@ async def extract_site_signin_history(page: Any) -> list[dict[str, str]]:
               if (day) add(day.date, event.innerText || event.textContent);
             }
           }
+
+          const calendarSource = [...document.scripts]
+            .map((script) => script.textContent || '')
+            .find((text) => /const\\s+nowDate\\s*=\\s*new\\s+Date/.test(text));
+          const calendarNow = calendarSource?.match(
+            /const\\s+nowDate\\s*=\\s*new\\s+Date\\(["'](\\d{4})\\/(\\d{1,2})\\/(\\d{1,2})["']\\)/
+          );
+          if (calendarNow) {
+            const calendarYear = Number(calendarNow[1]);
+            const calendarMonth = Number(calendarNow[2]);
+            const pad = (number) => String(number).padStart(2, '0');
+            const shiftedMonth = (offset) => {
+              const value = new Date(calendarYear, calendarMonth - 1 + offset, 1);
+              return [value.getFullYear(), value.getMonth() + 1];
+            };
+            for (const cell of document.querySelectorAll('#day-register .calender-sub')) {
+              const claimed = (cell.querySelector('.checkin button')?.textContent || '').trim();
+              if (claimed !== '已领取') continue;
+              const dayMatch = (cell.querySelector('.day-content')?.textContent || '').match(/(\\d{1,2})/);
+              if (!dayMatch) continue;
+              const dayElement = cell.querySelector('.day-content');
+              const monthOffset = dayElement?.classList.contains('last-month-day')
+                ? -1 : dayElement?.classList.contains('next-month-day') ? 1 : 0;
+              const [year, month] = shiftedMonth(monthOffset);
+              const reward = cell.querySelector('.bonus-info p')?.textContent || '';
+              add(`${year}-${pad(month)}-${pad(Number(dayMatch[1]))}`, reward);
+            }
+          }
           return [...entries.values()].sort((left, right) => left.date.localeCompare(right.date));
         }""")
     merged = {item["date"]: item for item in normalize_site_signin_history(raw)}

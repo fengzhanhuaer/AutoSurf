@@ -16,6 +16,7 @@ from autosurf.automations.pt_signin import (
     combine_pt_action_results,
     complete_52pt_slider,
     discover_pt_profile_url,
+    extract_site_signin_history,
     extract_text_signin_history,
     normalize_site_signin_history,
     normalize_pt_profile_stats,
@@ -110,6 +111,35 @@ def test_pt_profile_url_and_combined_action_results():
     assert result.details["actions"]["sign_in"]["enabled"] is True
     assert result.details["actions"]["profile_refresh"]["outcome"] == RunOutcome.SUCCESS
     assert result.details["site_history"][0]["reward"] == "81"
+
+
+@pytest.mark.asyncio
+async def test_hhanclub_calendar_history_uses_claimed_days_and_rewards():
+    class Body:
+        async def inner_text(self):
+            return ""
+
+    class Page:
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        async def evaluate(self, script):
+            assert "#day-register .calender-sub" in script
+            assert "last-month-day" in script
+            assert "claimed !== '已领取'" in script
+            assert ".bonus-info p" in script
+            return [
+                {"date": "2026-07-31", "reward": "80"},
+                {"date": "2026-08-01", "reward": "85"},
+                {"date": "2026-08-16", "reward": "20"},
+            ]
+
+    assert await extract_site_signin_history(Page()) == [
+        {"date": "2026-07-31", "reward": "80"},
+        {"date": "2026-08-01", "reward": "85"},
+        {"date": "2026-08-16", "reward": "20"},
+    ]
 
 
 def test_pt_profile_stats_normalization_supports_nexusphp_labels():
