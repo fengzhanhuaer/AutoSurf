@@ -425,6 +425,12 @@ def test_pt_profile_stats_normalization_supports_nexusphp_labels():
         "uploaded": "上传量 10.92TB",
         "seeding_count": "共有0记录",
     }) == {"uploaded": "10.92TB", "seeding_count": "0"}
+    assert sanitize_pt_profile_stats({
+        "ratio": "31094.626704335456",
+    }) == {"ratio": "31094.627"}
+    assert sanitize_pt_profile_stats({
+        "ratio": "0.0004",
+    }) == {"ratio": "0.0004"}
     assert normalize_pt_profile_stats({
         "pairs": [],
         "body": "",

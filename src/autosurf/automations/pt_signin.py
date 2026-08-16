@@ -5,6 +5,7 @@ import os
 import re
 from contextlib import suppress
 from datetime import date
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -1509,6 +1510,16 @@ def sanitize_pt_profile_stats(value: dict[str, Any]) -> dict[str, str]:
             if not match:
                 continue
             text = match.group(0)
+            if key == "ratio" and text.casefold() != "inf" and text != "∞":
+                try:
+                    ratio = Decimal(text.replace(",", ""))
+                    precision = Decimal("0.001")
+                    rounded = ratio.quantize(precision, rounding=ROUND_HALF_UP)
+                    if ratio and not rounded:
+                        rounded = ratio.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+                    text = format(rounded, "f").rstrip("0").rstrip(".") or "0"
+                except InvalidOperation:
+                    pass
         elif key == "seeding_count":
             match = re.search(r"\d+", text)
             if not match:
