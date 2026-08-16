@@ -530,9 +530,9 @@ async def _classify_pt_homepage(page: Any, context: RunContext,
         RunOutcome.FAILED,
     }:
         return None
-    return await _classified_page_result(
-        page, outcome, page.url, status_code, context=context,
-    )
+    # The homepage is also the safe fallback for sites whose attendance page is
+    # protected by a WAF. Do not navigate away just to collect optional history.
+    return _classified_result(outcome, page.url, status_code)
 
 
 async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:

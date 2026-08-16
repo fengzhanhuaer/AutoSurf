@@ -88,6 +88,7 @@ async def test_homepage_already_done_skips_hdkylin_challenge_page():
     assert result is not None
     assert result.outcome == RunOutcome.ALREADY_DONE
     assert result.details["url"] == "https://www.hdkyl.in/"
+    assert page.url == "https://www.hdkyl.in/"
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "今日已签到"
     ) == RunOutcome.ALREADY_DONE
