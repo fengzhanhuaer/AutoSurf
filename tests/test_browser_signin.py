@@ -43,3 +43,27 @@ def test_browser_cookie_records_keep_scope_and_filter_other_domains():
         "sameSite": "Lax",
         "expires": 2_000_000_000.0,
     }]
+
+
+def test_browser_cookie_records_require_haidan_www_target_for_www_scope():
+    context = RunContext(
+        execution_id="test",
+        config={},
+        cookies={"c_secure_uid": "7"},
+        browser_cookies=[{
+            "name": "c_secure_uid",
+            "value": "7",
+            "domain": ".www.haidan.cc",
+            "path": "/",
+        }],
+    )
+
+    assert playwright_cookies(context, "https://haidan.cc/") == []
+    assert playwright_cookies(context, "https://www.haidan.cc/") == [{
+        "name": "c_secure_uid",
+        "value": "7",
+        "domain": ".www.haidan.cc",
+        "path": "/",
+        "secure": True,
+        "httpOnly": False,
+    }]

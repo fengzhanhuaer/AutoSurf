@@ -25,6 +25,7 @@ class PtSiteDefinition:
     strategy: str = "generic_browser"
     aliases: tuple[str, ...] = ()
     profile_path: str | None = None
+    target_domain: str | None = None
 
 
 # This catalog supplies stable names and known sign-in paths. Cookie signatures
@@ -50,7 +51,10 @@ PT_SITE_CATALOG = (
         "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
     ),
     PtSiteDefinition("yemapt.org", "YemaPT"),
-    PtSiteDefinition("haidan.cc", "Haidan", "/", aliases=("haidan.video",)),
+    PtSiteDefinition(
+        "haidan.cc", "Haidan", "/", aliases=("haidan.video",),
+        target_domain="www.haidan.cc",
+    ),
     PtSiteDefinition("open.cd", "OpenCD", "/"),
     PtSiteDefinition("hdchina.org", "HDChina"),
     PtSiteDefinition("hdsky.me", "HDSky", "/"),
@@ -105,7 +109,7 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
         # Always navigate to the catalog's current domain. Alias credentials are
         # still merged into the same site, but retired domains are never used as
         # automation targets.
-        target_domain = definition.domain
+        target_domain = definition.target_domain or definition.domain
         return PtDiscovery(
             site_key=definition.domain,
             name=definition.name,

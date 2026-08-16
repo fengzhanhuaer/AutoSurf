@@ -765,7 +765,8 @@ def test_haidan_supports_daily_checkin_and_completed_label():
     discovery = discover_pt_site("www.haidan.cc", {"c_secure_uid"})
 
     assert discovery is not None
-    assert discovery.url == "https://haidan.cc/"
+    assert discovery.site_key == "haidan.cc"
+    assert discovery.url == "https://www.haidan.cc/"
     assert discovery.sign_in_supported is True
     assert discovery.profile_refresh_supported is True
     assert classify_pt_page(
@@ -774,14 +775,16 @@ def test_haidan_supports_daily_checkin_and_completed_label():
 
 
 @pytest.mark.parametrize(
-    ("current_domain", "old_domain", "name"),
+    ("current_domain", "old_domain", "name", "target_domain"),
     [
-        ("pterclub.net", "pterclub.com", "PterClub"),
-        ("rousi.pro", "rousi.zip", "Rousi"),
-        ("haidan.cc", "haidan.video", "Haidan"),
+        ("pterclub.net", "pterclub.com", "PterClub", "pterclub.net"),
+        ("rousi.pro", "rousi.zip", "Rousi", "rousi.pro"),
+        ("haidan.cc", "haidan.video", "Haidan", "www.haidan.cc"),
     ],
 )
-def test_retired_domains_resolve_to_current_site(current_domain, old_domain, name):
+def test_retired_domains_resolve_to_current_site(
+    current_domain, old_domain, name, target_domain,
+):
     current = discover_pt_site(current_domain, {"c_secure_uid"})
     old = discover_pt_site(old_domain, {"c_secure_uid"})
 
@@ -789,8 +792,8 @@ def test_retired_domains_resolve_to_current_site(current_domain, old_domain, nam
     assert old is not None
     assert current.site_key == old.site_key == current_domain
     assert current.name == old.name == name
-    assert current.url.startswith(f"https://{current_domain}/")
-    assert old.url.startswith(f"https://{current_domain}/")
+    assert current.url.startswith(f"https://{target_domain}/")
+    assert old.url.startswith(f"https://{target_domain}/")
     assert set(pt_site_domain_aliases(old_domain)) == {
         current_domain,
         f"www.{current_domain}",
@@ -1269,7 +1272,7 @@ def test_pt_reconciliation_rebinds_old_task_to_current_domain_credential(setting
         assert migrated.name == "Haidan"
         assert migrated.credential_id == current.id
         assert migrated.credential.domain == "www.haidan.cc"
-        assert config["url"] == "https://haidan.cc/"
+        assert config["url"] == "https://www.haidan.cc/"
         assert config["credential_domain"] == "haidan.cc"
         assert config["sign_in_enabled"] is True
         assert config["sign_in_supported"] is True
