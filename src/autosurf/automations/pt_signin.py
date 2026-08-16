@@ -73,6 +73,15 @@ COMMON_BUTTON_PATTERNS = (
     re.compile(r"^\s*(?:check\s*in|sign\s*in)\s*$", re.IGNORECASE),
 )
 
+# Public metadata embedded in M-Team's Web client, not an account credential.
+MTEAM_API_HOSTS = (
+    "https://api.m-team.cc/api",
+    "https://api.m-team.io/api",
+    "https://api2.m-team.cc/api",
+)
+MTEAM_WEB_VERSION = "1.1.7"
+MTEAM_WEB_SIGNATURE_KEY = "HLkPcWmycL57mfJt"
+
 
 class PtSiteAdapter(Protocol):
     def matches(self, url: str) -> bool: ...
@@ -133,6 +142,51 @@ class RousiAdapter:
             {"url": page.url, "clicked": True, "status_code": after["status"]},
         )
 
+    async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
+        token = context.cookies.get("token", "")
+        if not token:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 尚未同步")
+
+        response = await _rousi_api(page, "/api/me", token)
+        if response["status"] in {401, 403}:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 已失效", {"url": page.url})
+        if response["status"] < 200 or response["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 个人信息刷新失败",
+                {"url": page.url, "status_code": response["status"]},
+            )
+
+        body = response.get("body")
+        stats = body.get("stats") if isinstance(body, dict) else None
+        if not isinstance(stats, dict):
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 个人信息接口未返回统计数据",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        activity = body.get("seeding_leeching_data")
+        if not isinstance(activity, dict):
+            activity = {}
+        profile_stats = sanitize_pt_profile_stats({
+            "username": stats.get("username"),
+            "user_level": (
+                stats.get("level") if stats.get("level") is not None else body.get("role")
+            ),
+            "uploaded": _format_byte_size(stats.get("uploaded")),
+            "downloaded": _format_byte_size(stats.get("downloaded")),
+            "ratio": stats.get("ratio"),
+            "bonus": stats.get("karma"),
+            "seeding_count": activity.get("seeding_count"),
+            "seeding_size": _format_byte_size(activity.get("seeding_size")),
+        })
+        return RunResult(
+            RunOutcome.SUCCESS, "Rousi 个人信息刷新成功",
+            {
+                "url": page.url,
+                "status_code": response["status"],
+                "profile_stats": profile_stats,
+            },
+        )
+
 
 async def _rousi_api(page: Any, path: str, token: str) -> dict[str, Any]:
     return await page.evaluate(
@@ -173,6 +227,366 @@ def _rousi_history(value: Any) -> list[dict[str, str]]:
     if not isinstance(dates, list):
         return []
     return [{"date": str(item), "reward": ""} for item in dates[-31:] if item]
+
+
+def _format_byte_size(value: Any) -> str | None:
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if number < 0 or number == float("inf"):
+        return None
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+    unit = 0
+    while number >= 1024 and unit < len(units) - 1:
+        number /= 1024
+        unit += 1
+    amount = f"{number:.2f}".rstrip("0").rstrip(".")
+    return f"{amount} {units[unit]}"
+
+
+def _normalize_profile_size(value: Any) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if re.fullmatch(r"[\d,.]+\s*(?:[KMGTPE]i?B|B|Bytes?)", text, re.IGNORECASE):
+        return text
+    return _format_byte_size(value)
+
+
+class MTeamAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "kp.m-team.cc" or hostname.endswith(".kp.m-team.cc")
+
+    async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
+        if not str(context.cookies.get("auth") or "").strip():
+            return RunResult(RunOutcome.AUTH_EXPIRED, "M-Team Web 凭据尚未同步")
+
+        profile = await _mteam_api(page, context, "/member/profile")
+        failed = _mteam_api_failure(profile, page.url, "个人信息刷新")
+        if failed:
+            return failed
+        if not profile.get("authenticated"):
+            return RunResult(
+                RunOutcome.FAILED,
+                "M-Team 个人信息接口未返回用户信息",
+                {"url": page.url, "status_code": profile.get("status")},
+            )
+        return RunResult(
+            RunOutcome.SUCCESS,
+            "M-Team 个人信息刷新成功",
+            {
+                "url": page.url,
+                "status_code": profile.get("status"),
+                "profile_stats": _mteam_profile_stats(profile.get("profile")),
+            },
+        )
+
+
+async def _mteam_api(page: Any, context: RunContext, path: str) -> dict[str, Any]:
+    return await page.evaluate(
+        r"""async ({path, credentials, apiHosts, version, signatureKey}) => {
+          const encode = new TextEncoder();
+          const sign = async (value) => {
+            const key = await crypto.subtle.importKey(
+              "raw", encode.encode(signatureKey), {name: "HMAC", hash: "SHA-1"}, false, ["sign"]
+            );
+            const bytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, encode.encode(value)));
+            return btoa(String.fromCharCode(...bytes));
+          };
+          const auth = localStorage.getItem("auth") || credentials.auth || "";
+          const did = localStorage.getItem("did") || credentials.did || "";
+          const visitorId = localStorage.getItem("visitorId") || credentials.visitorId || "";
+          let lastError = "";
+          for (const apiHost of apiHosts) {
+            const endpoint = `${apiHost.replace(/\/$/, "")}${path}`;
+            const timestamp = Date.now();
+            const signature = await sign(`POST&${new URL(endpoint).pathname}&${timestamp}`);
+            const form = new FormData();
+            form.append("_timestamp", String(timestamp));
+            form.append("_sgin", signature);
+            const headers = {
+              Accept: "application/json, text/plain, */*",
+              authorization: auth,
+              ts: String(Math.floor(Date.now() / 1000)),
+              visitorId,
+              version,
+              webVersion: `${version.split("-")[0].replaceAll(".", "")}0`,
+            };
+            if (did) headers.did = did;
+            try {
+              const response = await fetch(endpoint, {
+                method: "POST", headers, body: form, credentials: "include",
+              });
+              let payload = null;
+              try { payload = await response.json(); } catch (_) {}
+              const refreshedAuth = response.headers.get("authorization");
+              const refreshedDid = response.headers.get("did");
+              if (refreshedAuth) localStorage.setItem("auth", refreshedAuth);
+              if (refreshedDid) localStorage.setItem("did", refreshedDid);
+              const data = payload && typeof payload === "object" ? payload.data : null;
+              const memberCount = data && typeof data.memberCount === "object"
+                ? data.memberCount : {};
+              const memberStatus = data && typeof data.memberStatus === "object"
+                ? data.memberStatus : {};
+              return {
+                status: response.status,
+                code: payload && typeof payload === "object" ? Number(payload.code) : null,
+                message: payload && typeof payload === "object" ? String(payload.message || "") : "",
+                authenticated: Boolean(data && typeof data === "object" && data.id),
+                profile: data && typeof data === "object" ? {
+                  username: data.username ?? "",
+                  user_level: memberStatus.name ?? memberStatus.title
+                    ?? data.roleName ?? data.role ?? "",
+                  uploaded: memberCount.uploaded ?? data.uploaded ?? "",
+                  downloaded: memberCount.downloaded ?? data.downloaded ?? "",
+                  ratio: memberCount.ratio ?? data.ratio ?? "",
+                  bonus: memberCount.bonus ?? data.bonus ?? "",
+                } : null,
+              };
+            } catch (error) {
+              lastError = String(error && error.message ? error.message : error);
+            }
+          }
+          return {status: 0, code: null, message: "", authenticated: false, networkError: lastError};
+        }""",
+        {
+            "path": path,
+            "credentials": {
+                key: str(context.cookies.get(key) or "")
+                for key in ("auth", "did", "visitorId")
+            },
+            "apiHosts": list(MTEAM_API_HOSTS),
+            "version": MTEAM_WEB_VERSION,
+            "signatureKey": MTEAM_WEB_SIGNATURE_KEY,
+        },
+    )
+
+
+def _mteam_api_failure(value: dict[str, Any], url: str, action: str) -> RunResult | None:
+    status = int(value.get("status") or 0)
+    code = value.get("code")
+    message = re.sub(r"\s+", " ", str(value.get("message") or "")).strip()[:200]
+    details: dict[str, Any] = {"url": url, "status_code": status}
+    if code is not None:
+        details["code"] = code
+    if message:
+        details["api_message"] = message
+    network_error = str(value.get("networkError") or "").strip()
+    if network_error:
+        details["error"] = network_error[:300]
+        return RunResult(RunOutcome.FAILED, f"M-Team {action}网络请求失败", details)
+    invalid_profile_auth = code == 1 and re.search(
+        r"(?:无效|無效).*(?:请求|請求)", message,
+    )
+    if status in {401, 403} or code in {401, 403} or invalid_profile_auth or re.search(
+        r"(?:请|請).*(?:登录|登入)|(?:登录|登入).*(?:失效|過期)|auth|token",
+        message,
+        re.IGNORECASE,
+    ):
+        return RunResult(RunOutcome.AUTH_EXPIRED, "M-Team Web 凭据已失效", details)
+    if status < 200 or status >= 300 or code != 0:
+        return RunResult(RunOutcome.FAILED, f"M-Team {action}失败", details)
+    return None
+
+
+def _mteam_profile_stats(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    uploaded = _mteam_number(value.get("uploaded"))
+    downloaded = _mteam_number(value.get("downloaded"))
+    ratio = value.get("ratio")
+    if _mteam_number(ratio) is None:
+        if uploaded is not None and downloaded == 0 and uploaded > 0:
+            ratio = "Inf"
+        elif uploaded is not None and downloaded is not None and downloaded > 0:
+            ratio = f"{uploaded / downloaded:.3f}".rstrip("0").rstrip(".")
+    return sanitize_pt_profile_stats({
+        "username": value.get("username"),
+        "user_level": value.get("user_level"),
+        "uploaded": _mteam_size(uploaded),
+        "downloaded": _mteam_size(downloaded),
+        "ratio": ratio,
+        "bonus": value.get("bonus"),
+    })
+
+
+def _mteam_number(value: Any) -> float | None:
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 and number != float("inf") else None
+
+
+def _mteam_size(value: float | None) -> str | None:
+    return _format_byte_size(value)
+
+
+class SunnyPtAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "sunnypt.top" or hostname.endswith(".sunnypt.top")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = await page_body_text(page)
+        initial = classify_pt_page(page.url, None, body, context.config)
+        if initial in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
+            return _classified_result(initial, page.url, None)
+        if _sunnypt_signed_in(body):
+            history = await extract_site_signin_history(page)
+            return RunResult(
+                RunOutcome.ALREADY_DONE,
+                "SunnyPT 今日已经签到",
+                {"url": page.url, "clicked": False, "site_history": history},
+            )
+
+        button = page.get_by_role(
+            "button", name=re.compile(r"^\s*(?:立即)?\s*签到\s*$"),
+        ).first
+        with suppress(Exception):
+            await button.wait_for(state="visible", timeout=5_000)
+        if not await button.is_visible():
+            return RunResult(
+                RunOutcome.FAILED,
+                "SunnyPT 签到页没有找到立即签到按钮",
+                {"url": page.url, "clicked": False},
+            )
+
+        await button.click()
+        for _ in range(10):
+            await page.wait_for_timeout(500)
+            body = await page_body_text(page)
+            outcome = classify_pt_page(page.url, None, body, context.config)
+            if outcome in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
+                return _classified_result(outcome, page.url, None, clicked=True)
+            if outcome == RunOutcome.SUCCESS or _sunnypt_signed_in(body):
+                history = await extract_site_signin_history(page)
+                return RunResult(
+                    RunOutcome.SUCCESS,
+                    "SunnyPT 签到成功",
+                    {"url": page.url, "clicked": True, "site_history": history},
+                )
+        return RunResult(
+            RunOutcome.FAILED,
+            "SunnyPT 点击签到后未确认今日状态",
+            {"url": page.url, "clicked": True},
+        )
+
+    async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
+        response = await _sunnypt_profile_api(page)
+        if response["status"] in {401, 403}:
+            return RunResult(
+                RunOutcome.AUTH_EXPIRED, "SunnyPT 登录状态已失效",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        if response["status"] < 200 or response["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "SunnyPT 个人信息刷新失败",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        profile = dict(response.get("profile") or {})
+        profile["uploaded"] = _normalize_profile_size(profile.get("uploaded"))
+        profile["downloaded"] = _normalize_profile_size(profile.get("downloaded"))
+        stats = sanitize_pt_profile_stats(profile)
+        if not response.get("authenticated") or not stats.get("username"):
+            return RunResult(
+                RunOutcome.AUTH_EXPIRED, "SunnyPT 登录状态已失效",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        return RunResult(
+            RunOutcome.SUCCESS, "SunnyPT 个人信息刷新成功",
+            {"url": page.url, "status_code": response["status"], "profile_stats": stats},
+        )
+
+
+def _sunnypt_signed_in(value: str) -> bool:
+    return bool(re.search(r"(?:今日|今天)\s*(?:已签到|已簽到)", value))
+
+
+async def _sunnypt_profile_api(page: Any) -> dict[str, Any]:
+    return await page.evaluate(r"""async () => {
+      const response = await fetch('/api/v1/user/basic-info', {credentials: 'same-origin'});
+      let payload = null;
+      try { payload = await response.json(); } catch (_) {}
+      let data = payload;
+      for (const key of ['data', 'result']) {
+        if (data && typeof data === 'object' && data[key] && typeof data[key] === 'object') {
+          data = data[key];
+        }
+      }
+      const profile = data && typeof data === 'object' ? {
+        username: data.username ?? '',
+        user_level: data.title || data.user_level || data.level || data.class || '',
+        uploaded: data.uploaded ?? '',
+        downloaded: data.downloaded ?? '',
+        ratio: data.ratio ?? '',
+        bonus: data.seed_bonus ?? data.bonus ?? '',
+        seeding_count: data.upload_num ?? data.seeding_count ?? '',
+      } : null;
+      return {
+        status: response.status,
+        authenticated: Boolean(data && typeof data === 'object' && (data.id || data.username)),
+        profile,
+      };
+    }""")
+
+
+class ZhuqueAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "zhuque.in" or hostname.endswith(".zhuque.in")
+
+    async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
+        response = await _zhuque_profile_api(page)
+        if response["status"] in {401, 403}:
+            return RunResult(
+                RunOutcome.AUTH_EXPIRED, "Zhuque 登录状态已失效",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        if response["status"] < 200 or response["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "Zhuque 个人信息刷新失败",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        profile = dict(response.get("profile") or {})
+        profile["uploaded"] = _normalize_profile_size(profile.get("uploaded"))
+        profile["downloaded"] = _normalize_profile_size(profile.get("downloaded"))
+        profile["seeding_size"] = _normalize_profile_size(profile.get("seeding_size"))
+        stats = sanitize_pt_profile_stats(profile)
+        if not response.get("authenticated") or not stats.get("username"):
+            return RunResult(
+                RunOutcome.AUTH_EXPIRED, "Zhuque 登录状态已失效",
+                {"url": page.url, "status_code": response["status"]},
+            )
+        return RunResult(
+            RunOutcome.SUCCESS, "Zhuque 个人信息刷新成功",
+            {"url": page.url, "status_code": response["status"], "profile_stats": stats},
+        )
+
+
+async def _zhuque_profile_api(page: Any) -> dict[str, Any]:
+    return await page.evaluate(r"""async () => {
+      const response = await fetch('/api/user/getInfo', {credentials: 'same-origin'});
+      let payload = null;
+      try { payload = await response.json(); } catch (_) {}
+      const data = payload && typeof payload === 'object' && payload.data
+        && typeof payload.data === 'object' ? payload.data : null;
+      const memberClass = data && typeof data.class === 'object' ? data.class : {};
+      return {
+        status: response.status,
+        authenticated: Boolean(data && data.id && data.username),
+        profile: data ? {
+          username: data.username ?? '',
+          user_level: memberClass.name ?? memberClass.level ?? '',
+          uploaded: data.upload ?? '',
+          downloaded: data.download ?? '',
+          ratio: data.download > 0 ? data.upload / data.download : (data.upload > 0 ? 'Inf' : ''),
+          bonus: data.bonus ?? data.seedBonus ?? '',
+          seeding_count: data.seeding ?? '',
+          seeding_size: data.seedSize ?? '',
+        } : null,
+      };
+    }""")
 
 
 class FiftyTwoPtAdapter:
@@ -430,7 +844,9 @@ class PtSignInHandler:
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
-                if discovery and discovery.strategy == "web_storage_browser":
+                if discovery and discovery.strategy in {
+                    "web_storage_browser", "web_storage_profile_refresh_only",
+                }:
                     await browser_context.add_init_script(
                         web_storage_init_script(url, context.cookies),
                     )
@@ -441,6 +857,7 @@ class PtSignInHandler:
                     home_response = await page.goto(
                         origin, wait_until="domcontentloaded", timeout=timeout_ms,
                     )
+                    adapter = next((item for item in self.adapters if item.matches(url)), None)
                     sign_in_result = None
                     if sign_in_enabled:
                         response = home_response
@@ -451,7 +868,6 @@ class PtSignInHandler:
                             if sign_in_result is None:
                                 response = await _open_pt_signin_page(page, url, timeout_ms)
                         if sign_in_result is None:
-                            adapter = next((item for item in self.adapters if item.matches(url)), None)
                             if adapter:
                                 sign_in_result = await adapter.sign_in(page, context)
                             else:
@@ -464,9 +880,13 @@ class PtSignInHandler:
                             sign_in_result, page.url or url,
                         )
                         if profile_result is None:
-                            profile_result = await refresh_pt_profile_page(
-                                page, context, url, credential_domain, timeout_ms
-                            )
+                            adapter_refresh = getattr(adapter, "refresh_profile", None)
+                            if callable(adapter_refresh):
+                                profile_result = await adapter_refresh(page, context)
+                            else:
+                                profile_result = await refresh_pt_profile_page(
+                                    page, context, url, credential_domain, timeout_ms
+                                )
                     return with_browser_details(
                         combine_pt_action_results(sign_in_result, profile_result), browser_session,
                     )
@@ -596,6 +1016,11 @@ def classify_pt_page(url: str, status_code: int | None, body: str,
     lowered_url = url.lower()
     if _matches(body, CHALLENGE_PATTERNS):
         return RunOutcome.BLOCKED
+    if status_code == 403 and (
+        _matches(body, DEFAULT_ALREADY_PATTERNS)
+        or _contains_any(body, config.get("already_patterns", []))
+    ):
+        return RunOutcome.ALREADY_DONE
     if status_code == 403:
         return RunOutcome.AUTH_EXPIRED
     if any(value in lowered_url for value in (
@@ -699,6 +1124,12 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
             "url": page.url, "status_code": status_code,
         })
     stats = await extract_pt_profile_stats(page)
+    if not stats:
+        with suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=3_000)
+        with suppress(Exception):
+            await page.wait_for_timeout(1_000)
+        stats = await extract_pt_profile_stats(page)
     return RunResult(RunOutcome.SUCCESS, "PT 站个人信息页刷新成功", {
         "url": page.url, "status_code": status_code, "profile_stats": stats,
     })
@@ -803,6 +1234,21 @@ async def extract_pt_profile_stats(page: Any) -> dict[str, str]:
             const text = String(value || '').replace(/\s+/g, ' ').trim();
             if (key && text && key !== text) pairs.push([key, text]);
           };
+          for (const container of document.querySelectorAll('[class*="stat"], [class*="metric"]')) {
+            const label = container.querySelector(
+              '[class*="label"], [class*="title"], [class*="name"]'
+            );
+            const value = container.querySelector(
+              '[class*="value"], [class*="number"], [class*="amount"]'
+            );
+            if (label && value) addPair(label.innerText, value.innerText);
+          }
+          const inlineField = /^(用户名|用戶名|用户等级|用戶等級|等级|等級|上传量|上傳量|下载量|下載量|分享率|分享比率|魔力值|魔力|积分|積分|当前做种|當前做種|做种数|做種數|做种体积|做種體積)\s*[:：]?\s+(.+)$/i;
+          for (const cell of document.querySelectorAll('th, td')) {
+            const text = (cell.innerText || cell.textContent || '').replace(/\s+/g, ' ').trim();
+            const match = text.match(inlineField);
+            if (match) addPair(match[1], match[2]);
+          }
           for (const row of document.querySelectorAll('tr')) {
             const cells = [...row.querySelectorAll(':scope > th, :scope > td')]
               .map((cell) => (cell.innerText || cell.textContent || '').trim())
@@ -871,6 +1317,9 @@ def normalize_pt_profile_stats(value: Any) -> dict[str, str]:
                 result[key] = text
                 break
 
+    if re.search(r"等级详情|等級詳情|提升等级|提升等級", result.get("user_level", "")):
+        result.pop("user_level", None)
+
     username = _sanitize_pt_username(result.get("username"))
     if username:
         result["username"] = username
@@ -900,10 +1349,12 @@ def normalize_pt_profile_stats(value: Any) -> dict[str, str]:
                 result["username"] = username
 
     fallback_patterns = {
-        "uploaded": r"(?:上传量|上傳量|Uploaded)\s*[:：]?\s*([\d,.]+\s*[KMGTPE]?i?B)",
-        "downloaded": r"(?:下载量|下載量|Downloaded)\s*[:：]?\s*([\d,.]+\s*[KMGTPE]?i?B)",
+        "user_level": r"(?:用户等级|用戶等級|等级|等級)\s*[:：]\s*\[?([^\]\n]{1,60})\]?",
+        "uploaded": r"(?:上传量|上傳量|Uploaded)\s*[:：]?\s*([\d,.]+\s*(?:[KMGTPE]i?B|B|Bytes?))",
+        "downloaded": r"(?:下载量|下載量|Downloaded)\s*[:：]?\s*([\d,.]+\s*(?:[KMGTPE]i?B|B|Bytes?))",
         "ratio": r"(?:分享率|分享比率|Ratio)\s*[:：]?\s*([\d,.]+|∞|Inf)",
         "bonus": r"(?:魔力值|魔力|Bonus)\s*[:：]?\s*([\d,.]+)",
+        "seeding_count": r"(?:活动种子|活動種子|当前做种|當前做種|做种数|做種數)\s*[:：]?\s*(\d+)",
     }
     for key, pattern in fallback_patterns.items():
         if key in result:
@@ -946,6 +1397,8 @@ def sanitize_pt_profile_stats(value: dict[str, Any]) -> dict[str, str]:
                 continue
             text = username
         elif key == "user_level":
+            if re.search(r"等级详情|等級詳情|提升等级|提升等級", text):
+                continue
             text = re.split(
                 r"签到(?:得)?魔力|当前时间|校验等级|等级参考|修改此项|参考《|"
                 r"[\U0001F000-\U0001FAFF]",
@@ -958,7 +1411,9 @@ def sanitize_pt_profile_stats(value: dict[str, Any]) -> dict[str, str]:
         elif re.search(r"签到(?:得)?魔力|当前时间|显示/隐藏|种子列表查看", text):
             continue
         elif key in {"uploaded", "downloaded", "seeding_size"}:
-            match = re.search(r"\d[\d,.]*\s*[KMGTPE](?:i?B)?", text, re.IGNORECASE)
+            match = re.search(
+                r"\d[\d,.]*\s*(?:[KMGTPE]i?B|B|Bytes?)", text, re.IGNORECASE,
+            )
             if not match:
                 continue
             text = match.group(0)
@@ -1078,8 +1533,17 @@ def pttime_history_url_from_profile(site_url: str, profile_url: str | None) -> s
 async def extract_site_signin_history(page: Any) -> list[dict[str, str]]:
     raw: Any = []
     with suppress(Exception):
+        await page.locator(
+            ".fc-event, .fc-daygrid-event, .fc-timegrid-event, [data-event-id]",
+        ).first.wait_for(state="attached", timeout=3_000)
+    with suppress(Exception):
         raw = await page.evaluate("""() => {
-          const roots = [...document.querySelectorAll('.fc, #calendar, [class*="fullcalendar"]')];
+          const roots = [...new Set(document.querySelectorAll(
+            '.fc, #calendar, [class*="fullcalendar"], [class*="full-calendar"]'
+          ))];
+          const eventSelector = [
+            '.fc-event', '.fc-daygrid-event', '.fc-timegrid-event', '[data-event-id]'
+          ].join(',');
           const entries = new Map();
           const add = (date, reward) => {
             const value = String(date || '').slice(0, 10);
@@ -1110,7 +1574,13 @@ async def extract_site_signin_history(page: Any) -> list[dict[str, str]]:
               rect: element.getBoundingClientRect(),
             })).filter((item) => /^\\d{4}-\\d{2}-\\d{2}$/.test(item.date || ''));
 
-            for (const event of root.querySelectorAll('.fc-event')) {
+            for (const day of days) {
+              for (const event of day.element.querySelectorAll(eventSelector)) {
+                add(day.date, event.innerText || event.textContent);
+              }
+            }
+
+            for (const event of root.querySelectorAll(eventSelector)) {
               const directDay = event.closest('[data-date]');
               if (directDay) {
                 add(directDay.getAttribute('data-date'), event.innerText || event.textContent);

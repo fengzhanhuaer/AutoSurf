@@ -146,7 +146,10 @@ class WebCredentialStore:
                 if current_discovery is None or current_discovery.site_key != discovery.site_key:
                     continue
                 config = _json_object(record.config_json)
-                was_unsupported = not bool(config.get("sign_in_supported", False))
+                was_unsupported = not (
+                    bool(config.get("sign_in_supported", False))
+                    or bool(config.get("profile_refresh_supported", False))
+                )
                 record.credential_id = credential.id
                 record.name = discovery.name
                 if was_unsupported:
@@ -160,6 +163,13 @@ class WebCredentialStore:
                     "sign_in_supported": discovery.sign_in_supported,
                     "profile_refresh_supported": discovery.profile_refresh_supported,
                     "sign_in_enabled": discovery.sign_in_supported,
+                    "profile_refresh_enabled": (
+                        (discovery.default_profile_refresh_enabled and was_unsupported)
+                        or (
+                            discovery.profile_refresh_supported
+                            and bool(config.get("profile_refresh_enabled", False))
+                        )
+                    ),
                 })
                 record.config_json = _json_dump(config)
 

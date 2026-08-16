@@ -503,6 +503,9 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                     automation.name = discovery.name
                     changed = True
                 previous_sign_in_supported = bool(config.get("sign_in_supported", True))
+                previous_profile_refresh_supported = bool(
+                    config.get("profile_refresh_supported", True)
+                )
                 if config.get("sign_in_supported") != discovery.sign_in_supported:
                     config["sign_in_supported"] = discovery.sign_in_supported
                     changed = True
@@ -517,6 +520,14 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                     changed = True
                     if discovery.profile_refresh_supported and previous_sign_in_supported:
                         config["profile_refresh_enabled"] = True
+                if (
+                    discovery.default_profile_refresh_enabled
+                    and discovery.profile_refresh_supported
+                    and not previous_profile_refresh_supported
+                    and not config.get("profile_refresh_enabled", False)
+                ):
+                    config["profile_refresh_enabled"] = True
+                    changed = True
                 if not discovery.supported and automation.enabled:
                     automation.enabled = False
                     changed = True

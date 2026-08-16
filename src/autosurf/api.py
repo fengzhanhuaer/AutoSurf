@@ -933,7 +933,9 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
                 "automation_id": automation_id,
                 "_score": (
                     discovery is not None
-                    and discovery.strategy == "web_storage_browser"
+                    and discovery.strategy in {
+                        "web_storage_browser", "web_storage_profile_refresh_only",
+                    }
                     and credential.provider == "web_storage",
                     len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
                     len(cookie_names),
@@ -1043,7 +1045,7 @@ def _pt_site_capabilities(record: AutomationRecord, config: dict[str, Any]) -> t
 def _pt_discovery_for_credential(credential: CredentialRecord | None):
     if credential is None:
         return None
-    markers = {"token"} if credential.provider == "web_storage" else set()
+    markers = {"auth", "token"} if credential.provider == "web_storage" else set()
     return discover_pt_site(credential.domain, markers)
 
 

@@ -15,7 +15,12 @@ PT_COOKIE_MARKERS = frozenset({
     "passkey",
     "torrent_pass",
 })
-PT_IGNORED_DOMAINS = frozenset({"ptlover.cc", "raingfh.top"})
+PT_IGNORED_DOMAINS = frozenset({
+    "gtk.pw",
+    "lemonhd.club",
+    "ptlover.cc",
+    "raingfh.top",
+})
 
 
 @dataclass(frozen=True)
@@ -65,7 +70,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("pt.eastgame.org", "TLFBits", "/", "profile_refresh_only"),
     PtSiteDefinition("pt.keepfrds.com", "KEEPFRDS", "/", "profile_refresh_only"),
     PtSiteDefinition(
-        "sunnypt.top", "SunnyPT", "/user/attendance", profile_path="/user/profile",
+        "sunnypt.top", "SunnyPT", "/user/attendance",
     ),
 )
 
@@ -89,7 +94,10 @@ class PtDiscovery:
 
     @property
     def profile_refresh_supported(self) -> bool:
-        return self.strategy in {"generic_browser", "profile_refresh_only"}
+        return self.strategy in {
+            "generic_browser", "profile_refresh_only", "web_storage_browser",
+            "web_storage_profile_refresh_only",
+        }
 
     @property
     def default_sign_in_enabled(self) -> bool:
@@ -97,7 +105,9 @@ class PtDiscovery:
 
     @property
     def default_profile_refresh_enabled(self) -> bool:
-        return self.strategy == "profile_refresh_only"
+        return self.strategy in {
+            "profile_refresh_only", "web_storage_browser", "web_storage_profile_refresh_only",
+        }
 
 
 def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> PtDiscovery | None:
@@ -116,12 +126,13 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
         # automation targets.
         target_domain = definition.target_domain or definition.domain
         strategy = definition.strategy
-        web_storage_keys = {
-            "rousi.pro": "token",
-            "kp.m-team.cc": "auth",
+        web_storage_strategies = {
+            "rousi.pro": ("token", "web_storage_browser"),
+            "kp.m-team.cc": ("auth", "web_storage_profile_refresh_only"),
         }
-        if web_storage_keys.get(definition.domain) in lowered_names:
-            strategy = "web_storage_browser"
+        web_storage = web_storage_strategies.get(definition.domain)
+        if web_storage and web_storage[0] in lowered_names:
+            strategy = web_storage[1]
         return PtDiscovery(
             site_key=definition.domain,
             name=definition.name,

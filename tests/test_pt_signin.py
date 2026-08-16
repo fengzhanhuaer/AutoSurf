@@ -9,9 +9,12 @@ from sqlalchemy import select
 from autosurf.automations.pt_signin import (
     BtschoolAdapter,
     FiftyTwoPtAdapter,
+    MTeamAdapter,
     OpenCdAdapter,
     PtSignInHandler,
+    SunnyPtAdapter,
     TjuptAdapter,
+    ZhuqueAdapter,
     _classify_pt_homepage,
     classify_pt_page,
     combine_pt_action_results,
@@ -106,6 +109,12 @@ async def test_homepage_already_done_skips_hdkylin_challenge_page():
     assert classify_pt_page(
         "https://pttime.org/attendance.php", 200, "拒绝访问：已签到，无需再签"
     ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://pttime.org/attendance.php", 403, "拒绝访问：已签到，无需再签"
+    ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://pttime.org/attendance.php", 403, "Forbidden"
+    ) == RunOutcome.AUTH_EXPIRED
     assert classify_pt_page(
         "https://ptchdbits.co/bakatest.php", 200, "今天已经签过到了(已连续29天签到)"
     ) == RunOutcome.ALREADY_DONE
@@ -208,6 +217,48 @@ async def test_fullcalendar_history_keeps_reward_over_empty_background_event():
     ]
 
 
+@pytest.mark.asyncio
+async def test_0ff_dynamic_fullcalendar_waits_for_events_and_reads_day_cells():
+    class Body:
+        async def inner_text(self):
+            return ""
+
+    class Event:
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def wait_for(self, **kwargs):
+            assert kwargs == {"state": "attached", "timeout": 3_000}
+            self.page.waited = True
+
+    class Page:
+        def __init__(self):
+            self.waited = False
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            assert ".fc-daygrid-event" in selector
+            assert "[data-event-id]" in selector
+            return Event(self)
+
+        async def evaluate(self, script):
+            assert "day.element.querySelectorAll(eventSelector)" in script
+            assert "root.querySelectorAll(eventSelector)" in script
+            return [
+                {"date": "2026-08-15", "reward": "10"},
+                {"date": "2026-08-16", "reward": "15"},
+            ]
+
+    page = Page()
+    assert await extract_site_signin_history(page) == [
+        {"date": "2026-08-15", "reward": "10"},
+        {"date": "2026-08-16", "reward": "15"},
+    ]
+    assert page.waited is True
+
+
 def test_pt_profile_stats_normalization_supports_nexusphp_labels():
     stats = normalize_pt_profile_stats({
         "pairs": [
@@ -256,6 +307,49 @@ def test_pt_profile_stats_normalization_supports_nexusphp_labels():
         "profile_username": "上传量: 512.34 GB",
     }) == {"username": "mapleren"}
     assert sanitize_pt_profile_stats({"username": "下载量: 32.38 GB"}) == {}
+
+
+def test_pt_profile_stats_prefers_structured_cards_and_rejects_navigation_level():
+    audiences = normalize_pt_profile_stats({
+        "pairs": [
+            ["上传量", "10.632 TB"],
+            ["下载量", "212.59 GB"],
+            ["分享率", "51.213"],
+            ["上传量", "212.59 GB"],
+            ["下载量", "212.59 GB"],
+            ["分享率", "452829.8"],
+        ],
+        "body": "",
+        "title": "",
+    })
+    assert audiences == {
+        "uploaded": "10.632 TB",
+        "downloaded": "212.59 GB",
+        "ratio": "51.213",
+    }
+
+    tjupt = normalize_pt_profile_stats({
+        "pairs": [["等级", "等级详情/提升等级"], ["上传量", "5.161 TiB"]],
+        "body": "等级: [威震一方]\n活动种子: 0\n魔力值: 723,516.4",
+        "title": "",
+    })
+    assert tjupt == {
+        "user_level": "威震一方",
+        "uploaded": "5.161 TiB",
+        "bonus": "723,516.4",
+        "seeding_count": "0",
+    }
+
+    zhuque = normalize_pt_profile_stats({
+        "pairs": [["用户名", "mapleren"], ["做种体积", "0.00 Byte"], ["当前做种", "0"]],
+        "body": "",
+        "title": "",
+    })
+    assert zhuque == {
+        "username": "mapleren",
+        "seeding_count": "0",
+        "seeding_size": "0.00 B",
+    }
 
 
 @pytest.mark.asyncio
@@ -384,6 +478,263 @@ def test_52pt_discovery_and_adapter_use_the_current_signin_page():
     assert adapter.matches(discovery.url) is True
     assert adapter.matches("https://www.52pt.site/52bakatest0818.php") is True
     assert adapter.matches("https://not52pt.site/52bakatest0818.php") is False
+
+
+class MTeamPage:
+    url = "https://kp.m-team.cc/"
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.paths = []
+
+    async def evaluate(self, script, data):
+        assert "authorization: auth" in script
+        assert data["signatureKey"]
+        self.paths.append(data["path"])
+        return self.responses[data["path"]]
+
+
+@pytest.mark.asyncio
+async def test_mteam_adapter_refreshes_profile_without_daily_hello():
+    page = MTeamPage({
+        "/member/profile": {
+            "status": 200,
+            "code": 0,
+            "message": "SUCCESS",
+            "authenticated": True,
+            "profile": {
+                "username": "mapleren",
+                "user_level": "POWER USER",
+                "uploaded": 2 * 1024 ** 4,
+                "downloaded": 512 * 1024 ** 3,
+                "ratio": "",
+                "bonus": "3193396.1",
+            },
+        },
+    })
+    adapter = MTeamAdapter()
+
+    result = await adapter.refresh_profile(page, RunContext(
+        "test", {"url": page.url},
+        {"auth": "secret-auth", "did": "device", "visitorId": "visitor"}, [],
+    ))
+
+    assert adapter.matches(page.url) is True
+    assert adapter.matches("https://not-m-team.cc/") is False
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.message == "M-Team 个人信息刷新成功"
+    assert result.details["profile_stats"] == {
+        "username": "mapleren",
+        "user_level": "POWER USER",
+        "uploaded": "2 TiB",
+        "downloaded": "512 GiB",
+        "ratio": "4",
+        "bonus": "3193396.1",
+    }
+    assert page.paths == ["/member/profile"]
+
+
+@pytest.mark.asyncio
+async def test_mteam_adapter_requires_synced_web_credential():
+    page = MTeamPage({})
+
+    result = await MTeamAdapter().refresh_profile(
+        page, RunContext("test", {"url": page.url}, {}, []),
+    )
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
+    assert result.message == "M-Team Web 凭据尚未同步"
+    assert page.paths == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("code", "message"), [
+    (401, "請重新登入"),
+    (1, "無效的請求"),
+])
+async def test_mteam_adapter_reports_expired_web_credential(code, message):
+    page = MTeamPage({
+        "/member/profile": {
+            "status": 200, "code": code, "message": message, "authenticated": False,
+        },
+    })
+
+    result = await MTeamAdapter().refresh_profile(
+        page, RunContext("test", {"url": page.url}, {"auth": "expired-auth"}, []),
+    )
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
+    assert result.message == "M-Team Web 凭据已失效"
+    assert page.paths == ["/member/profile"]
+
+
+@pytest.mark.asyncio
+async def test_mteam_adapter_does_not_treat_signature_failure_as_success():
+    page = MTeamPage({
+        "/member/profile": {
+            "status": 200, "code": 1, "message": "簽名錯誤", "authenticated": False,
+        },
+    })
+
+    result = await MTeamAdapter().refresh_profile(
+        page, RunContext("test", {"url": page.url}, {"auth": "secret-auth"}, []),
+    )
+
+    assert result.outcome == RunOutcome.FAILED
+    assert result.message == "M-Team 个人信息刷新失败"
+    assert result.details["code"] == 1
+    assert page.paths == ["/member/profile"]
+
+
+@pytest.mark.asyncio
+async def test_sunnypt_adapter_clicks_and_confirms_today_status():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return "今日 已签到" if self.page.signed else "今日 未签到\n今天别忘了签到"
+
+    class Button:
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def wait_for(self, **_kwargs):
+            return None
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.page.clicked = True
+            self.page.signed = True
+
+    class Page:
+        url = "https://sunnypt.top/user/attendance"
+        frames = None
+
+        def __init__(self):
+            self.clicked = False
+            self.signed = False
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body(self)
+            raise ValueError(selector)
+
+        def get_by_role(self, role, name):
+            assert role == "button"
+            assert name.search("立即签到")
+            return Button(self)
+
+        async def wait_for_timeout(self, _timeout):
+            return None
+
+    page = Page()
+    adapter = SunnyPtAdapter()
+    result = await adapter.sign_in(
+        page, RunContext("test", {"url": page.url}, {"c_secure_uid": "7"}, []),
+    )
+
+    assert adapter.matches(page.url) is True
+    assert adapter.matches("https://not-sunnypt.top/") is False
+    assert page.clicked is True
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.message == "SunnyPT 签到成功"
+    assert result.details["clicked"] is True
+
+
+@pytest.mark.asyncio
+async def test_sunnypt_adapter_refreshes_current_basic_info_api():
+    class Page:
+        url = "https://sunnypt.top/user/attendance"
+
+        async def evaluate(self, script):
+            assert "/api/v1/user/basic-info" in script
+            return {
+                "status": 200,
+                "authenticated": True,
+                "profile": {
+                    "username": "mapleren",
+                    "user_level": "Power User",
+                    "uploaded": "5676238811136",
+                    "downloaded": "228267147264",
+                    "ratio": 24.866,
+                    "bonus": 520,
+                    "seeding_count": 12,
+                },
+            }
+
+    result = await SunnyPtAdapter().refresh_profile(
+        Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["profile_stats"] == {
+        "username": "mapleren",
+        "user_level": "Power User",
+        "uploaded": "5.16 TiB",
+        "downloaded": "212.59 GiB",
+        "ratio": "24.866",
+        "bonus": "520",
+        "seeding_count": "12",
+    }
+
+
+@pytest.mark.asyncio
+async def test_zhuque_adapter_refreshes_profile_from_site_api():
+    class Page:
+        url = "https://zhuque.in/"
+
+        async def evaluate(self, script):
+            assert "/api/user/getInfo" in script
+            return {
+                "status": 200,
+                "authenticated": True,
+                "profile": {
+                    "username": "mapleren",
+                    "user_level": "烧包",
+                    "uploaded": 5 * 1024 ** 4,
+                    "downloaded": 200 * 1024 ** 3,
+                    "ratio": 25.6,
+                    "bonus": 723516.4,
+                    "seeding_count": 0,
+                    "seeding_size": 0,
+                },
+            }
+
+    result = await ZhuqueAdapter().refresh_profile(
+        Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["profile_stats"] == {
+        "username": "mapleren",
+        "user_level": "烧包",
+        "uploaded": "5 TiB",
+        "downloaded": "200 GiB",
+        "ratio": "25.6",
+        "bonus": "723516.4",
+        "seeding_count": "0",
+        "seeding_size": "0 B",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter", [SunnyPtAdapter(), ZhuqueAdapter()])
+async def test_site_profile_api_reports_expired_login(adapter):
+    class Page:
+        url = "https://tracker.test/"
+
+        async def evaluate(self, _script):
+            return {"status": 401, "authenticated": False, "profile": None}
+
+    result = await adapter.refresh_profile(
+        Page(), RunContext("test", {"url": Page.url}, {"sid": "expired"}, []),
+    )
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
 
 
 @pytest.mark.asyncio
@@ -865,14 +1216,22 @@ def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     assert rousi is not None
     assert rousi.name == "Rousi"
     assert rousi.strategy == "custom_required"
+    rousi_authenticated = discover_pt_site("rousi.pro", {"token"})
+    assert rousi_authenticated is not None
+    assert rousi_authenticated.strategy == "web_storage_browser"
+    assert rousi_authenticated.sign_in_supported is True
+    assert rousi_authenticated.profile_refresh_supported is True
+    assert rousi_authenticated.default_profile_refresh_enabled is True
     assert mteam is not None
     assert mteam.name == "M-Team"
     assert mteam.strategy == "custom_required"
 
     mteam_authenticated = discover_pt_site("kp.m-team.cc", {"auth", "did", "visitorId"})
     assert mteam_authenticated is not None
-    assert mteam_authenticated.strategy == "web_storage_browser"
-    assert mteam_authenticated.sign_in_supported is True
+    assert mteam_authenticated.strategy == "web_storage_profile_refresh_only"
+    assert mteam_authenticated.sign_in_supported is False
+    assert mteam_authenticated.profile_refresh_supported is True
+    assert mteam_authenticated.default_profile_refresh_enabled is True
 
 
 def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
@@ -884,10 +1243,12 @@ def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
     assert sunny is not None
     assert sunny.name == "SunnyPT"
     assert sunny.url == "https://sunnypt.top/user/attendance"
-    assert sunny.profile_url == "https://sunnypt.top/user/profile"
+    assert sunny.profile_url is None
 
 
-@pytest.mark.parametrize("domain", ["www.ptlover.cc", "raingfh.top"])
+@pytest.mark.parametrize(
+    "domain", ["www.ptlover.cc", "raingfh.top", "lemonhd.club", "pt.gtk.pw"],
+)
 @pytest.mark.asyncio
 async def test_dead_pt_site_is_excluded_even_with_pt_cookie_markers(settings, domain):
     app = create_app(settings)
@@ -907,16 +1268,17 @@ async def test_dead_pt_site_is_excluded_even_with_pt_cookie_markers(settings, do
 
 
 @pytest.mark.asyncio
-async def test_dead_pt_site_existing_task_is_disabled_and_rejected(settings):
+@pytest.mark.parametrize("domain", ["raingfh.top", "lemonhd.club", "pt.gtk.pw"])
+async def test_dead_pt_site_existing_task_is_disabled_and_rejected(settings, domain):
     app = create_app(settings)
     credential = app.state.credentials.upsert(
-        "cookiecloud:test:raingfh.top", "raingfh.top", {"c_secure_uid": "7"},
+        f"cookiecloud:test:{domain}", domain, {"c_secure_uid": "7"},
         provider="cookiecloud",
     )
     task = app.state.automations.create(
-        "Raing", "pt_signin", 86400, {
-            "url": "https://raingfh.top/attendance.php",
-            "credential_domain": "raingfh.top",
+        domain, "pt_signin", 86400, {
+            "url": f"https://{domain}/attendance.php",
+            "credential_domain": domain,
             "sign_in_enabled": True,
             "profile_refresh_enabled": False,
             "discovered": True,
@@ -937,7 +1299,7 @@ async def test_dead_pt_site_existing_task_is_disabled_and_rejected(settings):
         assert stored_execution.error == "站点已停用"
 
     result = await PtSignInHandler().run(RunContext(
-        "dead-site", {"url": "https://raingfh.top/attendance.php"}, {}, [],
+        "dead-site", {"url": f"https://{domain}/attendance.php"}, {}, [],
     ))
     assert result.outcome == RunOutcome.FAILED
     assert result.message == "PT 站点已停用"
@@ -990,7 +1352,7 @@ def test_hdvideo_discovered_task_migrates_to_attendance_page(settings):
         assert config["url"] == "https://hdvideo.top/attendance.php"
 
 
-def test_sunnypt_discovered_task_migrates_routes_and_profile(settings):
+def test_sunnypt_discovered_task_migrates_current_attendance_route(settings):
     app = create_app(settings)
     credential = app.state.credentials.upsert(
         "cookiecloud:test:sunnypt.top", "sunnypt.top", {"c_secure_uid": "7"},
@@ -1011,7 +1373,7 @@ def test_sunnypt_discovered_task_migrates_routes_and_profile(settings):
         config = json.loads(record.config_json)
         assert record.name == "SunnyPT"
         assert config["url"] == "https://sunnypt.top/user/attendance"
-        assert config["profile_url"] == "https://sunnypt.top/user/profile"
+        assert config.get("profile_url") is None
         assert config["discovery_strategy"] == "generic_browser"
 
 
@@ -1032,6 +1394,10 @@ async def test_pt_handler_rejects_cross_domain_before_starting_browser():
 async def test_pt_signin_api_manages_sites_and_history(settings):
     app = create_app(settings)
     assert "pt_signin" in app.state.registry.types()
+    handler = app.state.registry.get("pt_signin")
+    assert any(isinstance(adapter, MTeamAdapter) for adapter in handler.adapters)
+    assert any(isinstance(adapter, SunnyPtAdapter) for adapter in handler.adapters)
+    assert any(isinstance(adapter, ZhuqueAdapter) for adapter in handler.adapters)
     credential = app.state.credentials.upsert(
         "cookiecloud:test:tracker.test",
         "tracker.test",

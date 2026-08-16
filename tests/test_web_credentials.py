@@ -1,3 +1,4 @@
+import json
 import re
 
 import httpx
@@ -109,6 +110,8 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
     rebound_site = next(item for item in sites.json()["items"] if item["id"] == legacy_task.id)
     assert rebound_site["config"]["sign_in_supported"] is True
     assert rebound_site["config"]["sign_in_enabled"] is True
+    assert rebound_site["config"]["profile_refresh_supported"] is True
+    assert rebound_site["config"]["profile_refresh_enabled"] is True
     assert first_key != second_key
     assert old_key.status_code == 401
     assert new_key.status_code == 200
@@ -118,6 +121,8 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
     assert rousi["strategy"] == "web_storage_browser"
     assert rousi["supported"] is True
     assert rousi["configured"] is True
+    assert rousi["profile_refresh_supported"] is True
+    assert rousi["default_profile_refresh_enabled"] is True
 
     with app.state.sessions() as session:
         record = session.scalar(select(CredentialRecord).where(
@@ -137,6 +142,9 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
         rebound = session.get(AutomationRecord, legacy_task.id)
         assert rebound.credential_id == record.id
         assert rebound.enabled is True
+        rebound_config = json.loads(rebound.config_json)
+        assert rebound_config["profile_refresh_supported"] is True
+        assert rebound_config["profile_refresh_enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -196,8 +204,11 @@ async def test_bundled_userscript_syncs_mteam_storage_and_rebinds_task(settings)
     assert mteam_status["credential_configured"] is True
     assert mteam_status["configured_keys"] == ["auth", "did", "visitorId"]
     mteam = next(item for item in candidates.json()["items"] if item["site_key"] == "kp.m-team.cc")
-    assert mteam["strategy"] == "web_storage_browser"
+    assert mteam["strategy"] == "web_storage_profile_refresh_only"
     assert mteam["supported"] is True
+    assert mteam["sign_in_supported"] is False
+    assert mteam["profile_refresh_supported"] is True
+    assert mteam["default_profile_refresh_enabled"] is True
 
     with app.state.sessions() as session:
         record = session.scalar(select(CredentialRecord).where(
@@ -213,6 +224,12 @@ async def test_bundled_userscript_syncs_mteam_storage_and_rebinds_task(settings)
         rebound = session.get(AutomationRecord, task.id)
         assert rebound.credential_id == record.id
         assert rebound.enabled is True
+        config = json.loads(rebound.config_json)
+        assert config["discovery_strategy"] == "web_storage_profile_refresh_only"
+        assert config["sign_in_supported"] is False
+        assert config["sign_in_enabled"] is False
+        assert config["profile_refresh_supported"] is True
+        assert config["profile_refresh_enabled"] is True
 
 
 def test_web_storage_init_script_injects_all_values_for_target_host():
@@ -248,7 +265,21 @@ class RousiPage:
 
     async def evaluate(self, _script, data):
         if data["path"] == "/api/me":
-            return {"status": 200 if self.authenticated else 401, "body": {"username": "user"}}
+            return {
+                "status": 200 if self.authenticated else 401,
+                "body": {
+                    "role": "member",
+                    "stats": {
+                        "username": "fenger",
+                        "uploaded": 2886753265554,
+                        "downloaded": 252573177082,
+                        "ratio": 11.429,
+                        "karma": 2269129.9,
+                        "level": 2,
+                    },
+                    "seeding_leeching_data": {"seeding_count": 0, "seeding_size": 0},
+                },
+            }
         dates = ["2026-08-16"] if self.attended else []
         return {
             "status": 200,
@@ -303,3 +334,25 @@ async def test_rousi_adapter_requires_api_confirmation_after_real_button_click()
     )
     assert result.outcome == RunOutcome.AUTH_EXPIRED
     assert expired.clicked is False
+
+
+@pytest.mark.asyncio
+async def test_rousi_adapter_refreshes_profile_from_me_api():
+    page = RousiPage()
+
+    result = await RousiAdapter().refresh_profile(
+        page,
+        RunContext("test", {"url": page.url}, {"token": "header.payload.signature"}, []),
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["profile_stats"] == {
+        "username": "fenger",
+        "user_level": "2",
+        "uploaded": "2.63 TiB",
+        "downloaded": "235.23 GiB",
+        "ratio": "11.429",
+        "bonus": "2269129.9",
+        "seeding_count": "0",
+        "seeding_size": "0 B",
+    }

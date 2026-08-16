@@ -26,10 +26,13 @@ from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.pt_signin import (
     BtschoolAdapter,
     FiftyTwoPtAdapter,
+    MTeamAdapter,
     OpenCdAdapter,
     PtSignInHandler,
     RousiAdapter,
+    SunnyPtAdapter,
     TjuptAdapter,
+    ZhuqueAdapter,
 )
 from autosurf.config import Settings, get_settings
 from autosurf.infrastructure.cookiecloud import CookieCloudStore
@@ -52,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry.register(BrowserSignInHandler())
     registry.register(PtSignInHandler([
         FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), TjuptAdapter(), RousiAdapter(),
+        MTeamAdapter(), SunnyPtAdapter(), ZhuqueAdapter(),
     ]))
     secrets = SecretBox(settings.secret_key)
     credentials = CredentialService(sessions, secrets)

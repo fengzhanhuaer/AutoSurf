@@ -297,7 +297,9 @@ function renderPtSummary() {
 }
 
 function candidateReasonLabel(candidate) {
-  if (candidate.strategy === "profile_refresh_only") return "仅刷新个人信息";
+  if (["profile_refresh_only", "web_storage_profile_refresh_only"].includes(candidate.strategy)) {
+    return "仅刷新个人信息";
+  }
   return ({
     site_catalog: "站点目录",
     cookie_signature: "PT Cookie 特征",
@@ -357,7 +359,7 @@ function renderPtCandidates() {
     badge.className = `candidate-state ${candidate.configured ? "configured" : candidate.supported ? "available" : "unsupported"}`;
     badge.textContent = candidate.configured
       ? "已添加"
-      : candidate.strategy === "profile_refresh_only"
+      : ["profile_refresh_only", "web_storage_profile_refresh_only"].includes(candidate.strategy)
         ? "可添加（仅刷新）"
         : candidate.supported ? "可添加" : "待专用适配";
     statusCell.append(badge);
