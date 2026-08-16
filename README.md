@@ -142,7 +142,7 @@ Open **PT 站点** and select the **站点签到** tab in the management interfa
 
 Use **手动添加自定义站点** to adjust the URL or recognition rules for an available PT credential. AutoSurf suggests `https://<credential-domain>/attendance.php`; the URL must remain on the selected credential domain or one of its subdomains.
 
-Each site uses an isolated persistent Playwright Chromium profile under the persistent browser mount. In Docker, AutoSurf starts a private Xvfb display on demand and runs the complete Chromium browser in headed mode; environments without Xvfb fall back to persistent headless mode. CookieCloud refreshes ordinary login cookies, while an existing profile keeps its browser-bound SafeLine and Cloudflare verification cookies. AutoSurf executes the page JavaScript and checks for already-signed, successful, expired-login, challenge, and manual make-up-sign-in states. A common sign-in control is clicked automatically. Rule descriptions such as "signing in can earn bonus points" are not treated as successful results. Site-specific CSS selectors and result text can be configured under the advanced settings. Unknown, blocked, and timed-out results are not recorded as successful, and failed runs retain a screenshot under `data/browser-artifacts`.
+All PT sites reuse one persistent Playwright Chromium profile under the persistent browser mount. In Docker, AutoSurf starts a private Xvfb display on demand and runs the complete Chromium browser in headed mode; environments without Xvfb fall back to persistent headless mode. CookieCloud refreshes ordinary login cookies only for the target domain, while the shared profile keeps browser identity, cache, local storage, and browser-bound SafeLine or Cloudflare verification cookies. WAF session cookies are retained separately for each domain so one site cannot overwrite another site's state. AutoSurf executes the page JavaScript and checks for already-signed, successful, expired-login, challenge, and manual make-up-sign-in states. A common sign-in control is clicked automatically. Rule descriptions such as "signing in can earn bonus points" are not treated as successful results. Site-specific CSS selectors and result text can be configured under the advanced settings. Unknown, blocked, and timed-out results are not recorded as successful, and failed runs retain a screenshot under `data/browser-artifacts`.
 
 Scheduled PT runs start at a random point within the configured delay window, which defaults to 30 minutes. Failed runs retry at a fixed interval that defaults to two hours, with five retries after the initial attempt. These values can be set when adding sites and changed later from each task's **设置** dialog. Each site has independent **签到** and **刷新** switches; profile refresh reuses the authenticated browser, visits the user details page, and records username, level, traffic, ratio, bonus, and seeding statistics for the **信息统计** tab. Turning off both switches disables the task. Immediate runs and history retries reuse an active or just-created execution instead of inserting a duplicate. The execution history groups the latest result for each site and local calendar day into a seven-day matrix, with buttons to open the configured site URL or retry the task. Successful runs also read FullCalendar-style calendars and plain-text PTTime history when present, overlaying site-reported dates and reward text without creating fake execution records.
 
@@ -163,7 +163,7 @@ The PT management API is available at:
 
 ### Browser sign-in
 
-Use the `browser_signin` handler for sites that require JavaScript or an actual Chromium page. It reuses a site-specific persistent Chromium profile, supplements it with the selected credential cookies, loads the page, optionally waits for and clicks an element, and evaluates success text after the interaction.
+Use the `browser_signin` handler for sites that require JavaScript or an actual Chromium page. It reuses the shared persistent Chromium profile, supplements it with the selected credential cookies for the target domain, loads the page, optionally waits for and clicks an element, and evaluates success text after the interaction.
 
 ```json
 {
@@ -182,7 +182,7 @@ Use the `browser_signin` handler for sites that require JavaScript or an actual 
 }
 ```
 
-Failed and timed-out browser runs save a screenshot under `data/browser-artifacts`. Docker runs the full Chromium browser in headed mode on a private Xvfb display and retains browser state under `browser/profiles`; deleting one site's profile resets only that site's browser identity.
+Failed and timed-out browser runs save a screenshot under `data/browser-artifacts`. Docker runs the full Chromium browser in headed mode on a private Xvfb display and retains shared browser state under `browser/profiles/shared`; deleting that directory resets browser identity and browser-bound state for every site.
 
 ## Management API
 
@@ -246,6 +246,6 @@ The command creates a timestamped SQLite backup under `data/backups`, fetches th
 - CookieCloud blobs can be decrypted and imported automatically after their UUID and password are configured.
 - CookieCloud imports retain complete browser cookie attributes in the encrypted credential store.
 - The Rousi userscript synchronizes its browser Token through a revocable write-only key and encrypted credential record.
-- PT sign-in uses a real Playwright Chromium session and keeps site-specific behavior extensible through adapters.
+- PT sign-in uses one shared real Playwright Chromium environment and keeps site-specific behavior extensible through adapters.
 - The authenticated management interface configures CookieCloud sources and PT sign-in tasks without exposing cookie values.
 - Database upgrades run automatically through Alembic at application startup.

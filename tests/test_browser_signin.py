@@ -1,10 +1,12 @@
+import os
+
 import pytest
 
 from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.browser_session import (
     _restore_waf_cookie_state,
     _save_waf_cookie_state,
-    browser_profile_key,
+    _prepare_shared_profile,
     browser_profile_path,
     persistent_browser_mode,
     playwright_cookies,
@@ -77,13 +79,30 @@ def test_browser_cookie_records_require_haidan_www_target_for_www_scope():
     }]
 
 
-def test_browser_profile_path_is_stable_and_kept_below_browser_mount(tmp_path, monkeypatch):
+def test_browser_profile_path_is_shared_and_kept_below_browser_mount(tmp_path, monkeypatch):
     monkeypatch.delenv("AUTOSURF_BROWSER_PROFILE_DIR", raising=False)
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
 
-    expected_key = "hdkyl.in-" + browser_profile_key("hdkyl.in").rsplit("-", 1)[1]
-    assert browser_profile_key(".HDKYL.IN.") == expected_key
-    assert browser_profile_path("hdkyl.in") == tmp_path / "profiles" / expected_key
+    assert browser_profile_path() == tmp_path / "profiles" / "shared"
+
+
+@pytest.mark.asyncio
+async def test_shared_browser_profile_seeds_from_latest_legacy_profile(tmp_path):
+    older = tmp_path / "old-site"
+    latest = tmp_path / "latest-site"
+    older.mkdir()
+    latest.mkdir()
+    older.joinpath("marker").write_text("old", encoding="utf-8")
+    latest.joinpath("marker").write_text("latest", encoding="utf-8")
+    older.touch()
+    latest.touch()
+    older_mtime = older.stat().st_mtime - 60
+    os.utime(older, (older_mtime, older_mtime))
+
+    shared = tmp_path / "shared"
+    await _prepare_shared_profile(shared)
+
+    assert shared.joinpath("marker").read_text(encoding="utf-8") == "latest"
 
 
 def test_browser_mode_falls_back_to_persistent_headless_without_xvfb(monkeypatch):
@@ -160,3 +179,36 @@ async def test_browser_profile_state_persists_only_browser_bound_waf_cookies(tmp
     assert len(restored.updates) == 1
     assert restored.updates[0]["name"] == "sl-session"
     assert restored.updates[0]["value"] == "waf-secret"
+
+
+@pytest.mark.asyncio
+async def test_shared_browser_profile_keeps_waf_state_for_each_domain(tmp_path):
+    class BrowserContext:
+        def __init__(self, cookies):
+            self.cookie_values = cookies
+            self.updates = []
+
+        async def cookies(self, _urls):
+            return self.cookie_values
+
+        async def add_cookies(self, values):
+            self.updates.extend(values)
+
+    await _save_waf_cookie_state(
+        BrowserContext([{"name": "sl-session", "value": "hdk", "domain": ".hdkyl.in", "path": "/"}]),
+        tmp_path,
+        "https://www.hdkyl.in/attendance.php",
+    )
+    await _save_waf_cookie_state(
+        BrowserContext([{"name": "cf_clearance", "value": "pt", "domain": ".pttime.org", "path": "/"}]),
+        tmp_path,
+        "https://pttime.org/attendance.php",
+    )
+
+    hdk = BrowserContext([])
+    pttime = BrowserContext([])
+    await _restore_waf_cookie_state(hdk, tmp_path, "https://www.hdkyl.in/attendance.php")
+    await _restore_waf_cookie_state(pttime, tmp_path, "https://pttime.org/attendance.php")
+
+    assert [(item["name"], item["value"]) for item in hdk.updates] == [("sl-session", "hdk")]
+    assert [(item["name"], item["value"]) for item in pttime.updates] == [("cf_clearance", "pt")]

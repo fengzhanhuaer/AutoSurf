@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 from contextlib import asynccontextmanager, suppress
@@ -21,6 +19,7 @@ WAF_COOKIE_NAMES = frozenset({
     "sl-challenge-server",
     "sl-session",
 })
+SHARED_PROFILE_KEY = "shared"
 _PROFILE_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -83,14 +82,7 @@ def playwright_cookies(context: RunContext, url: str) -> list[dict[str, Any]]:
     return result
 
 
-def browser_profile_key(value: str) -> str:
-    normalized = value.lower().lstrip(".").rstrip(".")
-    slug = re.sub(r"[^a-z0-9.-]+", "-", normalized).strip(".-") or "site"
-    digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
-    return f"{slug[:80]}-{digest}"
-
-
-def browser_profile_path(profile_key: str) -> Path:
+def browser_profile_path() -> Path:
     configured = os.environ.get("AUTOSURF_BROWSER_PROFILE_DIR", "").strip()
     if configured:
         root = Path(configured)
@@ -98,7 +90,7 @@ def browser_profile_path(profile_key: str) -> Path:
         root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) / "profiles"
     else:
         root = Path(os.environ.get("AUTOSURF_DATA_DIR", "data")) / "browser-profiles"
-    return root / browser_profile_key(profile_key)
+    return root / SHARED_PROFILE_KEY
 
 
 def persistent_browser_mode() -> str:
@@ -112,16 +104,13 @@ async def persistent_chromium_session(
     playwright: Any,
     run_context: RunContext,
     url: str,
-    *,
-    profile_key: str | None = None,
 ):
-    parsed = validated_http_url(url)
-    resolved_key = profile_key or parsed.hostname or "site"
-    profile_path = browser_profile_path(resolved_key)
-    profile_path.mkdir(parents=True, exist_ok=True)
+    validated_http_url(url)
+    profile_path = browser_profile_path()
     lock = _PROFILE_LOCKS.setdefault(str(profile_path), asyncio.Lock())
 
     async with lock:
+        await _prepare_shared_profile(profile_path)
         mode = persistent_browser_mode()
         display = None
         browser_context = None
@@ -146,7 +135,7 @@ async def persistent_chromium_session(
             )
             await _restore_waf_cookie_state(browser_context, profile_path, url)
             await supplement_playwright_cookies(browser_context, run_context, url)
-            yield PersistentBrowserSession(browser_context, browser_profile_key(resolved_key), mode)
+            yield PersistentBrowserSession(browser_context, SHARED_PROFILE_KEY, mode)
         finally:
             if browser_context is not None:
                 with suppress(Exception):
@@ -197,7 +186,22 @@ async def _restore_waf_cookie_state(browser_context: Any, profile_path: Path, ur
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return
-    records = payload.get("cookies") if isinstance(payload, dict) else None
+    records = None
+    if isinstance(payload, dict):
+        domains = payload.get("domains")
+        if isinstance(domains, dict):
+            hostname = _state_domain(url)
+            state_key = next(
+                (key for key in sorted(domains, key=len, reverse=True)
+                 if hostname == key or hostname.endswith(f".{key}")),
+                None,
+            )
+            domain_state = domains.get(state_key) if state_key else None
+            if isinstance(domain_state, dict):
+                records = domain_state.get("cookies")
+        elif isinstance(payload.get("cookies"), list):
+            # Read the previous per-profile format and migrate it on the next save.
+            records = payload["cookies"]
     if not isinstance(records, list):
         return
     cookies = playwright_cookies(
@@ -219,9 +223,46 @@ async def _save_waf_cookie_state(browser_context: Any, profile_path: Path, url: 
         if str(item.get("name") or "").casefold() in WAF_COOKIE_NAMES
     ]
     state_path = profile_path / ".autosurf-waf-cookies.json"
+    domains: dict[str, Any] = {}
+    try:
+        existing = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(existing, dict) and isinstance(existing.get("domains"), dict):
+            domains = existing["domains"]
+        elif isinstance(existing, dict) and isinstance(existing.get("cookies"), list):
+            for item in existing["cookies"]:
+                if not isinstance(item, dict):
+                    continue
+                domain = str(item.get("domain") or "").lower().lstrip(".").rstrip(".")
+                if domain:
+                    domains.setdefault(domain, {"cookies": []})["cookies"].append(item)
+    except (OSError, ValueError, TypeError):
+        pass
+    domains[_state_domain(url)] = {"cookies": records}
     temporary = state_path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"cookies": records}, ensure_ascii=False), encoding="utf-8")
+    temporary.write_text(json.dumps({"domains": domains}, ensure_ascii=False), encoding="utf-8")
     temporary.replace(state_path)
+
+
+def _state_domain(url: str) -> str:
+    return (validated_http_url(url).hostname or "").lower().rstrip(".")
+
+
+async def _prepare_shared_profile(profile_path: Path) -> None:
+    if profile_path.exists():
+        return
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_profiles = [
+        item for item in profile_path.parent.iterdir()
+        if item.is_dir() and item.name != profile_path.name
+    ]
+    if not legacy_profiles:
+        profile_path.mkdir(parents=True, exist_ok=True)
+        return
+    latest = max(legacy_profiles, key=lambda item: item.stat().st_mtime)
+    try:
+        await asyncio.to_thread(shutil.copytree, latest, profile_path)
+    except FileExistsError:
+        pass
 
 
 def _stored_cookie(item: dict[str, Any]) -> dict[str, Any]:

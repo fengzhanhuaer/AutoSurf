@@ -15,7 +15,7 @@ from autosurf.automations.browser_session import (
     with_browser_details,
 )
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
-from autosurf.pt_discovery import canonical_pt_site_domain, discover_pt_site
+from autosurf.pt_discovery import discover_pt_site
 
 
 DEFAULT_ALREADY_PATTERNS = (
@@ -399,10 +399,7 @@ class PtSignInHandler:
         screenshot = artifact_dir / f"{context.execution_id}.png"
 
         async with async_playwright() as playwright:
-            profile_key = discovery.site_key if discovery else canonical_pt_site_domain(parsed.hostname or "")
-            async with persistent_chromium_session(
-                playwright, context, url, profile_key=profile_key,
-            ) as browser_session:
+            async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
                 if discovery and discovery.strategy == "web_storage_browser":
                     token = context.cookies.get("token", "")
