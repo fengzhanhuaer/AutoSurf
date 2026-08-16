@@ -980,6 +980,9 @@ async def _classify_pt_homepage(page: Any, context: RunContext,
         RunOutcome.FAILED,
     }:
         return None
+    target_host = (urlparse(str(context.config.get("url") or "")).hostname or "").lower()
+    if outcome == RunOutcome.ALREADY_DONE and target_host == "pt.0ff.cc":
+        return None
     # The homepage is also the safe fallback for sites whose attendance page is
     # protected by a WAF. Do not navigate away just to collect optional history.
     return _classified_result(outcome, page.url, status_code)

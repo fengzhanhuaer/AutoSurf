@@ -94,6 +94,39 @@ async def test_homepage_already_done_skips_hdkylin_challenge_page():
     assert result.outcome == RunOutcome.ALREADY_DONE
     assert result.details["url"] == "https://www.hdkyl.in/"
     assert page.url == "https://www.hdkyl.in/"
+
+
+@pytest.mark.asyncio
+async def test_0ff_homepage_already_done_continues_to_calendar_page():
+    class Locator:
+        async def inner_text(self):
+            return "今日已签到"
+
+        async def count(self):
+            return 0
+
+    class Page:
+        url = "https://pt.0ff.cc/"
+        frames = []
+
+        def locator(self, _selector):
+            return Locator()
+
+        async def evaluate(self, _script):
+            return []
+
+    page = Page()
+    page.frames = [page]
+
+    result = await _classify_pt_homepage(
+        page,
+        RunContext(
+            "test", {"url": "https://pt.0ff.cc/attendance.php"}, {"sid": "secret"},
+        ),
+        200,
+    )
+
+    assert result is None
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "今日已签到"
     ) == RunOutcome.ALREADY_DONE
