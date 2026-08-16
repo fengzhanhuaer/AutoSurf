@@ -5,7 +5,7 @@ const state = {
   ptSites: [],
   ptHistory: { today: null, days: [], items: [], latest_execution: null },
   ptStats: [],
-  webCredential: null,
+  webCredentials: [],
   ptSelection: new Set(),
   selected: "",
   activeView: "pt-signin",
@@ -90,15 +90,18 @@ const elements = {
   upgradeState: document.querySelector("#upgrade-state"),
   tokenSyncBaseUrl: document.querySelector("#token-sync-base-url"),
   tokenSyncState: document.querySelector("#token-sync-state"),
-  tokenScriptState: document.querySelector("#token-script-state"),
-  tokenValueState: document.querySelector("#token-value-state"),
-  tokenLastSync: document.querySelector("#token-last-sync"),
+  webCredentialRows: document.querySelector("#web-credential-rows"),
   tokenScriptButton: document.querySelector("#token-script-button"),
-  tokenClearButton: document.querySelector("#token-clear-button"),
 };
 
 elements.endpoint.textContent = `${location.origin}/cookiecloud`;
 elements.tokenSyncBaseUrl.value = location.origin;
+
+function escapeHtml(value) {
+  const node = document.createElement("span");
+  node.textContent = String(value ?? "");
+  return node.innerHTML;
+}
 
 function formatDate(value) {
   if (!value) return "暂无";
@@ -230,7 +233,7 @@ function setBusy(busy) {
   elements.ptCollectButton.disabled = busy || state.ptSelection.size === 0;
   elements.refreshButton.disabled = busy;
   elements.tokenScriptButton.disabled = busy;
-  elements.tokenClearButton.disabled = busy || !state.webCredential?.token_configured;
+  for (const button of elements.webCredentialRows.querySelectorAll("button")) button.disabled = busy;
 }
 
 function statusLabel(status) {
@@ -659,22 +662,30 @@ async function deletePtSite(site) {
   }
 }
 
-function renderWebCredential(status) {
-  state.webCredential = status;
-  elements.tokenSyncState.textContent = status.token_configured ? "同步正常"
-    : status.script_configured ? "等待凭据" : "未配置";
-  elements.tokenSyncState.className = `status-badge${status.token_configured ? " succeeded" : ""}`;
-  elements.tokenScriptState.textContent = status.script_configured ? "已生成" : "未生成";
-  elements.tokenValueState.textContent = status.token_configured ? "已加密保存" : "未同步";
-  elements.tokenLastSync.textContent = formatDate(status.last_sync_at);
-  elements.tokenScriptButton.textContent = status.script_configured ? "重新生成同步脚本" : "生成同步脚本";
-  elements.tokenClearButton.disabled = !status.token_configured;
+function renderWebCredentials(statuses) {
+  state.webCredentials = statuses;
+  const configuredCount = statuses.filter((item) => item.credential_configured).length;
+  const scriptConfigured = statuses.length > 0 && statuses.every((item) => item.script_configured);
+  elements.tokenSyncState.textContent = configuredCount === statuses.length && statuses.length
+    ? "同步正常" : scriptConfigured ? `已同步 ${configuredCount}/${statuses.length}` : "未配置";
+  elements.tokenSyncState.className = `status-badge${configuredCount === statuses.length && statuses.length ? " succeeded" : ""}`;
+  elements.tokenScriptButton.textContent = scriptConfigured ? "重新生成同步脚本" : "生成同步脚本";
+  elements.webCredentialRows.innerHTML = statuses.length ? statuses.map((status) => `
+    <tr>
+      <td>${escapeHtml(status.site)}</td>
+      <td>${escapeHtml(status.domain)}</td>
+      <td>${status.script_configured ? "已生成" : "未生成"}</td>
+      <td>${status.credential_configured ? `已加密保存 (${status.configured_keys.length} 项)` : "未同步"}</td>
+      <td>${escapeHtml(formatDate(status.last_sync_at))}</td>
+      <td><button class="table-button danger" type="button" data-web-credential-clear="${escapeHtml(status.source_key)}"
+        ${status.credential_configured ? "" : "disabled"}>清除凭据</button></td>
+    </tr>`).join("") : '<tr><td class="empty" colspan="6">暂无 Web 凭据来源</td></tr>';
 }
 
 async function loadWebCredentialStatus() {
-  const status = await api("/api/v1/web-credentials/rousi", { cache: "no-store" });
-  renderWebCredential(status);
-  return status;
+  const status = await api("/api/v1/web-credentials", { cache: "no-store" });
+  renderWebCredentials(status.items);
+  return status.items;
 }
 
 function renderUpgradeStatus(status) {
@@ -838,14 +849,14 @@ async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredential] = await Promise.all([
+    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredentials] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
       api("/api/v1/pt-signin/stats"),
-      api("/api/v1/web-credentials/rousi", { cache: "no-store" }),
+      api("/api/v1/web-credentials", { cache: "no-store" }),
     ]);
     state.sources = sources.items;
     state.credentials = credentials.items;
@@ -853,12 +864,12 @@ async function refresh({ quiet = false } = {}) {
     state.ptSites = ptSites.items;
     state.ptHistory = ptHistory;
     state.ptStats = ptStats.items;
-    state.webCredential = webCredential;
+    state.webCredentials = webCredentials.items;
     if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
     if (!state.selected && state.sources.length === 1) state.selected = state.sources[0].uuid;
     renderCookieCloud();
     renderPt();
-    renderWebCredential(webCredential);
+    renderWebCredentials(webCredentials.items);
     if (!quiet) showToast("状态已刷新");
   } catch (error) {
     if (error.status === 401) goToLogin();
@@ -1057,7 +1068,7 @@ elements.tokenScriptButton.addEventListener("click", async () => {
   if (!baseUrl) return;
   setBusy(true);
   try {
-    const response = await fetch("/api/v1/web-credentials/rousi/userscript", {
+    const response = await fetch("/api/v1/web-credentials/userscript", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ base_url: baseUrl }),
@@ -1086,13 +1097,17 @@ elements.tokenScriptButton.addEventListener("click", async () => {
     setBusy(false);
   }
 });
-elements.tokenClearButton.addEventListener("click", async () => {
-  if (!window.confirm("清除 AutoSurf 中已同步的 Rousi Web 凭据？")) return;
+elements.webCredentialRows.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-web-credential-clear]");
+  if (!button) return;
+  const sourceKey = button.dataset.webCredentialClear;
+  const status = state.webCredentials.find((item) => item.source_key === sourceKey);
+  if (!status || !window.confirm(`清除 AutoSurf 中已同步的 ${status.site} Web 凭据？`)) return;
   setBusy(true);
   try {
-    await api("/api/v1/web-credentials/rousi/token", { method: "DELETE" });
+    await api(`/api/v1/web-credentials/${encodeURIComponent(sourceKey)}/values`, { method: "DELETE" });
     await loadWebCredentialStatus();
-    showToast("Rousi Web 凭据已清除");
+    showToast(`${status.site} Web 凭据已清除`);
   } catch (error) {
     showToast(error.message, true);
   } finally {

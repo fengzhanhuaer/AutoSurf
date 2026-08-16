@@ -31,8 +31,12 @@ from autosurf.infrastructure.database import (
     CredentialRecord,
     ExecutionRecord,
 )
-from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site
-from autosurf.userscripts import build_web_credential_userscript
+from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site, is_ignored_pt_domain
+from autosurf.userscripts import (
+    WEB_CREDENTIAL_SCRIPT_SOURCES,
+    build_web_credential_userscript,
+    build_web_credential_userscript_bundle,
+)
 
 
 class CredentialInput(BaseModel):
@@ -117,7 +121,8 @@ class WebCredentialScriptInput(BaseModel):
 
 
 class WebCredentialUploadInput(BaseModel):
-    token: str = Field(min_length=20, max_length=8192)
+    token: str | None = Field(default=None, min_length=1, max_length=8192)
+    values: dict[str, str] = Field(default_factory=dict)
 
 
 SESSION_COOKIE = "autosurf_session"
@@ -891,6 +896,8 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
         grouped: dict[str, dict[str, Any]] = {}
         unknown_items: list[dict[str, Any]] = []
         for credential in credentials:
+            if is_ignored_pt_domain(credential.domain):
+                continue
             try:
                 cookie_names = set(request.app.state.credentials.cookies_for(credential))
             except ValueError:
@@ -1188,7 +1195,12 @@ def execution_view(record: ExecutionRecord) -> dict[str, Any]:
 
 @router.get("/web-credentials/rousi")
 def rousi_web_credential_status(request: Request) -> dict[str, Any]:
-    return request.app.state.web_credentials.status()
+    return request.app.state.web_credentials.status("rousi")
+
+
+@router.get("/web-credentials")
+def web_credential_statuses(request: Request) -> dict[str, Any]:
+    return request.app.state.web_credentials.statuses()
 
 
 @router.post("/web-credentials/rousi/userscript")
@@ -1209,9 +1221,38 @@ def create_rousi_userscript(data: WebCredentialScriptInput, request: Request) ->
     )
 
 
+@router.post("/web-credentials/userscript")
+def create_web_credential_userscript(data: WebCredentialScriptInput, request: Request) -> Response:
+    base_url = _web_credential_base_url(data.base_url)
+    configurations: dict[str, tuple[str, str]] = {}
+    for source_key in WEB_CREDENTIAL_SCRIPT_SOURCES:
+        upload_key = secrets.token_urlsafe(32)
+        request.app.state.web_credentials.rotate_upload_key(source_key, upload_key)
+        configurations[source_key] = (
+            f"{base_url}/api/web-credentials/{source_key}/values", upload_key,
+        )
+    script = build_web_credential_userscript_bundle(configurations)
+    return Response(
+        script,
+        media_type="text/javascript; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'attachment; filename="autosurf-web-credential-sync.user.js"',
+        },
+    )
+
+
 @router.delete("/web-credentials/rousi/token", status_code=204)
 def clear_rousi_web_credential(request: Request) -> None:
     request.app.state.web_credentials.clear_token()
+
+
+@router.delete("/web-credentials/{source_key}/values", status_code=204)
+def clear_web_credential(source_key: str, request: Request) -> None:
+    try:
+        request.app.state.web_credentials.clear_values(source_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="unknown web credential source") from exc
 
 
 @web_credential_router.post("/rousi/token")
@@ -1220,6 +1261,8 @@ def upload_rousi_web_credential(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    if data.token is None:
+        raise HTTPException(status_code=422, detail="token is required")
     prefix = "Bearer "
     if not authorization or not authorization.startswith(prefix):
         raise HTTPException(status_code=401, detail="invalid upload key")
@@ -1229,6 +1272,29 @@ def upload_rousi_web_credential(
         )
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail="invalid upload key") from exc
+    return {"status": "ok", "changed": changed, "updated_at": record.updated_at}
+
+
+@web_credential_router.post("/{source_key}/values")
+def upload_web_credential(
+    source_key: str,
+    data: WebCredentialUploadInput,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    prefix = "Bearer "
+    if not authorization or not authorization.startswith(prefix):
+        raise HTTPException(status_code=401, detail="invalid upload key")
+    try:
+        record, changed = request.app.state.web_credentials.update_values(
+            source_key, authorization[len(prefix):], data.values,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="invalid upload key") from exc
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if detail == "unknown web credential source" else 422
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     return {"status": "ok", "changed": changed, "updated_at": record.updated_at}
 
 

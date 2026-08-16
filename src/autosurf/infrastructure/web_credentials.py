@@ -13,10 +13,7 @@ from autosurf.domain.models import utc_now
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord
 from autosurf.pt_discovery import discover_pt_site
-
-
-ROUSI_CREDENTIAL_NAME = "web-storage:rousi.pro"
-ROUSI_DOMAIN = "rousi.pro"
+from autosurf.userscripts import WEB_CREDENTIAL_SCRIPT_SOURCES, web_credential_script_source
 
 
 class WebCredentialStore:
@@ -26,61 +23,99 @@ class WebCredentialStore:
         self.secrets = secrets
         self.credentials = credentials
 
-    def status(self) -> dict[str, Any]:
+    def statuses(self) -> dict[str, Any]:
+        return {"items": [self.status(source_key) for source_key in WEB_CREDENTIAL_SCRIPT_SOURCES]}
+
+    def status(self, source_key: str = "rousi") -> dict[str, Any]:
+        source = web_credential_script_source(source_key)
         with self.sessions() as session:
-            record = self._record(session)
+            record = self._record(session, source_key)
             payload = self._payload(record)
+            configured_keys = sorted(
+                key for key, value in payload.get("values", {}).items()
+                if isinstance(value, str) and value
+            )
+            configured = all(key in configured_keys for key in source.required_storage_keys)
             return {
-                "site": "Rousi",
-                "domain": ROUSI_DOMAIN,
+                "source_key": source.key,
+                "site": source.name,
+                "domain": source.domain,
                 "script_configured": bool(payload.get("upload_key_hash")),
-                "token_configured": bool(payload.get("values", {}).get("token")),
+                "credential_configured": configured,
+                "token_configured": configured,
+                "configured_keys": configured_keys,
                 "last_sync_at": payload.get("last_sync_at"),
                 "credential_id": record.id if record else None,
                 "credential_version": record.version if record else None,
             }
 
-    def rotate_upload_key(self, upload_key: str) -> CredentialRecord:
-        payload = self._current_payload()
+    def rotate_upload_key(self, source_key: str, upload_key: str | None = None) -> CredentialRecord:
+        if upload_key is None:
+            upload_key = source_key
+            source_key = "rousi"
+        payload = self._current_payload(source_key)
         payload["upload_key_hash"] = _secret_hash(upload_key)
-        return self._save(payload)
+        return self._save(source_key, payload)
 
-    def update_token(self, upload_key: str, token: str) -> tuple[CredentialRecord, bool]:
-        token = token.strip()
-        if not token:
-            raise ValueError("token cannot be empty")
-        payload = self._current_payload()
+    def update_values(self, source_key: str, upload_key: str,
+                      supplied_values: dict[str, str]) -> tuple[CredentialRecord, bool]:
+        source = web_credential_script_source(source_key)
+        unknown_keys = set(supplied_values) - set(source.storage_keys)
+        if unknown_keys:
+            raise ValueError(f"unsupported storage key: {sorted(unknown_keys)[0]}")
+        values = {
+            key: value.strip()
+            for key, value in supplied_values.items()
+            if isinstance(value, str) and value.strip()
+        }
+        missing = set(source.required_storage_keys) - set(values)
+        if missing:
+            raise ValueError(f"missing storage key: {sorted(missing)[0]}")
+        if any(len(value) > 8192 for value in values.values()):
+            raise ValueError("web credential value is too long")
+
+        payload = self._current_payload(source_key)
         expected = str(payload.get("upload_key_hash") or "")
         if not expected or not hmac.compare_digest(expected, _secret_hash(upload_key)):
             raise PermissionError("invalid upload key")
-        values = payload.setdefault("values", {})
-        changed = values.get("token") != token
-        values["token"] = token
+        changed = payload.get("values", {}) != values
+        payload["values"] = values
         payload["last_sync_at"] = utc_now().isoformat(timespec="seconds") + "Z"
-        record = self._save(payload)
-        self._bind_existing_rousi_tasks(record)
+        record = self._save(source_key, payload)
+        self._bind_existing_tasks(source_key, record, set(values))
         return record, changed
 
-    def clear_token(self) -> None:
-        payload = self._current_payload()
+    def update_token(self, upload_key: str, token: str) -> tuple[CredentialRecord, bool]:
+        return self.update_values("rousi", upload_key, {"token": token})
+
+    def clear_values(self, source_key: str) -> None:
+        payload = self._current_payload(source_key)
         payload["values"] = {}
         payload["last_sync_at"] = None
         if payload.get("upload_key_hash"):
-            self._save(payload)
+            self._save(source_key, payload)
 
-    def _current_payload(self) -> dict[str, Any]:
+    def clear_token(self) -> None:
+        self.clear_values("rousi")
+
+    def _current_payload(self, source_key: str) -> dict[str, Any]:
         with self.sessions() as session:
-            return self._payload(self._record(session))
+            return self._payload(self._record(session, source_key))
 
-    def _save(self, payload: dict[str, Any]) -> CredentialRecord:
+    def _save(self, source_key: str, payload: dict[str, Any]) -> CredentialRecord:
+        source = web_credential_script_source(source_key)
         return self.credentials.upsert_web_storage(
-            ROUSI_CREDENTIAL_NAME, ROUSI_DOMAIN, payload,
+            self._credential_name(source_key), source.domain, payload,
         )
 
-    def _record(self, session: Session) -> CredentialRecord | None:
+    def _record(self, session: Session, source_key: str) -> CredentialRecord | None:
         return session.scalar(select(CredentialRecord).where(
-            CredentialRecord.name == ROUSI_CREDENTIAL_NAME,
+            CredentialRecord.name == self._credential_name(source_key),
         ))
+
+    @staticmethod
+    def _credential_name(source_key: str) -> str:
+        return f"web-storage:{web_credential_script_source(source_key).domain}"
 
     def _payload(self, record: CredentialRecord | None) -> dict[str, Any]:
         if record is None:
@@ -93,9 +128,11 @@ class WebCredentialStore:
             raise ValueError("web credential values are invalid")
         return dict(value)
 
-    def _bind_existing_rousi_tasks(self, credential: CredentialRecord) -> None:
-        discovery = discover_pt_site(ROUSI_DOMAIN, {"token"})
-        if discovery is None:
+    def _bind_existing_tasks(self, source_key: str, credential: CredentialRecord,
+                             storage_keys: set[str]) -> None:
+        source = web_credential_script_source(source_key)
+        discovery = discover_pt_site(source.domain, storage_keys)
+        if discovery is None or not discovery.supported:
             return
         with self.sessions.begin() as session:
             records = session.scalars(select(AutomationRecord).where(
@@ -106,7 +143,7 @@ class WebCredentialStore:
                 if current is None:
                     continue
                 current_discovery = discover_pt_site(current.domain, set())
-                if current_discovery is None or current_discovery.site_key != ROUSI_DOMAIN:
+                if current_discovery is None or current_discovery.site_key != discovery.site_key:
                     continue
                 config = _json_object(record.config_json)
                 was_unsupported = not bool(config.get("sign_in_supported", False))
@@ -119,9 +156,10 @@ class WebCredentialStore:
                     "url": discovery.url,
                     "credential_domain": discovery.site_key,
                     "discovery_strategy": discovery.strategy,
-                    "sign_in_supported": True,
-                    "profile_refresh_supported": False,
-                    "sign_in_enabled": True,
+                    "profile_url": discovery.profile_url,
+                    "sign_in_supported": discovery.sign_in_supported,
+                    "profile_refresh_supported": discovery.profile_refresh_supported,
+                    "sign_in_enabled": discovery.sign_in_supported,
                 })
                 record.config_json = _json_dump(config)
 

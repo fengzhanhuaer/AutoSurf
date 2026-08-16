@@ -15,6 +15,7 @@ PT_COOKIE_MARKERS = frozenset({
     "passkey",
     "torrent_pass",
 })
+PT_IGNORED_DOMAINS = frozenset({"ptlover.cc", "raingfh.top"})
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
     PtSiteDefinition("rousi.pro", "Rousi", "/", "custom_required", aliases=("rousi.zip",)),
     PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "custom_required"),
-    PtSiteDefinition("totheglory.im", "TTG"),
+    PtSiteDefinition("totheglory.im", "TTG", "/"),
     PtSiteDefinition(
         "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
     ),
@@ -63,7 +64,9 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("et8.org", "TCCF", "/", "profile_refresh_only"),
     PtSiteDefinition("pt.eastgame.org", "TLFBits", "/", "profile_refresh_only"),
     PtSiteDefinition("pt.keepfrds.com", "KEEPFRDS", "/", "profile_refresh_only"),
-    PtSiteDefinition("ptlover.cc", "PTLover (不可用域名)", "/", "custom_required"),
+    PtSiteDefinition(
+        "sunnypt.top", "SunnyPT", "/user/attendance", profile_path="/user/profile",
+    ),
 )
 
 
@@ -101,6 +104,8 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
     normalized_domain = domain.lower().lstrip(".").rstrip(".")
     if not normalized_domain:
         return None
+    if is_ignored_pt_domain(normalized_domain):
+        return None
 
     definition = _site_definition(normalized_domain)
     lowered_names = {str(name).lower() for name in cookie_names}
@@ -111,7 +116,11 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
         # automation targets.
         target_domain = definition.target_domain or definition.domain
         strategy = definition.strategy
-        if definition.domain == "rousi.pro" and "token" in lowered_names:
+        web_storage_keys = {
+            "rousi.pro": "token",
+            "kp.m-team.cc": "auth",
+        }
+        if web_storage_keys.get(definition.domain) in lowered_names:
             strategy = "web_storage_browser"
         return PtDiscovery(
             site_key=definition.domain,
@@ -141,6 +150,11 @@ def canonical_pt_site_domain(domain: str) -> str:
     if definition:
         return definition.domain
     return normalized[4:] if normalized.startswith("www.") else normalized
+
+
+def is_ignored_pt_domain(domain: str) -> bool:
+    normalized = domain.lower().lstrip(".").rstrip(".")
+    return any(_domain_matches(normalized, item) for item in PT_IGNORED_DOMAINS)
 
 
 def pt_site_domain_aliases(domain: str) -> tuple[str, ...]:

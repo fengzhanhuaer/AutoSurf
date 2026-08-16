@@ -17,6 +17,7 @@ from autosurf.pt_discovery import (
     PT_COOKIE_MARKERS,
     canonical_pt_site_domain,
     discover_pt_site,
+    is_ignored_pt_domain,
     pt_site_domain_aliases,
 )
 
@@ -432,6 +433,29 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                 config = json.loads(automation.config_json)
             except (TypeError, ValueError):
                 config = {}
+            if is_ignored_pt_domain(credential.domain):
+                automation.enabled = False
+                config.update({
+                    "sign_in_enabled": False,
+                    "profile_refresh_enabled": False,
+                    "sign_in_supported": False,
+                    "profile_refresh_supported": False,
+                })
+                automation.config_json = json.dumps(config, ensure_ascii=False)
+                active = session.scalars(select(ExecutionRecord).where(
+                    ExecutionRecord.automation_id == automation.id,
+                    ExecutionRecord.status.in_([
+                        ExecutionStatus.PENDING,
+                        ExecutionStatus.RUNNING,
+                        ExecutionStatus.RETRY_WAIT,
+                    ]),
+                )).all()
+                for execution in active:
+                    execution.status = ExecutionStatus.CANCELLED
+                    execution.lease_until = None
+                    execution.finished_at = now
+                    execution.error = "站点已停用"
+                continue
             discovery = discover_pt_site(credential.domain, set())
             if discovery and config.get("discovered"):
                 changed = False
@@ -468,6 +492,12 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                     changed = True
                 if config.get("credential_domain") != discovery.site_key:
                     config["credential_domain"] = discovery.site_key
+                    changed = True
+                if config.get("discovery_strategy") != discovery.strategy:
+                    config["discovery_strategy"] = discovery.strategy
+                    changed = True
+                if config.get("profile_url") != discovery.profile_url:
+                    config["profile_url"] = discovery.profile_url
                     changed = True
                 if automation.name != discovery.name:
                     automation.name = discovery.name

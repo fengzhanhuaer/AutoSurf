@@ -15,7 +15,7 @@ from autosurf.automations.browser_session import (
     with_browser_details,
 )
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
-from autosurf.pt_discovery import discover_pt_site
+from autosurf.pt_discovery import discover_pt_site, is_ignored_pt_domain
 
 
 DEFAULT_ALREADY_PATTERNS = (
@@ -355,6 +355,22 @@ class TjuptAdapter:
         )
 
 
+def web_storage_init_script(url: str, values: dict[str, str]) -> str:
+    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    clean_values = {
+        key: value for key, value in values.items()
+        if isinstance(key, str) and isinstance(value, str) and value
+    }
+    payload = json.dumps({"hostname": hostname, "values": clean_values}, ensure_ascii=False)
+    return (
+        f"const autosurfWebCredential = {payload};"
+        "if (location.hostname.toLowerCase() === autosurfWebCredential.hostname) {"
+        "Object.entries(autosurfWebCredential.values).forEach(([key, value]) => "
+        "localStorage.setItem(key, value));"
+        "}"
+    )
+
+
 class PtSignInHandler:
     type = "pt_signin"
 
@@ -365,6 +381,8 @@ class PtSignInHandler:
         config = context.config
         url = str(config["url"])
         parsed = validated_http_url(url)
+        if is_ignored_pt_domain(parsed.hostname or ""):
+            return RunResult(RunOutcome.FAILED, "PT 站点已停用")
         discovery = discover_pt_site(parsed.hostname or "", set(context.cookies))
         catalog_sign_in_supported = discovery.sign_in_supported if discovery else True
         catalog_profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
@@ -390,6 +408,7 @@ class PtSignInHandler:
         if credential_domain and not _domain_matches(credential_domain, parsed.hostname or ""):
             raise ValueError("sign-in URL must use the selected credential domain")
 
+        from playwright.async_api import Error as PlaywrightError
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
 
@@ -402,14 +421,9 @@ class PtSignInHandler:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
                 if discovery and discovery.strategy == "web_storage_browser":
-                    token = context.cookies.get("token", "")
-                    if token:
-                        await browser_context.add_init_script(
-                            "if (location.hostname === 'rousi.pro' || "
-                            "location.hostname.endsWith('.rousi.pro')) {"
-                            f"localStorage.setItem('token', {json.dumps(token)});"
-                            "}"
-                        )
+                    await browser_context.add_init_script(
+                        web_storage_init_script(url, context.cookies),
+                    )
                 page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
                 page.set_default_timeout(timeout_ms)
                 try:
@@ -449,7 +463,11 @@ class PtSignInHandler:
                         "PT 站点响应超时",
                         {"url": page.url or url, "screenshot": str(screenshot), "error": str(exc)[:500]},
                     ), browser_session)
-
+                except PlaywrightError as exc:
+                    await _save_screenshot(page, screenshot)
+                    return with_browser_details(
+                        playwright_error_result(page.url or url, exc, screenshot), browser_session,
+                    )
     async def _generic_sign_in(self, page: Any, context: RunContext, status_code: int | None,
                                screenshot: Path) -> RunResult:
         config = context.config
@@ -577,6 +595,21 @@ def classify_pt_page(url: str, status_code: int | None, body: str,
     if _matches(body, AUTH_EXPIRED_PATTERNS):
         return RunOutcome.AUTH_EXPIRED
     return None
+
+
+def playwright_error_result(url: str, error: Exception, screenshot: Path | None = None) -> RunResult:
+    value = str(error)
+    messages = (
+        ("ERR_NAME_NOT_RESOLVED", "PT 站域名无法解析"),
+        ("ERR_CONNECTION_REFUSED", "PT 站拒绝连接"),
+        ("ERR_HTTP_RESPONSE_CODE_FAILURE", "PT 站返回了浏览器无法处理的 HTTP 响应"),
+        ("ERR_TIMED_OUT", "PT 站网络连接超时"),
+    )
+    message = next((message for marker, message in messages if marker in value), "PT 站浏览器执行失败")
+    details: dict[str, Any] = {"url": url, "error": value[:500]}
+    if screenshot is not None:
+        details["screenshot"] = str(screenshot)
+    return RunResult(RunOutcome.FAILED, message, details)
 
 
 def _matches(value: str, patterns: tuple[Any, ...]) -> bool:

@@ -416,15 +416,18 @@
                      placeholder="http://127.0.0.1:18980" autocomplete="url">
               <small>填写运行油猴脚本的浏览器能够访问到的 AutoSurf 服务根地址。</small>
             </label>
-            <dl class="status-list token-sync-status">
-              <div><dt>站点</dt><dd>rousi.pro</dd></div>
-              <div><dt>脚本密钥</dt><dd id="token-script-state">未生成</dd></div>
-              <div><dt>站点凭据</dt><dd id="token-value-state">未同步</dd></div>
-              <div><dt>最近同步</dt><dd id="token-last-sync">暂无</dd></div>
-            </dl>
+            <div class="table-wrap token-sync-table-wrap">
+              <table class="token-sync-table">
+                <thead>
+                  <tr><th>站点</th><th>域名</th><th>脚本密钥</th><th>站点凭据</th><th>最近同步</th><th>操作</th></tr>
+                </thead>
+                <tbody id="web-credential-rows">
+                  <tr><td class="empty" colspan="6">正在读取 Web 凭据状态</td></tr>
+                </tbody>
+              </table>
+            </div>
           </div>
           <div class="token-sync-actions">
-            <button class="button secondary" id="token-clear-button" type="button" disabled>清除凭据</button>
             <button class="button primary" id="token-script-button" type="button">生成同步脚本</button>
           </div>
         </section>

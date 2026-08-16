@@ -9,67 +9,105 @@ from urllib.parse import urlparse
 class WebCredentialScriptSource:
     key: str
     name: str
+    domain: str
     matches: tuple[str, ...]
-    storage_key: str
+    storage_keys: tuple[str, ...]
+    required_storage_keys: tuple[str, ...]
 
 
 WEB_CREDENTIAL_SCRIPT_SOURCES = {
     "rousi": WebCredentialScriptSource(
         key="rousi",
         name="Rousi",
+        domain="rousi.pro",
         matches=("https://rousi.pro/*",),
-        storage_key="token",
+        storage_keys=("token",),
+        required_storage_keys=("token",),
+    ),
+    "mteam": WebCredentialScriptSource(
+        key="mteam",
+        name="M-Team",
+        domain="kp.m-team.cc",
+        matches=("https://kp.m-team.cc/*",),
+        storage_keys=("auth", "did", "visitorId"),
+        required_storage_keys=("auth",),
     ),
 }
 
 
 def build_web_credential_userscript(source_key: str, endpoint: str, upload_key: str) -> str:
-    try:
-        source = WEB_CREDENTIAL_SCRIPT_SOURCES[source_key]
-    except KeyError as exc:
-        raise ValueError("unknown web credential source") from exc
-    parsed = urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("userscript endpoint must be HTTP(S)")
-    return _ROUSI_USERSCRIPT.replace(
-        "__AUTOSURF_ENDPOINT__", json.dumps(endpoint),
+    return build_web_credential_userscript_bundle({source_key: (endpoint, upload_key)})
+
+
+def build_web_credential_userscript_bundle(
+    configurations: dict[str, tuple[str, str]],
+) -> str:
+    if not configurations:
+        raise ValueError("web credential script requires at least one source")
+    script_sources = []
+    matches: list[str] = []
+    connect_hosts: list[str] = []
+    for source_key, (endpoint, upload_key) in configurations.items():
+        try:
+            source = WEB_CREDENTIAL_SCRIPT_SOURCES[source_key]
+        except KeyError as exc:
+            raise ValueError("unknown web credential source") from exc
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("userscript endpoint must be HTTP(S)")
+        matches.extend(source.matches)
+        connect_hosts.append(parsed.hostname)
+        script_sources.append({
+            "key": source.key,
+            "name": source.name,
+            "domain": source.domain,
+            "storageKeys": list(source.storage_keys),
+            "requiredStorageKeys": list(source.required_storage_keys),
+            "endpoint": endpoint,
+            "uploadKey": upload_key,
+            "markerKey": f"autosurf_web_credential_{source.key}_marker",
+        })
+    return _WEB_CREDENTIAL_USERSCRIPT.replace(
+        "__AUTOSURF_SOURCE_CONFIG__", json.dumps(script_sources, ensure_ascii=False),
     ).replace(
-        "__AUTOSURF_UPLOAD_KEY__", json.dumps(upload_key),
+        "__AUTOSURF_CONNECT_HOSTS__", "\n".join(
+            f"// @connect      {item}" for item in dict.fromkeys(connect_hosts)
+        ),
     ).replace(
-        "__AUTOSURF_CONNECT_HOST__", parsed.hostname,
-    ).replace(
-        "__AUTOSURF_MATCHES__", "\n".join(f"// @match        {item}" for item in source.matches),
-    ).replace(
-        "__AUTOSURF_SOURCE_NAME__", json.dumps(source.name),
-    ).replace(
-        "__AUTOSURF_STORAGE_KEY__", json.dumps(source.storage_key),
-    ).replace(
-        "__AUTOSURF_MARKER_KEY__", json.dumps(f"autosurf_web_credential_{source.key}_marker"),
+        "__AUTOSURF_MATCHES__", "\n".join(
+            f"// @match        {item}" for item in dict.fromkeys(matches)
+        ),
     )
 
 
-_ROUSI_USERSCRIPT = r'''// ==UserScript==
+def web_credential_script_source(source_key: str) -> WebCredentialScriptSource:
+    try:
+        return WEB_CREDENTIAL_SCRIPT_SOURCES[source_key]
+    except KeyError as exc:
+        raise ValueError("unknown web credential source") from exc
+
+
+_WEB_CREDENTIAL_USERSCRIPT = r'''// ==UserScript==
 // @name         AutoSurf Web 凭据同步
 // @namespace    https://github.com/fengzhanhuaer/AutoSurf
-// @version      1.0.0
+// @version      1.1.0
 // @description  将当前站点的 Web 登录凭据安全同步到 AutoSurf
 __AUTOSURF_MATCHES__
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
-// @connect      __AUTOSURF_CONNECT_HOST__
+__AUTOSURF_CONNECT_HOSTS__
 // @run-at       document-idle
 // ==/UserScript==
 
 (() => {
   "use strict";
 
-  const endpoint = __AUTOSURF_ENDPOINT__;
-  const uploadKey = __AUTOSURF_UPLOAD_KEY__;
-  const sourceName = __AUTOSURF_SOURCE_NAME__;
-  const storageKey = __AUTOSURF_STORAGE_KEY__;
-  const markerKey = __AUTOSURF_MARKER_KEY__;
+  const sources = __AUTOSURF_SOURCE_CONFIG__;
+  const hostname = location.hostname.toLowerCase();
+  const source = sources.find((item) => hostname === item.domain || hostname.endsWith(`.${item.domain}`));
+  if (!source) return;
   let status = "正在检测";
   let detail = "等待读取浏览器登录状态";
   let syncing = false;
@@ -145,14 +183,21 @@ __AUTOSURF_MATCHES__
     badge.textContent = status;
     badge.className = `badge ${kind}`.trim();
     detailNode.textContent = detail;
-    tokenField.value = token();
+    tokenField.value = credential();
     revealButton.disabled = !tokenField.value;
     copyButton.disabled = !tokenField.value;
     syncButton.disabled = syncing;
     syncButton.textContent = syncing ? "同步中..." : "立即同步";
   };
-  root.querySelector(".source-name").textContent = sourceName;
-  const token = () => unsafeWindow.localStorage.getItem(storageKey) || "";
+  root.querySelector(".source-name").textContent = source.name;
+  const credentialValues = () => Object.fromEntries(source.storageKeys.flatMap((key) => {
+    const value = unsafeWindow.localStorage.getItem(key) || "";
+    return value ? [[key, value]] : [];
+  }));
+  const credential = () => {
+    const values = credentialValues();
+    return Object.keys(values).length ? JSON.stringify(values) : "";
+  };
   const marker = async (value) => {
     const data = new TextEncoder().encode(value);
     const digest = await crypto.subtle.digest("SHA-256", data);
@@ -161,9 +206,9 @@ __AUTOSURF_MATCHES__
   const upload = (value) => new Promise((resolve, reject) => {
     GM_xmlhttpRequest({
       method: "POST",
-      url: endpoint,
-      headers: { "Authorization": `Bearer ${uploadKey}`, "Content-Type": "application/json" },
-      data: JSON.stringify({ token: value }),
+      url: source.endpoint,
+      headers: { "Authorization": `Bearer ${source.uploadKey}`, "Content-Type": "application/json" },
+      data: JSON.stringify({ values: value }),
       timeout: 15000,
       onload: (response) => {
         if (response.status < 200 || response.status >= 300) {
@@ -180,17 +225,18 @@ __AUTOSURF_MATCHES__
 
   async function sync(force = false) {
     if (syncing) return;
-    const value = token();
-    if (!value) {
+    const values = credentialValues();
+    const missing = source.requiredStorageKeys.filter((key) => !values[key]);
+    if (missing.length) {
       status = "未登录";
-      detail = `浏览器中没有检测到 ${sourceName} 登录凭据`;
+      detail = `浏览器中没有检测到 ${source.name} 登录凭据`;
       render("error");
       return;
     }
-    const currentMarker = await marker(value);
-    if (!force && GM_getValue(markerKey, "") === currentMarker) {
+    const currentMarker = await marker(JSON.stringify(values));
+    if (!force && GM_getValue(source.markerKey, "") === currentMarker) {
       status = "已同步";
-      detail = "Token 未发生变化";
+      detail = "凭据未发生变化";
       render("ok");
       return;
     }
@@ -199,10 +245,10 @@ __AUTOSURF_MATCHES__
     detail = "正在安全写入 AutoSurf";
     render();
     try {
-      const result = await upload(value);
-      GM_setValue(markerKey, currentMarker);
+      const result = await upload(values);
+      GM_setValue(source.markerKey, currentMarker);
       status = "同步成功";
-      detail = `${result.changed ? "Token 已更新" : "Token 已确认"} · ${new Date().toLocaleString()}`;
+      detail = `${result.changed ? "凭据已更新" : "凭据已确认"} · ${new Date().toLocaleString()}`;
       render("ok");
     } catch (error) {
       status = "同步失败";
@@ -222,19 +268,19 @@ __AUTOSURF_MATCHES__
     revealButton.textContent = revealed ? "显示" : "隐藏";
   });
   copyButton.addEventListener("click", async () => {
-    const value = token();
+    const value = credential();
     if (!value) return;
     try {
       await navigator.clipboard.writeText(value);
       copyButton.textContent = "已复制";
       setTimeout(() => { copyButton.textContent = "复制"; }, 1200);
     } catch (_) {
-      detail = "浏览器未允许复制 Token";
+      detail = "浏览器未允许复制凭据";
       render("error");
     }
   });
   syncButton.addEventListener("click", () => sync(true));
-  window.addEventListener("storage", (event) => { if (event.key === "token") sync(false); });
+  window.addEventListener("storage", (event) => { if (source.storageKeys.includes(event.key)) sync(false); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) sync(false); });
   setInterval(() => sync(false), 60000);
   setTimeout(() => sync(false), 1000);

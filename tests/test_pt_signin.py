@@ -22,6 +22,7 @@ from autosurf.automations.pt_signin import (
     normalize_site_signin_history,
     normalize_pt_profile_stats,
     page_body_text,
+    playwright_error_result,
     sanitize_pt_profile_stats,
     profile_url_from_cookies,
     pt_home_url,
@@ -857,6 +858,96 @@ def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     assert mteam.name == "M-Team"
     assert mteam.strategy == "custom_required"
 
+    mteam_authenticated = discover_pt_site("kp.m-team.cc", {"auth", "did", "visitorId"})
+    assert mteam_authenticated is not None
+    assert mteam_authenticated.strategy == "web_storage_browser"
+    assert mteam_authenticated.sign_in_supported is True
+
+
+def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
+    ttg = discover_pt_site("totheglory.im", {"c_secure_uid"})
+    sunny = discover_pt_site("sunnypt.top", {"c_secure_uid"})
+
+    assert ttg is not None
+    assert ttg.url == "https://totheglory.im/"
+    assert sunny is not None
+    assert sunny.name == "SunnyPT"
+    assert sunny.url == "https://sunnypt.top/user/attendance"
+    assert sunny.profile_url == "https://sunnypt.top/user/profile"
+
+
+@pytest.mark.parametrize("domain", ["www.ptlover.cc", "raingfh.top"])
+@pytest.mark.asyncio
+async def test_dead_pt_site_is_excluded_even_with_pt_cookie_markers(settings, domain):
+    app = create_app(settings)
+    app.state.credentials.upsert(
+        f"cookiecloud:test:{domain}", domain, {"c_secure_uid": "7"},
+        provider="cookiecloud",
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/pt-signin/candidates?include_unknown=true",
+            auth=(settings.username, settings.password),
+        )
+
+    assert response.status_code == 200
+    assert all(item["credential"]["domain"] != domain for item in response.json()["items"])
+
+
+@pytest.mark.asyncio
+async def test_dead_pt_site_existing_task_is_disabled_and_rejected(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:raingfh.top", "raingfh.top", {"c_secure_uid": "7"},
+        provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "Raing", "pt_signin", 86400, {
+            "url": "https://raingfh.top/attendance.php",
+            "credential_domain": "raingfh.top",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": False,
+            "discovered": True,
+        }, credential.id,
+    )
+    execution = app.state.queue.enqueue_now(task.id)
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        stored_task = session.get(AutomationRecord, task.id)
+        config = json.loads(stored_task.config_json)
+        stored_execution = session.get(ExecutionRecord, execution.id)
+        assert stored_task.enabled is False
+        assert config["sign_in_enabled"] is False
+        assert config["sign_in_supported"] is False
+        assert stored_execution.status == "cancelled"
+        assert stored_execution.error == "站点已停用"
+
+    result = await PtSignInHandler().run(RunContext(
+        "dead-site", {"url": "https://raingfh.top/attendance.php"}, {}, [],
+    ))
+    assert result.outcome == RunOutcome.FAILED
+    assert result.message == "PT 站点已停用"
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        ("Page.goto: net::ERR_NAME_NOT_RESOLVED", "PT 站域名无法解析"),
+        ("Page.goto: net::ERR_CONNECTION_REFUSED", "PT 站拒绝连接"),
+        ("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE", "PT 站返回了浏览器无法处理的 HTTP 响应"),
+        ("Page.goto: net::ERR_TIMED_OUT", "PT 站网络连接超时"),
+    ],
+)
+def test_playwright_navigation_errors_are_structured(error, message):
+    result = playwright_error_result("https://tracker.example/", RuntimeError(error))
+
+    assert result.outcome == RunOutcome.FAILED
+    assert result.message == message
+    assert error in result.details["error"]
+
 
 def test_hdvideo_uses_current_catalog_domain():
     discovery = discover_pt_site("www.hdvideo.top", {"c_secure_uid"})
@@ -886,6 +977,31 @@ def test_hdvideo_discovered_task_migrates_to_attendance_page(settings):
     with app.state.sessions() as session:
         config = json.loads(session.get(AutomationRecord, task.id).config_json)
         assert config["url"] == "https://hdvideo.top/attendance.php"
+
+
+def test_sunnypt_discovered_task_migrates_routes_and_profile(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:sunnypt.top", "sunnypt.top", {"c_secure_uid": "7"},
+        provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "sunnypt.top", "pt_signin", 86400, {
+            "url": "https://sunnypt.top/attendance.php",
+            "credential_domain": "sunnypt.top",
+            "discovered": True,
+        }, credential.id,
+    )
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        record = session.get(AutomationRecord, task.id)
+        config = json.loads(record.config_json)
+        assert record.name == "SunnyPT"
+        assert config["url"] == "https://sunnypt.top/user/attendance"
+        assert config["profile_url"] == "https://sunnypt.top/user/profile"
+        assert config["discovery_strategy"] == "generic_browser"
 
 
 @pytest.mark.asyncio

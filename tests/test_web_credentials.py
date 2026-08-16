@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from autosurf.automations.browser_session import playwright_cookies
-from autosurf.automations.pt_signin import RousiAdapter
+from autosurf.automations.pt_signin import RousiAdapter, web_storage_init_script
 from autosurf.config import Settings
 from autosurf.domain.models import RunContext, RunOutcome
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord
@@ -55,7 +55,7 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
             json={"base_url": "http://192.168.1.50:18980"},
         )
         script = generated.text
-        first_key = re.search(r'const uploadKey = "([^"]+)";', script).group(1)
+        first_key = re.search(r'"uploadKey": "([^"]+)"', script).group(1)
         denied = await client.post(
             "/api/web-credentials/rousi/token",
             headers={"Authorization": "Bearer wrong"},
@@ -74,7 +74,7 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
             auth=auth,
             json={"base_url": "https://autosurf.example.test"},
         )
-        second_key = re.search(r'const uploadKey = "([^"]+)";', regenerated.text).group(1)
+        second_key = re.search(r'"uploadKey": "([^"]+)"', regenerated.text).group(1)
         old_key = await client.post(
             "/api/web-credentials/rousi/token",
             headers={"Authorization": f"Bearer {first_key}"},
@@ -91,7 +91,7 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
     assert 'filename="autosurf-web-credential-sync.user.js"' in generated.headers["content-disposition"]
     assert "// @name         AutoSurf Web 凭据同步" in script
     assert "// @match        https://rousi.pro/*" in script
-    assert 'const sourceName = "Rousi";' in script
+    assert '"name": "Rousi"' in script
     assert "// @connect      192.168.1.50" in script
     assert "http://192.168.1.50:18980/api/web-credentials/rousi/token" in script
     assert 'class="trigger"' in script
@@ -133,6 +133,92 @@ async def test_rousi_userscript_rotates_write_key_and_encrypts_token(settings):
         rebound = session.get(AutomationRecord, legacy_task.id)
         assert rebound.credential_id == record.id
         assert rebound.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_bundled_userscript_syncs_mteam_storage_and_rebinds_task(settings):
+    app = create_app(settings)
+    legacy = app.state.credentials.upsert(
+        "manual:kp.m-team.cc", "kp.m-team.cc", {}, provider="manual",
+    )
+    task = app.state.automations.create(
+        "M-Team", "pt_signin", 86400, {
+            "url": "https://kp.m-team.cc/",
+            "credential_domain": "kp.m-team.cc",
+            "discovery_strategy": "custom_required",
+            "sign_in_supported": False,
+            "profile_refresh_supported": False,
+            "sign_in_enabled": False,
+            "profile_refresh_enabled": False,
+            "discovered": True,
+        }, legacy.id,
+    )
+    with app.state.sessions.begin() as session:
+        session.get(AutomationRecord, task.id).enabled = False
+
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    values = {"auth": "mteam-auth-token-value", "did": "device-123", "visitorId": "visitor-456"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        generated = await client.post(
+            "/api/v1/web-credentials/userscript", auth=auth,
+            json={"base_url": "http://192.168.1.50:18980"},
+        )
+        script = generated.text
+        mteam_key = re.search(
+            r'"key": "mteam".*?"uploadKey": "([^"]+)"', script,
+        ).group(1)
+        rejected = await client.post(
+            "/api/web-credentials/mteam/values",
+            headers={"Authorization": f"Bearer {mteam_key}"},
+            json={"values": {**values, "unexpected": "value"}},
+        )
+        uploaded = await client.post(
+            "/api/web-credentials/mteam/values",
+            headers={"Authorization": f"Bearer {mteam_key}"},
+            json={"values": values},
+        )
+        statuses = await client.get("/api/v1/web-credentials", auth=auth)
+        candidates = await client.get("/api/v1/pt-signin/candidates", auth=auth)
+
+    assert generated.status_code == 200
+    assert "// @match        https://rousi.pro/*" in script
+    assert "// @match        https://kp.m-team.cc/*" in script
+    assert "auth" in script and "did" in script and "visitorId" in script
+    assert all(value not in script for value in values.values())
+    assert rejected.status_code == 422
+    assert uploaded.status_code == 200
+    mteam_status = next(item for item in statuses.json()["items"] if item["source_key"] == "mteam")
+    assert mteam_status["credential_configured"] is True
+    assert mteam_status["configured_keys"] == ["auth", "did", "visitorId"]
+    mteam = next(item for item in candidates.json()["items"] if item["site_key"] == "kp.m-team.cc")
+    assert mteam["strategy"] == "web_storage_browser"
+    assert mteam["supported"] is True
+
+    with app.state.sessions() as session:
+        record = session.scalar(select(CredentialRecord).where(
+            CredentialRecord.name == "web-storage:kp.m-team.cc",
+        ))
+        assert record is not None
+        assert all(value not in record.encrypted_payload for value in values.values())
+        decrypted, browser_cookies = app.state.credentials.credential_values_from_payload(
+            record.encrypted_payload,
+        )
+        assert decrypted == values
+        assert browser_cookies == []
+        rebound = session.get(AutomationRecord, task.id)
+        assert rebound.credential_id == record.id
+        assert rebound.enabled is True
+
+
+def test_web_storage_init_script_injects_all_values_for_target_host():
+    script = web_storage_init_script(
+        "https://kp.m-team.cc/", {"auth": "secret-auth", "did": "device"},
+    )
+    assert '"hostname": "kp.m-team.cc"' in script
+    assert '"auth": "secret-auth"' in script
+    assert '"did": "device"' in script
+    assert "localStorage.setItem(key, value)" in script
 
 
 @pytest.mark.asyncio

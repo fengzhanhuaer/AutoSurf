@@ -103,6 +103,8 @@ async def test_management_session_login_and_logout(settings):
         assert 'id="settings-tab-web-credentials"' in app_page.text
         assert 'id="token-sync-base-url"' in app_page.text
         assert 'id="token-script-button"' in app_page.text
+        assert 'id="web-credential-rows"' in app_page.text
+        assert "M-Team" not in app_page.text
         assert 'id="copy-uuid-button"' in app_page.text
         assert 'id="copy-password-button"' in app_page.text
         assert 'id="settings-tab-upgrade"' in app_page.text
