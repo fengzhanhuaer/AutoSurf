@@ -15,20 +15,26 @@ from autosurf.pt_discovery import discover_pt_site
 
 DEFAULT_ALREADY_PATTERNS = (
     r"今日已签到",
+    r"今日已簽到",
     r"今天已签到",
+    r"今天已簽到",
     r"已经签到",
+    r"已經簽到",
     r"今天已经签过到了",
     r"\[已签到\]",
     r"已签到卡",
     r"已签到.{0,20}无需再签",
     r"签到已得",
+    r"簽到已得",
     r"already\s+(?:checked|signed)",
     r"checked\s+in\s+today",
     r"\bchecked\s+in\b",
 )
 DEFAULT_SUCCESS_PATTERNS = (
     r"签到成功",
+    r"簽到成功",
     r"本次签到获得",
+    r"本次簽到獲得",
     r"今天签到您获得.{0,24}(?:积分|魔力值?|金币|上传量)",
     r"签到已得",
     r"(?:check[ -]?in|sign[ -]?in).{0,16}success",
@@ -882,6 +888,8 @@ async def extract_site_signin_history(page: Any) -> list[dict[str, str]]:
             const value = String(date || '').slice(0, 10);
             if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return;
             const text = String(reward || '').replace(/\\s+/g, ' ').trim().slice(0, 100);
+            const current = entries.get(value);
+            if (current?.reward && !text) return;
             entries.set(value, {date: value, reward: text});
           };
 

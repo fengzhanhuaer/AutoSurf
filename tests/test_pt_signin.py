@@ -78,6 +78,10 @@ def test_pt_page_classification_distinguishes_common_results():
     assert classify_pt_page(
         "https://hdcity.city/", 200, "assignment_turned_in Checked in"
     ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
+        "https://discfan.net/attendance.php", 200,
+        "簽到成功，本次簽到獲得 300 個魔力值",
+    ) == RunOutcome.SUCCESS
     interrupted = (
         "已断签2天，当前可补签天数为113天，请点击选择补签弥补连续天数，"
         "或放弃补签重新开始签到。首次签到或重新开始签到可获得100个魔力值"
@@ -139,6 +143,31 @@ async def test_hhanclub_calendar_history_uses_claimed_days_and_rewards():
         {"date": "2026-07-31", "reward": "80"},
         {"date": "2026-08-01", "reward": "85"},
         {"date": "2026-08-16", "reward": "20"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fullcalendar_history_keeps_reward_over_empty_background_event():
+    class Body:
+        async def inner_text(self):
+            return ""
+
+    class Page:
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        async def evaluate(self, script):
+            assert "const current = entries.get(value)" in script
+            assert "if (current?.reward && !text) return" in script
+            return [
+                {"date": "2026-08-15", "reward": "300"},
+                {"date": "2026-08-16", "reward": "300"},
+            ]
+
+    assert await extract_site_signin_history(Page()) == [
+        {"date": "2026-08-15", "reward": "300"},
+        {"date": "2026-08-16", "reward": "300"},
     ]
 
 
