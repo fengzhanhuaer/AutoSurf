@@ -20,6 +20,8 @@ DEFAULT_ALREADY_PATTERNS = (
     r"今天已簽到",
     r"已经签到",
     r"已經簽到",
+    r"已经打卡",
+    r"已經打卡",
     r"今天已经签过到了",
     r"\[已签到\]",
     r"已签到卡",
@@ -558,14 +560,14 @@ async def rendered_signin_status_text(page: Any) -> str:
     for frame in frames:
         with suppress(Exception):
             locator = frame.locator(
-                "text=/checked\\s+in|今日已签到|今天已签到|\\[已签到\\]/i"
+                "text=/checked\\s+in|今日已签到|今天已签到|已经打卡|已經打卡|\\[已签到\\]/i"
             )
             if await locator.count():
                 parts.append("Checked in")
                 continue
         with suppress(Exception):
             value = await frame.evaluate(r"""() => {
-              const status = /(?:checked\s+in|今日已签到|今天已签到|\[已签到\])/i;
+              const status = /(?:checked\s+in|今日已签到|今天已签到|已经打卡|已經打卡|\[已签到\])/i;
               const result = [];
               for (const element of document.querySelectorAll('*')) {
                 const values = [

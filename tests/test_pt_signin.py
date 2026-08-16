@@ -642,13 +642,14 @@ async def test_rendered_signin_status_reads_frame_attributes_and_pseudo_content(
         def __init__(self, value):
             self.value = value
 
-        async def evaluate(self, _script):
+        async def evaluate(self, script):
+            assert "已经打卡" in script
             return self.value
 
     page = Frame("")
-    page.frames = [page, Frame("Checked in")]
+    page.frames = [page, Frame("已经打卡")]
 
-    assert await rendered_signin_status_text(page) == "Checked in"
+    assert await rendered_signin_status_text(page) == "已经打卡"
 
 
 @pytest.mark.asyncio
@@ -770,7 +771,7 @@ def test_haidan_supports_daily_checkin_and_completed_label():
     assert discovery.sign_in_supported is True
     assert discovery.profile_refresh_supported is True
     assert classify_pt_page(
-        "https://haidan.cc/index.php", 200, "每日打卡 已签到卡", {},
+        "https://www.haidan.cc/index.php", 200, "每日打卡 已经打卡", {},
     ) == RunOutcome.ALREADY_DONE
 
 
