@@ -371,6 +371,16 @@ def web_storage_init_script(url: str, values: dict[str, str]) -> str:
     )
 
 
+def profile_refresh_skip_result(sign_in: RunResult | None, url: str) -> RunResult | None:
+    if sign_in is None or sign_in.outcome != RunOutcome.AUTH_EXPIRED:
+        return None
+    return RunResult(
+        RunOutcome.AUTH_EXPIRED,
+        "登录已失效，未刷新个人信息",
+        {"url": url},
+    )
+
+
 class PtSignInHandler:
     type = "pt_signin"
 
@@ -450,9 +460,13 @@ class PtSignInHandler:
                                 )
                     profile_result = None
                     if profile_refresh_enabled:
-                        profile_result = await refresh_pt_profile_page(
-                            page, context, url, credential_domain, timeout_ms
+                        profile_result = profile_refresh_skip_result(
+                            sign_in_result, page.url or url,
                         )
+                        if profile_result is None:
+                            profile_result = await refresh_pt_profile_page(
+                                page, context, url, credential_domain, timeout_ms
+                            )
                     return with_browser_details(
                         combine_pt_action_results(sign_in_result, profile_result), browser_session,
                     )
@@ -584,7 +598,9 @@ def classify_pt_page(url: str, status_code: int | None, body: str,
         return RunOutcome.BLOCKED
     if status_code == 403:
         return RunOutcome.AUTH_EXPIRED
-    if any(value in lowered_url for value in ("login.php", "takelogin", "/login?", "/login/")):
+    if any(value in lowered_url for value in (
+        "login.php", "takelogin", "/login?", "/login/", "/auth/sign-in", "/sign-in",
+    )):
         return RunOutcome.AUTH_EXPIRED
     if _matches(body, SIGNIN_ACTION_REQUIRED_PATTERNS):
         return RunOutcome.FAILED

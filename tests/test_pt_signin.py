@@ -23,6 +23,7 @@ from autosurf.automations.pt_signin import (
     normalize_pt_profile_stats,
     page_body_text,
     playwright_error_result,
+    profile_refresh_skip_result,
     sanitize_pt_profile_stats,
     profile_url_from_cookies,
     pt_home_url,
@@ -309,6 +310,16 @@ def test_site_signin_history_normalization_rejects_invalid_entries():
     assert classify_pt_page(
         "https://tracker.test/login.php", 200, "欢迎"
     ) == RunOutcome.AUTH_EXPIRED
+    assert classify_pt_page(
+        "https://sunnypt.top/auth/sign-in", 200, ""
+    ) == RunOutcome.AUTH_EXPIRED
+    skipped_refresh = profile_refresh_skip_result(
+        RunResult(RunOutcome.AUTH_EXPIRED, "登录已失效"),
+        "https://sunnypt.top/auth/sign-in",
+    )
+    assert skipped_refresh is not None
+    assert skipped_refresh.outcome == RunOutcome.AUTH_EXPIRED
+    assert skipped_refresh.message == "登录已失效，未刷新个人信息"
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "获得 [10]", {"success_patterns": ["获得 [10]"]}
     ) == RunOutcome.SUCCESS
