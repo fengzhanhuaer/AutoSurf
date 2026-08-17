@@ -1179,7 +1179,13 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
             return "签到成功，本次签到获得 10 魔力值" if self.page.submitted else "签到"
 
         async def is_visible(self):
-            return True
+            return self.kind != "captcha" or self.page.captcha_ready
+
+        async def wait_for(self, *, state, timeout):
+            assert self.kind == "captcha"
+            assert state == "visible"
+            assert timeout == 5_000
+            self.page.captcha_ready = True
 
         async def screenshot(self, **_kwargs):
             return b"captcha-image"
@@ -1212,6 +1218,7 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
         def __init__(self):
             self.url = url
             self.answer = None
+            self.captcha_ready = False
             self.submitted = False
 
         def locator(self, selector):
@@ -1229,6 +1236,7 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
     assert result.message == "PT 站签到成功"
     assert result.details["clicked"] is True
     assert page.answer == "MEP5MP"
+    assert page.captcha_ready is True
     assert "MEP5MP" not in json.dumps(result.details)
 
 

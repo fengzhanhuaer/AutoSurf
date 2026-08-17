@@ -841,6 +841,8 @@ class NexusPhpCaptchaAdapter:
         captcha = form.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
         answer = form.locator('input[name="imagestring"]').first
         submit = form.locator('input[type="submit"], button[type="submit"]').first
+        with suppress(Exception):
+            await captcha.wait_for(state="visible", timeout=5_000)
         if not all([
             await form.is_visible(),
             await captcha.is_visible(),
