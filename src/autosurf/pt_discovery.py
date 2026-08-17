@@ -75,6 +75,7 @@ PT_SITE_CATALOG = (
         "sunnypt.top", "SunnyPT", "/user/attendance",
     ),
     PtSiteDefinition("oshen.win", "OshenPT", target_domain="www.oshen.win"),
+    PtSiteDefinition("pt.soulvoice.club", "SoulVoice"),
 )
 
 

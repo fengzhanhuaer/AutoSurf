@@ -5,7 +5,7 @@ import pytest
 from autosurf.automations import captcha_ocr
 
 
-def test_oshen_captcha_preprocessing_removes_colored_noise():
+def test_nexusphp_captcha_preprocessing_removes_colored_noise():
     source = np.full((40, 150, 3), 255, dtype=np.uint8)
     source[8:20, 12:20] = (0, 0, 0)
     source[20:32, 22:30] = (0, 0, 0)
@@ -13,7 +13,7 @@ def test_oshen_captcha_preprocessing_removes_colored_noise():
     encoded, payload = cv2.imencode(".png", source)
     assert encoded is True
 
-    prepared = captcha_ocr.preprocess_oshen_captcha(payload.tobytes())
+    prepared = captcha_ocr.preprocess_nexusphp_captcha(payload.tobytes())
     image = cv2.imdecode(np.frombuffer(prepared, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 
     assert image is not None
@@ -31,7 +31,7 @@ def test_oshen_captcha_preprocessing_removes_colored_noise():
         ("", None),
     ],
 )
-def test_oshen_captcha_requires_exactly_six_alphanumeric_characters(
+def test_nexusphp_captcha_requires_exactly_six_alphanumeric_characters(
     monkeypatch, classified, expected,
 ):
     class Engine:
@@ -39,7 +39,7 @@ def test_oshen_captcha_requires_exactly_six_alphanumeric_characters(
             assert image == b"prepared"
             return classified
 
-    monkeypatch.setattr(captcha_ocr, "preprocess_oshen_captcha", lambda _image: b"prepared")
+    monkeypatch.setattr(captcha_ocr, "preprocess_nexusphp_captcha", lambda _image: b"prepared")
     monkeypatch.setattr(captcha_ocr, "_ocr_engine", lambda: Engine())
 
-    assert captcha_ocr.recognize_oshen_captcha(b"source") == expected
+    assert captcha_ocr.recognize_nexusphp_captcha(b"source") == expected

@@ -5,19 +5,19 @@ from functools import lru_cache
 from typing import Any
 
 
-OSHEN_CAPTCHA_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
+NEXUSPHP_CAPTCHA_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
 
 
-def recognize_oshen_captcha(image: bytes) -> str | None:
+def recognize_nexusphp_captcha(image: bytes) -> str | None:
     try:
-        prepared = preprocess_oshen_captcha(image)
+        prepared = preprocess_nexusphp_captcha(image)
         value = str(_ocr_engine().classification(prepared) or "").strip().upper()
     except Exception:
         return None
-    return value if OSHEN_CAPTCHA_PATTERN.fullmatch(value) else None
+    return value if NEXUSPHP_CAPTCHA_PATTERN.fullmatch(value) else None
 
 
-def preprocess_oshen_captcha(image: bytes) -> bytes:
+def preprocess_nexusphp_captcha(image: bytes) -> bytes:
     if not image or len(image) > 1_000_000:
         raise ValueError("invalid captcha image")
 

@@ -15,7 +15,7 @@ from autosurf.automations.browser_session import (
     validated_http_url,
     with_browser_details,
 )
-from autosurf.automations.captcha_ocr import recognize_oshen_captcha
+from autosurf.automations.captcha_ocr import recognize_nexusphp_captcha
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.pt_discovery import discover_pt_site, is_ignored_pt_domain
 
@@ -818,10 +818,16 @@ class OpenCdAdapter:
         )
 
 
-class OshenPtAdapter:
+class NexusPhpCaptchaAdapter:
+    site_name = "PT 站"
+    domains: tuple[str, ...] = ()
+
     def matches(self, url: str) -> bool:
         hostname = (urlparse(url).hostname or "").lower().rstrip(".")
-        return hostname == "oshen.win" or hostname.endswith(".oshen.win")
+        return any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in self.domains
+        )
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
         body = await page_body_text(page)
@@ -843,15 +849,15 @@ class OshenPtAdapter:
         ]):
             return RunResult(
                 RunOutcome.FAILED,
-                "OshenPT 签到页没有找到完整的验证码表单",
+                f"{self.site_name} 签到页没有找到完整的验证码表单",
                 {"url": page.url, "clicked": False},
             )
 
-        value = recognize_oshen_captcha(await captcha.screenshot(type="png"))
+        value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
         if value is None:
             return RunResult(
                 RunOutcome.BLOCKED,
-                "OshenPT 图片验证码未能可靠识别",
+                f"{self.site_name} 图片验证码未能可靠识别",
                 {"url": page.url, "clicked": False},
             )
 
@@ -871,14 +877,24 @@ class OshenPtAdapter:
         ):
             return RunResult(
                 RunOutcome.FAILED,
-                "OshenPT 图片验证码识别错误",
+                f"{self.site_name} 图片验证码识别错误",
                 {"url": page.url, "status_code": status_code, "clicked": True},
             )
         return RunResult(
             RunOutcome.FAILED,
-            "OshenPT 提交签到后未识别到结果",
+            f"{self.site_name} 提交签到后未识别到结果",
             {"url": page.url, "status_code": status_code, "clicked": True},
         )
+
+
+class OshenPtAdapter(NexusPhpCaptchaAdapter):
+    site_name = "OshenPT"
+    domains = ("oshen.win",)
+
+
+class SoulVoiceAdapter(NexusPhpCaptchaAdapter):
+    site_name = "SoulVoice"
+    domains = ("soulvoice.club",)
 
 
 class TjuptAdapter:

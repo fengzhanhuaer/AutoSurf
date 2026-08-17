@@ -13,6 +13,7 @@ from autosurf.automations.pt_signin import (
     OpenCdAdapter,
     OshenPtAdapter,
     PtSignInHandler,
+    SoulVoiceAdapter,
     SunnyPtAdapter,
     TjuptAdapter,
     ZhuqueAdapter,
@@ -1144,9 +1145,18 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 
 
 @pytest.mark.asyncio
-async def test_oshenpt_adapter_recognizes_captcha_and_confirms_success(monkeypatch):
+@pytest.mark.parametrize(
+    ("adapter", "url"),
+    [
+        (OshenPtAdapter(), "https://www.oshen.win/attendance.php"),
+        (SoulVoiceAdapter(), "https://pt.soulvoice.club/attendance.php"),
+    ],
+)
+async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
+    monkeypatch, adapter, url,
+):
     monkeypatch.setattr(
-        "autosurf.automations.pt_signin.recognize_oshen_captcha",
+        "autosurf.automations.pt_signin.recognize_nexusphp_captcha",
         lambda _image: "MEP5MP",
     )
 
@@ -1197,10 +1207,10 @@ async def test_oshenpt_adapter_recognizes_captcha_and_confirms_success(monkeypat
             return resolve()
 
     class Page:
-        url = "https://www.oshen.win/attendance.php"
         frames = None
 
         def __init__(self):
+            self.url = url
             self.answer = None
             self.submitted = False
 
@@ -1211,7 +1221,7 @@ async def test_oshenpt_adapter_recognizes_captcha_and_confirms_success(monkeypat
             return Navigation()
 
     page = Page()
-    result = await OshenPtAdapter().sign_in(
+    result = await adapter.sign_in(
         page, RunContext("test", {"url": page.url}, {"sid": "secret"}, []),
     )
 
@@ -1223,9 +1233,24 @@ async def test_oshenpt_adapter_recognizes_captcha_and_confirms_success(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_oshenpt_adapter_does_not_submit_unreliable_captcha(monkeypatch):
+@pytest.mark.parametrize(
+    ("adapter", "url", "expected_message"),
+    [
+        (
+            OshenPtAdapter(), "https://www.oshen.win/attendance.php",
+            "OshenPT 图片验证码未能可靠识别",
+        ),
+        (
+            SoulVoiceAdapter(), "https://pt.soulvoice.club/attendance.php",
+            "SoulVoice 图片验证码未能可靠识别",
+        ),
+    ],
+)
+async def test_nexusphp_captcha_adapter_does_not_submit_unreliable_value(
+    monkeypatch, adapter, url, expected_message,
+):
     monkeypatch.setattr(
-        "autosurf.automations.pt_signin.recognize_oshen_captcha",
+        "autosurf.automations.pt_signin.recognize_nexusphp_captcha",
         lambda _image: None,
     )
 
@@ -1256,17 +1281,21 @@ async def test_oshenpt_adapter_does_not_submit_unreliable_captcha(monkeypatch):
             raise AssertionError("unreliable captcha must not be submitted")
 
     class Page:
-        url = "https://www.oshen.win/attendance.php"
         frames = None
+
+        def __init__(self):
+            self.url = url
 
         def locator(self, selector):
             return Locator("body" if selector == "body" else "form")
 
-    result = await OshenPtAdapter().sign_in(
-        Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
+    page = Page()
+    result = await adapter.sign_in(
+        page, RunContext("test", {"url": page.url}, {"sid": "secret"}, []),
     )
 
     assert result.outcome == RunOutcome.BLOCKED
+    assert result.message == expected_message
     assert result.details["clicked"] is False
 
 
@@ -1626,14 +1655,19 @@ def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
     assert sunny.profile_url is None
 
 
-def test_oshen_and_0ff_are_cataloged_with_expected_actions():
+def test_oshen_soulvoice_and_0ff_are_cataloged_with_expected_actions():
     oshen = discover_pt_site("www.oshen.win", {"c_secure_uid"})
+    soulvoice = discover_pt_site("pt.soulvoice.club", {"c_secure_uid"})
     zeroff = discover_pt_site("pt.0ff.cc", {"c_secure_uid"})
 
     assert oshen is not None
     assert oshen.site_key == "oshen.win"
     assert oshen.name == "OshenPT"
     assert oshen.url == "https://www.oshen.win/attendance.php"
+    assert soulvoice is not None
+    assert soulvoice.site_key == "pt.soulvoice.club"
+    assert soulvoice.name == "SoulVoice"
+    assert soulvoice.url == "https://pt.soulvoice.club/attendance.php"
     assert zeroff is not None
     assert zeroff.sign_in_supported is True
     assert zeroff.profile_refresh_supported is True
@@ -1771,6 +1805,37 @@ def test_sunnypt_discovered_task_migrates_current_attendance_route(settings):
         assert config["discovery_strategy"] == "generic_browser"
 
 
+def test_soulvoice_discovered_task_migrates_to_catalog(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:pt.soulvoice.club", "pt.soulvoice.club",
+        {"c_secure_uid": "7"}, provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "pt.soulvoice.club", "pt_signin", 86400, {
+            "url": "https://pt.soulvoice.club/attendance.php",
+            "credential_domain": "pt.soulvoice.club",
+            "discovered": True,
+            "discovery_reason": "cookie_signature",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+            "sign_in_supported": True,
+            "profile_refresh_supported": True,
+        }, credential.id,
+    )
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        record = session.get(AutomationRecord, task.id)
+        config = json.loads(record.config_json)
+        assert record.name == "SoulVoice"
+        assert config["url"] == "https://pt.soulvoice.club/attendance.php"
+        assert config["discovery_reason"] == "site_catalog"
+        assert config["sign_in_enabled"] is True
+        assert config["profile_refresh_enabled"] is True
+
+
 def test_newly_cataloged_0ff_task_enables_profile_refresh_once(settings):
     app = create_app(settings)
     credential = app.state.credentials.upsert(
@@ -1828,6 +1893,7 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     handler = app.state.registry.get("pt_signin")
     assert any(isinstance(adapter, MTeamAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, OshenPtAdapter) for adapter in handler.adapters)
+    assert any(isinstance(adapter, SoulVoiceAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, SunnyPtAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, ZhuqueAdapter) for adapter in handler.adapters)
     credential = app.state.credentials.upsert(
