@@ -127,7 +127,7 @@ async def persistent_chromium_session(
                 "env": launch_env,
                 "args": ["--disable-dev-shm-usage"],
             }
-            user_agent = run_context.config.get("user_agent")
+            user_agent = run_context.config.get("user_agent") or run_context.user_agent
             if user_agent:
                 kwargs["user_agent"] = str(user_agent)
             browser_context = await playwright.chromium.launch_persistent_context(

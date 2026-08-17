@@ -37,6 +37,7 @@ class RunContext:
     config: dict[str, Any]
     cookies: dict[str, str]
     browser_cookies: list[dict[str, Any]] | None = None
+    user_agent: str | None = None
 
 
 class AutomationHandler(Protocol):

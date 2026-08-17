@@ -519,7 +519,7 @@ function renderPeriodicCredentialOptions() {
 
 function applyPeriodicTemplate() {
   const template = elements.periodicTemplate.value;
-  const browser = template !== "custom_http";
+  const browser = template === "custom_browser";
   elements.periodicHandler.value = browser ? "browser_signin" : "http_signin";
   elements.periodicMethod.value = "GET";
   if (template !== "nodeseek") {
@@ -538,16 +538,18 @@ function applyPeriodicTemplate() {
     return;
   }
   elements.periodicName.value = "NodeSeek";
-  elements.periodicUrl.value = "https://www.nodeseek.com/board";
-  elements.periodicWaitSelector.value = ".head-info";
+  elements.periodicHandler.value = "http_signin";
+  elements.periodicMethod.value = "POST";
+  elements.periodicUrl.value = "https://www.nodeseek.com/api/attendance?random=false";
+  elements.periodicWaitSelector.value = "";
   elements.periodicClickSelector.value = "";
-  elements.periodicClickRole.value = "button";
-  elements.periodicClickName.value = "鸡腿 x 5";
-  elements.periodicClickExact.checked = true;
-  elements.periodicWaitAfter.value = "2000";
-  elements.periodicSuccessPatterns.value = "今日签到获得鸡腿\\d+个";
-  elements.periodicAlreadyPatterns.value = "今日签到获得鸡腿\\d+个";
-  elements.periodicAuthPatterns.value = "登录后.*签到|请先登录";
+  elements.periodicClickRole.value = "";
+  elements.periodicClickName.value = "";
+  elements.periodicClickExact.checked = false;
+  elements.periodicWaitAfter.value = "0";
+  elements.periodicSuccessPatterns.value = '"success"\\s*:\\s*true\n签到成功';
+  elements.periodicAlreadyPatterns.value = "今日已签到\n已经签到\n重复签到";
+  elements.periodicAuthPatterns.value = "请先登录\n未登录\n登录后";
   renderPeriodicCredentialOptions();
 }
 
@@ -622,7 +624,7 @@ function renderPeriodicSites() {
     const nameCell = document.createElement("td");
     const link = document.createElement("a");
     link.className = "site-link-text";
-    link.href = site.url;
+    link.href = site.site_url || site.url;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.textContent = site.name;

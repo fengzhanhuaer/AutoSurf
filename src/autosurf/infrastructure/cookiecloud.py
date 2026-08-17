@@ -19,11 +19,14 @@ class CookieCloudStore:
         self.secrets = secrets
         self.credentials = credentials
 
-    def put(self, payload: dict[str, Any]) -> str:
+    def put(self, payload: dict[str, Any], user_agent: str | None = None) -> str:
         uuid = str(payload.get("uuid") or payload.get("key") or "").strip()
         if not uuid or len(uuid) > 128:
             raise ValueError("CookieCloud payload requires a valid uuid")
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        stored_payload = dict(payload)
+        if user_agent:
+            stored_payload["_autosurf_user_agent"] = str(user_agent)[:1024]
+        raw = json.dumps(stored_payload, ensure_ascii=False, separators=(",", ":"))
         with self.sessions.begin() as session:
             blob = session.get(CookieCloudBlob, uuid)
             if blob is None:
@@ -85,6 +88,7 @@ class CookieCloudStore:
 
         decrypted = decrypt_cookiecloud(uuid, password, str(payload.get("encrypted", "")),
                                         str(payload.get("crypto_type", "legacy")))
+        user_agent = payload.get("_autosurf_user_agent")
         grouped: dict[str, dict[tuple[str, str, str], dict[str, Any]]] = {}
         for bucket, entries in decrypted["cookie_data"].items():
             if not isinstance(entries, list):
@@ -112,7 +116,8 @@ class CookieCloudStore:
             if not cookies:
                 continue
             record = self.credentials.upsert_cookie_records(
-                f"cookiecloud:{uuid}:{domain}", domain, cookies, "cookiecloud"
+                f"cookiecloud:{uuid}:{domain}", domain, cookies, "cookiecloud",
+                str(user_agent) if isinstance(user_agent, str) else None,
             )
             imported.append({"id": record.id, "domain": domain, "version": record.version,
                              "cookie_count": len(cookies)})

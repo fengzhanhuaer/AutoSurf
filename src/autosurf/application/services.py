@@ -20,6 +20,7 @@ from autosurf.pt_discovery import (
     is_ignored_pt_domain,
     pt_site_domain_aliases,
 )
+from autosurf.periodic_templates import apply_periodic_template
 
 
 class CredentialService:
@@ -33,10 +34,13 @@ class CredentialService:
         return self._upsert_payload(name, domain, cookies, provider)
 
     def upsert_cookie_records(self, name: str, domain: str, cookies: list[dict[str, Any]],
-                              provider: str = "cookiecloud") -> CredentialRecord:
+                              provider: str = "cookiecloud",
+                              user_agent: str | None = None) -> CredentialRecord:
         if not cookies:
             raise ValueError("cookie records cannot be empty")
         payload = {"format": "cookie_records_v1", "cookies": cookies}
+        if user_agent:
+            payload["user_agent"] = str(user_agent)[:1024]
         return self._upsert_payload(name, domain, payload, provider)
 
     def upsert_web_storage(self, name: str, domain: str, payload: dict[str, Any]) -> CredentialRecord:
@@ -73,6 +77,15 @@ class CredentialService:
         _, cookies = self.credential_values_from_payload(payload)
         return cookies
 
+    def browser_user_agent_from_payload(self, payload: str | None) -> str | None:
+        if payload is None:
+            return None
+        value = self.secrets.decrypt_json(payload)
+        if not isinstance(value, dict) or value.get("format") != "cookie_records_v1":
+            return None
+        user_agent = value.get("user_agent")
+        return str(user_agent)[:1024] if isinstance(user_agent, str) and user_agent.strip() else None
+
     def credential_values_from_payload(self, payload: str | None) -> tuple[dict[str, str], list[dict[str, Any]] | None]:
         if payload is None:
             return {}, None
@@ -106,7 +119,11 @@ class CredentialService:
         if not records:
             return None, None
         merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+        user_agent = None
         for record in sorted(records, key=lambda item: (item.updated_at, item.domain, item.name)):
+            current_user_agent = self.browser_user_agent_from_payload(record.encrypted_payload)
+            if current_user_agent:
+                user_agent = current_user_agent
             _, browser_cookies = self.credential_values_from_payload(record.encrypted_payload)
             if browser_cookies is None:
                 continue
@@ -126,6 +143,8 @@ class CredentialService:
             "format": "cookie_records_v1",
             "cookies": list(merged.values()),
         }
+        if user_agent:
+            payload["user_agent"] = user_agent
         return max(record.version for record in records), self.secrets.encrypt_json(payload)
 
 
@@ -323,8 +342,12 @@ class ExecutionService:
                 cookies, browser_cookies = self.credentials.credential_values_from_payload(
                     execution.credential_payload
                 )
+                browser_user_agent = self.credentials.browser_user_agent_from_payload(
+                    execution.credential_payload
+                )
                 context = RunContext(execution_id=execution.id, config=automation_config,
-                                     cookies=cookies, browser_cookies=browser_cookies)
+                                     cookies=cookies, browser_cookies=browser_cookies,
+                                     user_agent=browser_user_agent)
                 handler = self.registry.get(automation.handler_type)
             result = await handler.run(context)
             result_payload = {"outcome": result.outcome, "message": result.message, "details": result.details}
@@ -587,6 +610,26 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
             config["credential_aliases_merged"] = True
             automation.config_json = json.dumps(config, ensure_ascii=False)
     return merged_count
+
+
+def reconcile_periodic_signin_templates(sessions: sessionmaker[Session]) -> int:
+    changed = 0
+    with sessions.begin() as session:
+        automations = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
+        )).all()
+        for automation in automations:
+            try:
+                config = json.loads(automation.config_json)
+            except (TypeError, ValueError):
+                continue
+            handler_type, updated = apply_periodic_template(config, automation.handler_type)
+            if handler_type == automation.handler_type and updated == config:
+                continue
+            automation.handler_type = handler_type
+            automation.config_json = json.dumps(updated, ensure_ascii=False)
+            changed += 1
+    return changed
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:

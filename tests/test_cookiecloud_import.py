@@ -81,6 +81,7 @@ async def test_upload_auto_imports_configured_source(tmp_path):
         }).encode()
         uploaded = await client.post("/cookiecloud/update", content=gzip.compress(upload_body), headers={
             "Content-Type": "application/json", "Content-Encoding": "gzip",
+            "User-Agent": "Chrome-from-cookiecloud/151",
         })
         assert uploaded.status_code == 200
         assert uploaded.json()["imported"] == 1
@@ -90,6 +91,9 @@ async def test_upload_auto_imports_configured_source(tmp_path):
         assert credential.name == "cookiecloud:test-id:example.com"
         assert "secret-session" not in credential.encrypted_payload
         assert app.state.credentials.cookies_for(credential) == {"sid": "secret-session", "theme": "dark"}
+        assert app.state.credentials.browser_user_agent_from_payload(
+            credential.encrypted_payload
+        ) == "Chrome-from-cookiecloud/151"
         assert app.state.credentials.browser_cookies_from_payload(credential.encrypted_payload) == [
             {"name": "sid", "value": "secret-session", "domain": ".example.com", "path": "/",
              "secure": False, "httpOnly": False},

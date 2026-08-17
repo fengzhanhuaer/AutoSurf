@@ -12,6 +12,7 @@ from autosurf.domain.models import ExecutionStatus, RunOutcome, RunResult, utc_n
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
 from autosurf.main import create_app
+from autosurf.application.services import reconcile_periodic_signin_templates
 
 
 @pytest.fixture
@@ -92,7 +93,10 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
     assert rejected.status_code == 422
     assert created.status_code == 201
     assert listed.json()["items"][0]["template_key"] == "nodeseek"
-    assert listed.json()["items"][0]["config"]["click_name"] == "鸡腿 x 5"
+    assert listed.json()["items"][0]["handler_type"] == "http_signin"
+    assert listed.json()["items"][0]["url"] == "https://www.nodeseek.com/api/attendance?random=false"
+    assert listed.json()["items"][0]["site_url"] == "https://www.nodeseek.com/board"
+    assert listed.json()["items"][0]["config"]["method"] == "POST"
     assert scheduled.json()["interval_hours"] == 12
     assert disabled.json()["enabled"] is False
     assert queued.status_code == 202
@@ -108,6 +112,7 @@ def test_periodic_cookiecloud_snapshot_merges_root_and_www(settings):
     login = app.state.credentials.upsert_cookie_records(
         "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
         [{"name": "session", "value": "login", "domain": "www.nodeseek.com", "path": "/"}],
+        user_agent="Chrome-from-cookiecloud/151",
     )
     automation = app.state.automations.create(
         "NodeSeek", "browser_signin", 86400,
@@ -120,6 +125,32 @@ def test_periodic_cookiecloud_snapshot_merges_root_and_www(settings):
         record = session.get(ExecutionRecord, execution.id)
         cookies = app.state.credentials.cookies_from_payload(record.credential_payload)
     assert cookies == {"cf_clearance": "cf", "session": "login"}
+    assert app.state.credentials.browser_user_agent_from_payload(
+        record.credential_payload
+    ) == "Chrome-from-cookiecloud/151"
+
+
+def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
+    app = create_app(settings)
+    nodeseek = app.state.automations.create(
+        "NodeSeek", "browser_signin", 86400,
+        {"template_key": "nodeseek", "url": "https://www.nodeseek.com/board"},
+    )
+    custom = app.state.automations.create(
+        "HTTP", "http_signin", 3600, {"url": "https://example.test/checkin"},
+    )
+
+    assert reconcile_periodic_signin_templates(app.state.sessions) == 1
+
+    with app.state.sessions() as session:
+        migrated = session.get(AutomationRecord, nodeseek.id)
+        untouched = session.get(AutomationRecord, custom.id)
+        migrated_config = json.loads(migrated.config_json)
+        assert migrated.handler_type == "http_signin"
+        assert migrated_config["url"] == "https://www.nodeseek.com/api/attendance?random=false"
+        assert migrated_config["method"] == "POST"
+        assert untouched.handler_type == "http_signin"
+        assert json.loads(untouched.config_json) == {"url": "https://example.test/checkin"}
 
 
 @pytest.mark.asyncio

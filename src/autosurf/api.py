@@ -34,6 +34,7 @@ from autosurf.infrastructure.database import (
     ExecutionRecord,
 )
 from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site, is_ignored_pt_domain
+from autosurf.periodic_templates import apply_periodic_template
 from autosurf.userscripts import (
     WEB_CREDENTIAL_SCRIPT_SOURCES,
     build_web_credential_userscript_bundle,
@@ -792,6 +793,7 @@ def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> 
         raise HTTPException(status_code=422, detail="按按钮文字点击时必须同时填写角色和名称")
 
     config = {
+        "handler_type": handler_type,
         "template_key": data.template_key or None,
         "url": data.url,
         "timeout_seconds": data.timeout_seconds,
@@ -809,6 +811,7 @@ def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> 
         "already_patterns": data.already_patterns,
         "auth_expired_patterns": data.auth_expired_patterns,
     }
+    handler_type, config = apply_periodic_template(config, handler_type)
     try:
         record = request.app.state.automations.create(
             data.name, handler_type, data.interval_hours * 3600, config, data.credential_id
@@ -1405,6 +1408,7 @@ def _periodic_signin_site_view(
         "interval_hours": record.interval_seconds // 3600,
         "next_run_at": record.next_run_at,
         "url": config.get("url"),
+        "site_url": config.get("site_url") or config.get("url"),
         "template_key": config.get("template_key"),
         "credential": credential_view(credential) if credential else None,
         "config": {
@@ -1796,7 +1800,7 @@ def cookiecloud_root() -> dict[str, str]:
 @cookiecloud_router.post("/update")
 def cookiecloud_update(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     try:
-        uuid = request.app.state.cookiecloud.put(payload)
+        uuid = request.app.state.cookiecloud.put(payload, request.headers.get("user-agent"))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     imported = None
