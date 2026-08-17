@@ -5,6 +5,7 @@ const state = {
   ptSites: [],
   ptHistory: { today: null, days: [], items: [], latest_execution: null },
   ptStats: [],
+  periodicSites: [],
   webCredentials: [],
   ptSelection: new Set(),
   selected: "",
@@ -27,9 +28,11 @@ const elements = {
   ptTasksPanel: document.querySelector("#pt-tasks-panel"),
   ptHistoryPanel: document.querySelector("#pt-history-panel"),
   ptStatsPanel: document.querySelector("#pt-stats-panel"),
+  periodicPanel: document.querySelector("#periodic-signin-panel"),
   ptStatsRows: document.querySelector("#pt-stats-rows"),
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
   webCredentialsPanel: document.querySelector("#web-credentials-settings-panel"),
+  siteSettingsPanel: document.querySelector("#site-settings-panel"),
   upgradePanel: document.querySelector("#upgrade-settings-panel"),
   form: document.querySelector("#source-form"),
   selector: document.querySelector("#source-selector"),
@@ -92,6 +95,43 @@ const elements = {
   tokenSyncState: document.querySelector("#token-sync-state"),
   webCredentialRows: document.querySelector("#web-credential-rows"),
   tokenScriptButton: document.querySelector("#token-script-button"),
+  tokenScriptCopyButton: document.querySelector("#token-script-copy-button"),
+  periodicForm: document.querySelector("#periodic-site-form"),
+  periodicTemplate: document.querySelector("#periodic-template"),
+  periodicName: document.querySelector("#periodic-name"),
+  periodicCredential: document.querySelector("#periodic-credential"),
+  periodicUrl: document.querySelector("#periodic-url"),
+  periodicInterval: document.querySelector("#periodic-interval"),
+  periodicTimeout: document.querySelector("#periodic-timeout"),
+  periodicRandomDelay: document.querySelector("#periodic-random-delay"),
+  periodicRetryInterval: document.querySelector("#periodic-retry-interval"),
+  periodicMaxRetries: document.querySelector("#periodic-max-retries"),
+  periodicHandler: document.querySelector("#periodic-handler"),
+  periodicMethod: document.querySelector("#periodic-method"),
+  periodicWaitSelector: document.querySelector("#periodic-wait-selector"),
+  periodicClickSelector: document.querySelector("#periodic-click-selector"),
+  periodicClickRole: document.querySelector("#periodic-click-role"),
+  periodicClickName: document.querySelector("#periodic-click-name"),
+  periodicClickExact: document.querySelector("#periodic-click-exact"),
+  periodicWaitAfter: document.querySelector("#periodic-wait-after"),
+  periodicSuccessPatterns: document.querySelector("#periodic-success-patterns"),
+  periodicAlreadyPatterns: document.querySelector("#periodic-already-patterns"),
+  periodicAuthPatterns: document.querySelector("#periodic-auth-patterns"),
+  periodicSaveButton: document.querySelector("#periodic-save-button"),
+  periodicSiteRows: document.querySelector("#periodic-site-rows"),
+  periodicScheduleDialog: document.querySelector("#periodic-schedule-dialog"),
+  periodicScheduleForm: document.querySelector("#periodic-schedule-form"),
+  periodicScheduleSite: document.querySelector("#periodic-schedule-site"),
+  periodicScheduleInterval: document.querySelector("#periodic-schedule-interval"),
+  periodicScheduleRandomDelay: document.querySelector("#periodic-schedule-random-delay"),
+  periodicScheduleTimeout: document.querySelector("#periodic-schedule-timeout"),
+  periodicScheduleRetryInterval: document.querySelector("#periodic-schedule-retry-interval"),
+  periodicScheduleMaxRetries: document.querySelector("#periodic-schedule-max-retries"),
+  periodicScheduleCancel: document.querySelector("#periodic-schedule-cancel"),
+  periodicScheduleDismiss: document.querySelector("#periodic-schedule-dismiss"),
+  siteBackupButton: document.querySelector("#site-backup-button"),
+  siteRestoreButton: document.querySelector("#site-restore-button"),
+  siteRestoreFile: document.querySelector("#site-restore-file"),
 };
 
 elements.endpoint.textContent = `${location.origin}/cookiecloud`;
@@ -155,19 +195,25 @@ function goToLogin() {
 }
 
 async function setActiveView(value, { syncHash = true } = {}) {
-  const activeView = ["cookiecloud", "web-credentials", "upgrade"].includes(value) ? value : "pt-signin";
+  const validViews = ["pt-signin", "periodic-signin", "cookiecloud", "web-credentials", "site-settings", "upgrade"];
+  const activeView = validViews.includes(value) ? value : "pt-signin";
   state.activeView = activeView;
-  const systemView = activeView !== "pt-signin";
-  elements.ptPanel.hidden = systemView || state.activePtTab !== "signin";
-  elements.ptStatsPanel.hidden = systemView || state.activePtTab !== "stats";
+  const ptView = activeView === "pt-signin";
+  const periodicView = activeView === "periodic-signin";
+  const systemView = !ptView && !periodicView;
+  elements.ptPanel.hidden = !ptView || state.activePtTab !== "signin";
+  elements.ptStatsPanel.hidden = !ptView || state.activePtTab !== "stats";
+  elements.periodicPanel.hidden = !periodicView;
   elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
   elements.webCredentialsPanel.hidden = activeView !== "web-credentials";
+  elements.siteSettingsPanel.hidden = activeView !== "site-settings";
   elements.upgradePanel.hidden = activeView !== "upgrade";
   elements.settingsTabList.hidden = !systemView;
-  elements.ptTabList.hidden = systemView;
+  elements.ptTabList.hidden = !ptView;
 
   for (const item of elements.navItems) {
-    const active = item.dataset.view === "pt-signin" ? !systemView : systemView;
+    const active = item.dataset.view === activeView
+      || (item.dataset.view === "cookiecloud" && systemView);
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
@@ -179,17 +225,22 @@ async function setActiveView(value, { syncHash = true } = {}) {
     button.tabIndex = active ? 0 : -1;
   }
 
-  if (systemView) {
+  if (periodicView) {
+    elements.pageTitle.textContent = "周期签到";
+    elements.pageDescription.textContent = "普通站点周期任务";
+  } else if (systemView) {
     elements.pageTitle.textContent = "系统设置";
-    elements.pageDescription.textContent = "CookieCloud、Web 凭据、程序与浏览器运行时";
+    elements.pageDescription.textContent = "CookieCloud、Web 凭据、站点备份与系统升级";
   } else {
     elements.pageTitle.textContent = "PT 站点";
     elements.pageDescription.textContent = "站点管理与自动化";
   }
   const refreshLabels = {
     "pt-signin": "刷新签到任务",
+    "periodic-signin": "刷新周期签到任务",
     cookiecloud: "刷新 CookieCloud 状态",
     "web-credentials": "刷新 Web 凭据同步状态",
+    "site-settings": "刷新站点设置",
     upgrade: "刷新升级状态",
   };
   elements.refreshButton.title = refreshLabels[activeView];
@@ -229,10 +280,15 @@ function setBusy(busy) {
   elements.body.classList.toggle("loading", busy);
   elements.saveButton.disabled = busy;
   elements.ptSaveButton.disabled = busy;
+  elements.periodicSaveButton.disabled = busy;
   elements.ptSelectAllButton.disabled = busy || selectablePtCandidates().length === 0;
   elements.ptCollectButton.disabled = busy || state.ptSelection.size === 0;
   elements.refreshButton.disabled = busy;
   elements.tokenScriptButton.disabled = busy;
+  elements.tokenScriptCopyButton.disabled = busy;
+  elements.siteBackupButton.disabled = busy;
+  elements.siteRestoreButton.disabled = busy;
+  for (const button of elements.periodicSiteRows.querySelectorAll("button, input")) button.disabled = busy;
   for (const button of elements.webCredentialRows.querySelectorAll("button")) button.disabled = busy;
 }
 
@@ -437,6 +493,176 @@ function renderPtSites() {
     actionsCell.append(actions);
     row.append(actionsCell);
     elements.ptSiteRows.append(row);
+  }
+}
+
+function renderPeriodicCredentialOptions() {
+  const selected = elements.periodicCredential.value;
+  elements.periodicCredential.innerHTML = '<option value="">无需凭据</option>';
+  for (const credential of state.credentials.filter((item) => item.provider === "cookiecloud")) {
+    const option = document.createElement("option");
+    option.value = credential.id;
+    option.textContent = `${credential.domain} · v${credential.version}`;
+    elements.periodicCredential.append(option);
+  }
+  if (selected && [...elements.periodicCredential.options].some((option) => option.value === selected)) {
+    elements.periodicCredential.value = selected;
+  } else if (elements.periodicTemplate.value === "nodeseek") {
+    const recommended = state.credentials.find((item) => (
+      item.provider === "cookiecloud" && item.domain === "www.nodeseek.com"
+    )) || state.credentials.find((item) => (
+      item.provider === "cookiecloud" && item.domain === "nodeseek.com"
+    ));
+    elements.periodicCredential.value = recommended?.id || "";
+  }
+}
+
+function applyPeriodicTemplate() {
+  const template = elements.periodicTemplate.value;
+  const browser = template !== "custom_http";
+  elements.periodicHandler.value = browser ? "browser_signin" : "http_signin";
+  elements.periodicMethod.value = "GET";
+  if (template !== "nodeseek") {
+    elements.periodicName.value = "";
+    elements.periodicUrl.value = "";
+    elements.periodicWaitSelector.value = "";
+    elements.periodicClickSelector.value = "";
+    elements.periodicClickRole.value = "";
+    elements.periodicClickName.value = "";
+    elements.periodicClickExact.checked = false;
+    elements.periodicWaitAfter.value = "1500";
+    elements.periodicSuccessPatterns.value = "";
+    elements.periodicAlreadyPatterns.value = "";
+    elements.periodicAuthPatterns.value = "";
+    elements.periodicCredential.value = "";
+    return;
+  }
+  elements.periodicName.value = "NodeSeek";
+  elements.periodicUrl.value = "https://www.nodeseek.com/board";
+  elements.periodicWaitSelector.value = ".head-info";
+  elements.periodicClickSelector.value = "";
+  elements.periodicClickRole.value = "button";
+  elements.periodicClickName.value = "鸡腿 x 5";
+  elements.periodicClickExact.checked = true;
+  elements.periodicWaitAfter.value = "2000";
+  elements.periodicSuccessPatterns.value = "今日签到获得鸡腿\\d+个";
+  elements.periodicAlreadyPatterns.value = "今日签到获得鸡腿\\d+个";
+  elements.periodicAuthPatterns.value = "登录后.*签到|请先登录";
+  renderPeriodicCredentialOptions();
+}
+
+function openPeriodicSchedule(site) {
+  elements.periodicScheduleDialog.dataset.siteId = site.id;
+  elements.periodicScheduleSite.textContent = site.name;
+  elements.periodicScheduleInterval.value = site.interval_hours;
+  elements.periodicScheduleRandomDelay.value = site.config.random_delay_minutes;
+  elements.periodicScheduleTimeout.value = site.config.timeout_seconds;
+  elements.periodicScheduleRetryInterval.value = site.config.retry_interval_hours;
+  elements.periodicScheduleMaxRetries.value = site.config.max_retries;
+  elements.periodicScheduleDialog.showModal();
+}
+
+async function setPeriodicEnabled(site, enabled) {
+  try {
+    await api(`/api/v1/periodic-signin/sites/${encodeURIComponent(site.id)}/enabled`, {
+      method: "PATCH", body: JSON.stringify({ enabled }),
+    });
+    await refresh({ quiet: true });
+    showToast(`周期任务已${enabled ? "启用" : "停用"}`);
+  } catch (error) {
+    showToast(error.message, true);
+    await refresh({ quiet: true });
+  }
+}
+
+async function runPeriodicSite(site) {
+  setBusy(true);
+  try {
+    await api(`/api/v1/periodic-signin/sites/${encodeURIComponent(site.id)}/run`, {
+      method: "POST", body: "{}",
+    });
+    await refresh({ quiet: true });
+    showToast(`${site.name} 已进入执行队列`);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function deletePeriodicSite(site) {
+  if (!window.confirm(`删除周期任务“${site.name}”及其执行记录？`)) return;
+  setBusy(true);
+  try {
+    await api(`/api/v1/periodic-signin/sites/${encodeURIComponent(site.id)}`, { method: "DELETE" });
+    await refresh({ quiet: true });
+    showToast("周期任务已删除");
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function renderPeriodicSites() {
+  document.querySelector("#periodic-site-count").textContent = state.periodicSites.length;
+  document.querySelector("#periodic-enabled-count").textContent = state.periodicSites.filter((item) => item.enabled).length;
+  const executions = state.periodicSites.map((item) => item.last_execution).filter(Boolean).sort((a, b) => (
+    new Date(b.scheduled_at) - new Date(a.scheduled_at)
+  ));
+  document.querySelector("#periodic-recent-state").textContent = executions[0]
+    ? `${statusLabel(executions[0].status)} · ${formatDate(executions[0].scheduled_at)}` : "暂无记录";
+  elements.periodicSiteRows.replaceChildren();
+  if (!state.periodicSites.length) {
+    elements.periodicSiteRows.innerHTML = '<tr><td class="empty" colspan="7">暂无普通站点任务</td></tr>';
+    return;
+  }
+  for (const site of state.periodicSites) {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    const link = document.createElement("a");
+    link.className = "site-link-text";
+    link.href = site.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = site.name;
+    nameCell.append(link);
+    row.append(nameCell);
+    for (const value of [site.credential?.domain || "无需凭据", `${site.interval_hours} 小时`, formatDate(site.next_run_at)]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    const statusCell = document.createElement("td");
+    statusCell.append(statusBadge(site.last_execution?.status));
+    statusCell.title = resultText(site.last_execution);
+    row.append(statusCell);
+    const enabledCell = document.createElement("td");
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.checked = site.enabled;
+    enabled.setAttribute("aria-label", `${site.name} 周期任务`);
+    enabled.addEventListener("change", () => setPeriodicEnabled(site, enabled.checked));
+    enabledCell.append(enabled);
+    row.append(enabledCell);
+    const actionsCell = document.createElement("td");
+    const actions = document.createElement("div");
+    actions.className = "table-actions";
+    for (const [label, className, action] of [
+      ["设置", "table-button", () => openPeriodicSchedule(site)],
+      ["立即执行", "table-button", () => runPeriodicSite(site)],
+      ["删除", "table-button danger", () => deletePeriodicSite(site)],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = className;
+      button.textContent = label;
+      button.addEventListener("click", action);
+      actions.append(button);
+    }
+    actionsCell.append(actions);
+    row.append(actionsCell);
+    elements.periodicSiteRows.append(row);
   }
 }
 
@@ -697,7 +923,7 @@ function renderWebCredentials(statuses) {
   elements.tokenSyncState.textContent = configuredCount === statuses.length && statuses.length
     ? "同步正常" : scriptConfigured ? `已同步 ${configuredCount}/${statuses.length}` : "未配置";
   elements.tokenSyncState.className = `status-badge${configuredCount === statuses.length && statuses.length ? " succeeded" : ""}`;
-  elements.tokenScriptButton.textContent = scriptConfigured ? "重新生成同步脚本" : "生成同步脚本";
+  elements.tokenScriptButton.textContent = scriptConfigured ? "重新下载脚本" : "下载脚本";
   elements.webCredentialRows.innerHTML = statuses.length ? statuses.map((status) => `
     <tr>
       <td>${escapeHtml(status.site)}</td>
@@ -877,7 +1103,7 @@ async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredentials] = await Promise.all([
+    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredentials, periodicSites] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
@@ -885,6 +1111,7 @@ async function refresh({ quiet = false } = {}) {
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
       api("/api/v1/pt-signin/stats"),
       api("/api/v1/web-credentials", { cache: "no-store" }),
+      api("/api/v1/periodic-signin/sites"),
     ]);
     state.sources = sources.items;
     state.credentials = credentials.items;
@@ -893,10 +1120,13 @@ async function refresh({ quiet = false } = {}) {
     state.ptHistory = ptHistory;
     state.ptStats = ptStats.items;
     state.webCredentials = webCredentials.items;
+    state.periodicSites = periodicSites.items;
     if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
     if (!state.selected && state.sources.length === 1) state.selected = state.sources[0].uuid;
     renderCookieCloud();
     renderPt();
+    renderPeriodicCredentialOptions();
+    renderPeriodicSites();
     renderWebCredentials(webCredentials.items);
     if (!quiet) showToast("状态已刷新");
   } catch (error) {
@@ -1006,6 +1236,76 @@ elements.ptForm.addEventListener("submit", async (event) => {
   }
 });
 
+elements.periodicTemplate.addEventListener("change", applyPeriodicTemplate);
+elements.periodicScheduleCancel.addEventListener("click", () => elements.periodicScheduleDialog.close());
+elements.periodicScheduleDismiss.addEventListener("click", () => elements.periodicScheduleDialog.close());
+elements.periodicScheduleForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const siteId = elements.periodicScheduleDialog.dataset.siteId;
+  if (!siteId) return;
+  setBusy(true);
+  try {
+    await api(`/api/v1/periodic-signin/sites/${encodeURIComponent(siteId)}/schedule`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        interval_hours: Number(elements.periodicScheduleInterval.value),
+        timeout_seconds: Number(elements.periodicScheduleTimeout.value),
+        random_delay_minutes: Number(elements.periodicScheduleRandomDelay.value),
+        retry_interval_hours: Number(elements.periodicScheduleRetryInterval.value),
+        max_retries: Number(elements.periodicScheduleMaxRetries.value),
+      }),
+    });
+    elements.periodicScheduleDialog.close();
+    await refresh({ quiet: true });
+    showToast("周期调度已保存");
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+elements.periodicForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setBusy(true);
+  try {
+    const template = elements.periodicTemplate.value;
+    await api("/api/v1/periodic-signin/sites", {
+      method: "POST",
+      body: JSON.stringify({
+        name: elements.periodicName.value.trim(),
+        handler_type: elements.periodicHandler.value,
+        credential_id: elements.periodicCredential.value || null,
+        template_key: template === "nodeseek" ? "nodeseek" : null,
+        url: elements.periodicUrl.value.trim(),
+        interval_hours: Number(elements.periodicInterval.value),
+        timeout_seconds: Number(elements.periodicTimeout.value),
+        random_delay_minutes: Number(elements.periodicRandomDelay.value),
+        retry_interval_hours: Number(elements.periodicRetryInterval.value),
+        max_retries: Number(elements.periodicMaxRetries.value),
+        method: elements.periodicMethod.value,
+        wait_for_selector: elements.periodicWaitSelector.value.trim() || null,
+        click_selector: elements.periodicClickSelector.value.trim() || null,
+        click_role: elements.periodicClickRole.value.trim() || null,
+        click_name: elements.periodicClickName.value.trim() || null,
+        click_exact: elements.periodicClickExact.checked,
+        wait_after_click_ms: Number(elements.periodicWaitAfter.value),
+        success_patterns: lineValues(elements.periodicSuccessPatterns.value),
+        already_patterns: lineValues(elements.periodicAlreadyPatterns.value),
+        auth_expired_patterns: lineValues(elements.periodicAuthPatterns.value),
+      }),
+    });
+    elements.periodicForm.reset();
+    applyPeriodicTemplate();
+    await refresh({ quiet: true });
+    showToast("周期签到任务已创建");
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
 elements.selector.addEventListener("change", () => {
   state.selected = elements.selector.value;
   renderSelected();
@@ -1091,24 +1391,31 @@ elements.copyPasswordButton.addEventListener("click", async () => {
     showToast(error.message, true);
   }
 });
-elements.tokenScriptButton.addEventListener("click", async () => {
+async function generateWebCredentialScript() {
   const baseUrl = elements.tokenSyncBaseUrl.value.trim();
-  if (!baseUrl) return;
+  if (!baseUrl) throw new Error("请填写上送地址");
+  const response = await fetch("/api/v1/web-credentials/userscript", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url: baseUrl }),
+  });
+  if (!response.ok) {
+    let message = `脚本生成失败 (${response.status})`;
+    try { message = (await response.json()).detail || message; } catch (_) {}
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  const script = await response.text();
+  await loadWebCredentialStatus();
+  return script;
+}
+
+elements.tokenScriptButton.addEventListener("click", async () => {
   setBusy(true);
   try {
-    const response = await fetch("/api/v1/web-credentials/userscript", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ base_url: baseUrl }),
-    });
-    if (!response.ok) {
-      let message = `脚本生成失败 (${response.status})`;
-      try { message = (await response.json()).detail || message; } catch (_) {}
-      const error = new Error(message);
-      error.status = response.status;
-      throw error;
-    }
-    const blobUrl = URL.createObjectURL(await response.blob());
+    const script = await generateWebCredentialScript();
+    const blobUrl = URL.createObjectURL(new Blob([script], { type: "text/javascript;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = blobUrl;
     link.download = "autosurf-web-credential-sync.user.js";
@@ -1116,11 +1423,71 @@ elements.tokenScriptButton.addEventListener("click", async () => {
     link.click();
     link.remove();
     URL.revokeObjectURL(blobUrl);
-    await loadWebCredentialStatus();
-    showToast("同步脚本已生成；旧脚本的上传密钥同时失效");
+    showToast("同步脚本已下载；旧脚本的上传密钥同时失效");
   } catch (error) {
     if (error.status === 401) goToLogin();
     else showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+elements.tokenScriptCopyButton.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    const script = await generateWebCredentialScript();
+    await navigator.clipboard.writeText(script);
+    showToast("同步脚本已复制；旧脚本的上传密钥同时失效");
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+    else showToast(error.message || "浏览器未允许复制", true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+elements.siteBackupButton.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    const response = await fetch("/api/v1/site-settings/backup", { cache: "no-store" });
+    if (!response.ok) throw new Error(`备份失败 (${response.status})`);
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "autosurf-site-settings.zip";
+    const blobUrl = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+    showToast("站点设置备份已生成");
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+elements.siteRestoreButton.addEventListener("click", () => elements.siteRestoreFile.click());
+elements.siteRestoreFile.addEventListener("change", async () => {
+  const file = elements.siteRestoreFile.files?.[0];
+  elements.siteRestoreFile.value = "";
+  if (!file || !window.confirm("恢复会替换现有站点任务、凭据和 CookieCloud 配置，继续？")) return;
+  setBusy(true);
+  try {
+    const response = await fetch("/api/v1/site-settings/restore", {
+      method: "POST", headers: { "Content-Type": "application/zip" }, body: file,
+    });
+    if (!response.ok) {
+      let message = `恢复失败 (${response.status})`;
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const result = await response.json();
+    state.selected = "";
+    await refresh({ quiet: true });
+    showToast(`已恢复 ${result.automation_count} 个任务和 ${result.credential_count} 个凭据`);
+  } catch (error) {
+    showToast(error.message, true);
   } finally {
     setBusy(false);
   }
@@ -1206,5 +1573,6 @@ signinTabs.forEach((button, index) => {
 window.addEventListener("hashchange", () => setActiveView(location.hash.slice(1), { syncHash: false }));
 
 setActiveSigninTab("tasks");
+applyPeriodicTemplate();
 setActiveView(location.hash.slice(1));
 refresh({ quiet: true });

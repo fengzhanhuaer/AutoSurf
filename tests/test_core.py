@@ -1,4 +1,7 @@
 from datetime import timedelta
+import io
+import json
+import zipfile
 
 import httpx
 import pytest
@@ -7,7 +10,7 @@ from sqlalchemy import select
 from autosurf.config import Settings
 from autosurf.domain.models import ExecutionStatus, RunOutcome, RunResult, utc_now
 from autosurf.infrastructure.crypto import SecretBox
-from autosurf.infrastructure.database import ExecutionRecord
+from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
 from autosurf.main import create_app
 
 
@@ -36,6 +39,136 @@ async def test_api_creates_and_runs_automation(settings):
         assert automation.status_code == 201
         queued = await client.post(f"/api/v1/automations/{automation.json()['id']}/run", auth=auth)
         assert queued.status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_periodic_signin_api_manages_nodeseek_task(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
+        [{"name": "session", "value": "secret", "domain": "www.nodeseek.com", "path": "/"}],
+    )
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    payload = {
+        "name": "NodeSeek",
+        "handler_type": "browser_signin",
+        "credential_id": credential.id,
+        "template_key": "nodeseek",
+        "url": "https://www.nodeseek.com/board",
+        "interval_hours": 24,
+        "timeout_seconds": 60,
+        "random_delay_minutes": 30,
+        "retry_interval_hours": 2,
+        "max_retries": 5,
+        "wait_for_selector": ".head-info",
+        "click_role": "button",
+        "click_name": "鸡腿 x 5",
+        "click_exact": True,
+        "wait_after_click_ms": 2000,
+        "success_patterns": [r"今日签到获得鸡腿\d+个"],
+        "already_patterns": [r"今日签到获得鸡腿\d+个"],
+        "auth_expired_patterns": ["登录后签到"],
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        rejected = await client.post(
+            "/api/v1/periodic-signin/sites", auth=auth,
+            json={**payload, "url": "https://example.test/board"},
+        )
+        created = await client.post("/api/v1/periodic-signin/sites", auth=auth, json=payload)
+        site_id = created.json()["id"]
+        listed = await client.get("/api/v1/periodic-signin/sites", auth=auth)
+        scheduled = await client.patch(
+            f"/api/v1/periodic-signin/sites/{site_id}/schedule", auth=auth,
+            json={"interval_hours": 12, "timeout_seconds": 45, "random_delay_minutes": 10,
+                  "retry_interval_hours": 1, "max_retries": 3},
+        )
+        disabled = await client.patch(
+            f"/api/v1/periodic-signin/sites/{site_id}/enabled", auth=auth, json={"enabled": False},
+        )
+        queued = await client.post(f"/api/v1/periodic-signin/sites/{site_id}/run", auth=auth)
+        deleted = await client.delete(f"/api/v1/periodic-signin/sites/{site_id}", auth=auth)
+
+    assert rejected.status_code == 422
+    assert created.status_code == 201
+    assert listed.json()["items"][0]["template_key"] == "nodeseek"
+    assert listed.json()["items"][0]["config"]["click_name"] == "鸡腿 x 5"
+    assert scheduled.json()["interval_hours"] == 12
+    assert disabled.json()["enabled"] is False
+    assert queued.status_code == 202
+    assert deleted.status_code == 204
+
+
+def test_periodic_cookiecloud_snapshot_merges_root_and_www(settings):
+    app = create_app(settings)
+    app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:nodeseek.com", "nodeseek.com",
+        [{"name": "cf_clearance", "value": "cf", "domain": ".nodeseek.com", "path": "/"}],
+    )
+    login = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
+        [{"name": "session", "value": "login", "domain": "www.nodeseek.com", "path": "/"}],
+    )
+    automation = app.state.automations.create(
+        "NodeSeek", "browser_signin", 86400,
+        {"url": "https://www.nodeseek.com/board", "random_delay_minutes": 30}, login.id,
+    )
+
+    execution = app.state.queue.enqueue_now(automation.id)
+
+    with app.state.sessions() as session:
+        record = session.get(ExecutionRecord, execution.id)
+        cookies = app.state.credentials.cookies_from_payload(record.credential_payload)
+    assert cookies == {"cf_clearance": "cf", "session": "login"}
+
+
+@pytest.mark.asyncio
+async def test_site_settings_backup_and_restore_round_trip(settings):
+    app = create_app(settings)
+    app.state.cookiecloud.configure("browser", "cloud-secret", True)
+    credential = app.state.credentials.upsert("saved", "example.test", {"sid": "secret"})
+    automation = app.state.automations.create(
+        "saved-task", "http_signin", 3600, {"url": "https://example.test/checkin"}, credential.id,
+    )
+    app.state.queue.enqueue_now(automation.id)
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        backup = await client.get("/api/v1/site-settings/backup", auth=auth)
+        app.state.credentials.upsert("extra", "extra.test", {"sid": "extra"})
+        restored = await client.post(
+            "/api/v1/site-settings/restore", auth=auth,
+            content=backup.content, headers={"Content-Type": "application/zip"},
+        )
+
+    assert backup.status_code == 200
+    assert backup.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(backup.content)) as archive:
+        exported = json.loads(archive.read("site-settings.json"))
+    assert exported["credentials"][0]["payload"] == {"sid": "secret"}
+    assert exported["cookiecloud_sources"][0]["password"] == "cloud-secret"
+    assert restored.json() == {
+        "restored": True, "credential_count": 1, "automation_count": 1,
+        "cookiecloud_source_count": 1,
+    }
+    with app.state.sessions() as session:
+        assert [item.name for item in session.scalars(select(CredentialRecord)).all()] == ["saved"]
+        assert [item.name for item in session.scalars(select(AutomationRecord)).all()] == ["saved-task"]
+        assert session.scalars(select(ExecutionRecord)).all() == []
+
+
+@pytest.mark.asyncio
+async def test_management_is_lan_only_and_allows_198_18_network(settings):
+    app = create_app(settings)
+    public_transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
+    benchmark_transport = httpx.ASGITransport(app=app, client=("198.18.1.20", 12345))
+    async with httpx.AsyncClient(transport=public_transport, base_url="http://test") as client:
+        blocked = await client.get("/login")
+    async with httpx.AsyncClient(transport=benchmark_transport, base_url="http://test") as client:
+        allowed = await client.get("/login")
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "当前站点仅允许局域网访问"
+    assert allowed.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -97,12 +230,20 @@ async def test_management_session_login_and_logout(settings):
         assert "CookieCloud" in app_page.text
         assert "PT 站点" in app_page.text
         assert "站点签到" in app_page.text
+        assert "周期签到" in app_page.text
         assert "系统升级" in app_page.text
         assert "系统设置" in app_page.text
         assert 'id="settings-tab-cookiecloud"' in app_page.text
         assert 'id="settings-tab-web-credentials"' in app_page.text
+        assert 'id="settings-tab-site-settings"' in app_page.text
+        assert 'id="periodic-signin-panel"' in app_page.text
+        assert 'id="periodic-site-form"' in app_page.text
+        assert 'id="periodic-site-rows"' in app_page.text
         assert 'id="token-sync-base-url"' in app_page.text
         assert 'id="token-script-button"' in app_page.text
+        assert 'id="token-script-copy-button"' in app_page.text
+        assert 'id="site-backup-button"' in app_page.text
+        assert 'id="site-restore-button"' in app_page.text
         assert 'id="web-credential-rows"' in app_page.text
         assert "M-Team" not in app_page.text
         assert 'id="copy-uuid-button"' in app_page.text

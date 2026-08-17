@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from autosurf.automations.browser_signin import BrowserSignInHandler
+from autosurf.automations.browser_signin import BrowserSignInHandler, _classify_body
 from autosurf.automations.browser_session import (
     _restore_waf_cookie_state,
     _save_waf_cookie_state,
@@ -13,6 +13,7 @@ from autosurf.automations.browser_session import (
     supplement_playwright_cookies,
 )
 from autosurf.domain.models import RunContext
+from autosurf.domain.models import RunOutcome
 
 
 @pytest.mark.asyncio
@@ -20,6 +21,21 @@ async def test_browser_signin_rejects_non_http_url_before_launch():
     handler = BrowserSignInHandler()
     with pytest.raises(ValueError, match="absolute HTTP"):
         await handler.run(RunContext(execution_id="test", config={"url": "file:///etc/passwd"}, cookies={}))
+
+
+def test_browser_signin_classifies_nodeseek_before_and_after_click():
+    config = {
+        "success_patterns": [r"今日签到获得鸡腿\d+个"],
+        "already_patterns": [r"今日签到获得鸡腿\d+个"],
+        "auth_expired_patterns": ["登录后签到"],
+    }
+    already = _classify_body(config, "今日签到获得鸡腿5个", 200, before_click=True)
+    success = _classify_body(config, "今日签到获得鸡腿5个", 200, before_click=False)
+    expired = _classify_body(config, "登录后签到", 200, before_click=True)
+
+    assert already.outcome == RunOutcome.ALREADY_DONE
+    assert success.outcome == RunOutcome.SUCCESS
+    assert expired.outcome == RunOutcome.AUTH_EXPIRED
 
 
 def test_browser_handler_is_registered(tmp_path):

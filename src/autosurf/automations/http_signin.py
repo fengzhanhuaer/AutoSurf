@@ -31,6 +31,9 @@ class HttpSignInHandler:
         body = response.text[:1_000_000]
         if response.status_code in {401, 403}:
             return RunResult(RunOutcome.AUTH_EXPIRED, f"site returned HTTP {response.status_code}")
+        for pattern in config.get("auth_expired_patterns", []):
+            if re.search(str(pattern), body, re.IGNORECASE):
+                return RunResult(RunOutcome.AUTH_EXPIRED, "site reports that login has expired")
         for pattern in config.get("already_patterns", []):
             if re.search(pattern, body, re.IGNORECASE):
                 return RunResult(RunOutcome.ALREADY_DONE, "site reports this task is already complete")
@@ -40,4 +43,3 @@ class HttpSignInHandler:
         if response.is_success and not config.get("success_patterns"):
             return RunResult(RunOutcome.SUCCESS, f"request completed with HTTP {response.status_code}")
         return RunResult(RunOutcome.FAILED, f"no success pattern matched (HTTP {response.status_code})")
-

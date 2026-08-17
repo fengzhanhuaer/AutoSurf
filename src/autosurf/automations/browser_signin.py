@@ -37,34 +37,44 @@ class BrowserSignInHandler:
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                     if config.get("wait_for_selector"):
                         await page.locator(str(config["wait_for_selector"])).wait_for(state="visible")
-                    if config.get("click_selector"):
+                    status = response.status if response else None
+                    body = (await page.locator("body").inner_text())[:1_000_000]
+                    details = {"url": page.url, "status_code": status, "clicked": False}
+                    initial_result = _classify_body(config, body, status, before_click=True)
+                    if initial_result is not None:
+                        return with_browser_details(RunResult(
+                            initial_result.outcome, initial_result.message, details,
+                        ), browser_session)
+
+                    clicked = False
+                    if config.get("click_role") and config.get("click_name"):
+                        await page.get_by_role(
+                            str(config["click_role"]),
+                            name=str(config["click_name"]),
+                            exact=bool(config.get("click_exact", False)),
+                        ).click()
+                        clicked = True
+                    elif config.get("click_selector"):
                         await page.locator(str(config["click_selector"])).click()
+                        clicked = True
                     if config.get("wait_after_click_ms"):
                         await page.wait_for_timeout(min(max(int(config["wait_after_click_ms"]), 0), 30_000))
                     body = (await page.locator("body").inner_text())[:1_000_000]
-                    status = response.status if response else None
-                    if status in {401, 403}:
-                        return with_browser_details(
-                            RunResult(RunOutcome.AUTH_EXPIRED, f"site returned HTTP {status}"),
-                            browser_session,
-                        )
-                    for pattern in config.get("already_patterns", []):
-                        if re.search(str(pattern), body, re.IGNORECASE):
-                            return with_browser_details(RunResult(
-                                RunOutcome.ALREADY_DONE, "site reports this task is already complete",
-                            ), browser_session)
-                    for pattern in config.get("success_patterns", []):
-                        if re.search(str(pattern), body, re.IGNORECASE):
-                            return with_browser_details(
-                                RunResult(RunOutcome.SUCCESS, "success pattern matched"), browser_session,
-                            )
+                    details = {"url": page.url, "status_code": status, "clicked": clicked}
+                    result = _classify_body(config, body, status, before_click=False)
+                    if result is not None:
+                        return with_browser_details(RunResult(
+                            result.outcome, result.message, details,
+                        ), browser_session)
                     if not config.get("success_patterns"):
                         return with_browser_details(
-                            RunResult(RunOutcome.SUCCESS, "browser automation completed"), browser_session,
+                            RunResult(RunOutcome.SUCCESS, "browser automation completed", details),
+                            browser_session,
                         )
                     await page.screenshot(path=str(screenshot), full_page=True)
+                    details["screenshot"] = str(screenshot)
                     return with_browser_details(RunResult(
-                        RunOutcome.FAILED, "no success pattern matched", {"screenshot": str(screenshot)},
+                        RunOutcome.FAILED, "no success pattern matched", details,
                     ), browser_session)
                 except PlaywrightTimeoutError as exc:
                     await page.screenshot(path=str(screenshot), full_page=True)
@@ -72,3 +82,27 @@ class BrowserSignInHandler:
                         RunOutcome.BLOCKED, f"browser operation timed out: {exc}",
                         {"screenshot": str(screenshot)},
                     ), browser_session)
+
+
+def _classify_body(
+    config: dict, body: str, status: int | None, *, before_click: bool,
+) -> RunResult | None:
+    if status in {401, 403}:
+        return RunResult(RunOutcome.AUTH_EXPIRED, f"site returned HTTP {status}")
+    for pattern in config.get("auth_expired_patterns", []):
+        if re.search(str(pattern), body, re.IGNORECASE):
+            return RunResult(RunOutcome.AUTH_EXPIRED, "site reports that login has expired")
+    if before_click:
+        for pattern in config.get("already_patterns", []):
+            if re.search(str(pattern), body, re.IGNORECASE):
+                return RunResult(
+                    RunOutcome.ALREADY_DONE, "site reports this task is already complete",
+                )
+        return None
+    for pattern in config.get("success_patterns", []):
+        if re.search(str(pattern), body, re.IGNORECASE):
+            return RunResult(RunOutcome.SUCCESS, "success pattern matched")
+    for pattern in config.get("already_patterns", []):
+        if re.search(str(pattern), body, re.IGNORECASE):
+            return RunResult(RunOutcome.ALREADY_DONE, "site reports this task is already complete")
+    return None

@@ -161,8 +161,7 @@ class QueueService:
         if credential is None:
             return None, None
         if (
-            automation.handler_type != "pt_signin"
-            or credential.provider != "cookiecloud"
+            credential.provider != "cookiecloud"
             or self.credentials is None
         ):
             return credential.version, credential.encrypted_payload
@@ -183,14 +182,17 @@ class QueueService:
             for automation in due:
                 scheduled_at = automation.next_run_at
                 random_delay_seconds = 0
-                if automation.handler_type == "pt_signin":
+                if automation.handler_type in {"pt_signin", "browser_signin", "http_signin"}:
                     try:
                         config = json.loads(automation.config_json)
                     except (TypeError, ValueError):
                         config = {}
-                    random_delay_minutes = _bounded_int(config.get("random_delay_minutes"), 30, 0, 1440)
-                    if random_delay_minutes:
-                        random_delay_seconds = secrets.randbelow(random_delay_minutes * 60 + 1)
+                    if automation.handler_type == "pt_signin" or "random_delay_minutes" in config:
+                        random_delay_minutes = _bounded_int(
+                            config.get("random_delay_minutes"), 30, 0, 1440
+                        )
+                        if random_delay_minutes:
+                            random_delay_seconds = secrets.randbelow(random_delay_minutes * 60 + 1)
                 exists = session.scalar(select(ExecutionRecord.id).where(
                     ExecutionRecord.automation_id == automation.id,
                     ExecutionRecord.scheduled_at == scheduled_at,
@@ -307,7 +309,11 @@ class ExecutionService:
                     raise RuntimeError("claimed execution disappeared")
                 automation = execution.automation
                 automation_config = json.loads(automation.config_json)
-                if automation.handler_type == "pt_signin":
+                if (
+                    automation.handler_type == "pt_signin"
+                    or "max_retries" in automation_config
+                    or "retry_interval_minutes" in automation_config
+                ):
                     max_retries = _bounded_int(automation_config.get("max_retries"), 5, 0, 20)
                     retry_minutes = _bounded_int(
                         automation_config.get("retry_interval_minutes"), 120, 1, 10080

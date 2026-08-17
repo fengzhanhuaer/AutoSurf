@@ -6,6 +6,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 import hashlib
 import hmac
+import io
 from importlib.metadata import PackageNotFoundError, version
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import subprocess
 import time
 from typing import Any
 from urllib.parse import urlparse
+import zipfile
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -105,6 +107,37 @@ class PtSignInCollectInput(BaseModel):
 class PtSignInScheduleInput(BaseModel):
     interval_hours: int = Field(default=24, ge=1, le=720)
     timeout_seconds: int = Field(default=60, ge=5, le=180)
+    random_delay_minutes: int = Field(default=30, ge=0, le=1440)
+    retry_interval_hours: int = Field(default=2, ge=1, le=168)
+    max_retries: int = Field(default=5, ge=0, le=20)
+
+
+class PeriodicSignInInput(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    handler_type: str = "browser_signin"
+    credential_id: str | None = Field(default=None, max_length=36)
+    template_key: str | None = Field(default=None, max_length=64)
+    url: str = Field(min_length=8, max_length=2048)
+    interval_hours: int = Field(default=24, ge=1, le=720)
+    timeout_seconds: int = Field(default=60, ge=1, le=180)
+    random_delay_minutes: int = Field(default=30, ge=0, le=1440)
+    retry_interval_hours: int = Field(default=2, ge=1, le=168)
+    max_retries: int = Field(default=5, ge=0, le=20)
+    method: str = "GET"
+    wait_for_selector: str | None = Field(default=None, max_length=1024)
+    click_selector: str | None = Field(default=None, max_length=1024)
+    click_role: str | None = Field(default=None, max_length=64)
+    click_name: str | None = Field(default=None, max_length=256)
+    click_exact: bool = False
+    wait_after_click_ms: int = Field(default=1500, ge=0, le=30_000)
+    success_patterns: list[str] = Field(default_factory=list, max_length=20)
+    already_patterns: list[str] = Field(default_factory=list, max_length=20)
+    auth_expired_patterns: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PeriodicSignInScheduleInput(BaseModel):
+    interval_hours: int = Field(default=24, ge=1, le=720)
+    timeout_seconds: int = Field(default=60, ge=1, le=180)
     random_delay_minutes: int = Field(default=30, ge=0, le=1440)
     retry_interval_hours: int = Field(default=2, ge=1, le=168)
     max_retries: int = Field(default=5, ge=0, le=20)
@@ -455,6 +488,233 @@ def start_upgrade(request: Request) -> dict[str, Any]:
     return {**current, "running": True, "accepted": True}
 
 
+@router.get("/site-settings/backup")
+def backup_site_settings(request: Request) -> Response:
+    secrets_box = request.app.state.credentials.secrets
+    with request.app.state.sessions() as session:
+        credentials = session.scalars(
+            select(CredentialRecord).order_by(CredentialRecord.name)
+        ).all()
+        automations = session.scalars(
+            select(AutomationRecord).order_by(AutomationRecord.name, AutomationRecord.id)
+        ).all()
+        sources = session.scalars(
+            select(CookieCloudSource).order_by(CookieCloudSource.uuid)
+        ).all()
+        payload = {
+            "schema_version": 1,
+            "exported_at": utc_now().isoformat(),
+            "credentials": [{
+                "id": item.id,
+                "name": item.name,
+                "provider": item.provider,
+                "domain": item.domain,
+                "payload": secrets_box.decrypt_json(item.encrypted_payload),
+                "version": item.version,
+                "updated_at": item.updated_at.isoformat(),
+            } for item in credentials],
+            "automations": [{
+                "id": item.id,
+                "name": item.name,
+                "handler_type": item.handler_type,
+                "enabled": item.enabled,
+                "interval_seconds": item.interval_seconds,
+                "next_run_at": item.next_run_at.isoformat(),
+                "config": json.loads(item.config_json),
+                "credential_id": item.credential_id,
+            } for item in automations],
+            "cookiecloud_sources": [{
+                "uuid": item.uuid,
+                "password": request.app.state.cookiecloud.password_for(item.uuid)
+                if item.encrypted_password else None,
+                "auto_import": item.auto_import,
+            } for item in sources],
+        }
+
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "site-settings.json",
+            json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        archive.writestr(
+            "README.txt",
+            "AutoSurf site settings backup\n"
+            "Contains sensitive CookieCloud passwords, cookies and Web credentials.\n"
+            "Restore this ZIP only through AutoSurf's Site Settings page.\n",
+        )
+    filename = f"autosurf-site-settings-{utc_now():%Y%m%d-%H%M%S}.zip"
+    return Response(
+        archive_buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.post("/site-settings/restore")
+async def restore_site_settings(request: Request) -> dict[str, Any]:
+    raw = await request.body()
+    if not raw or len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="请选择不超过 10 MB 的 AutoSurf 站点设置 ZIP")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            if "site-settings.json" not in archive.namelist():
+                raise ValueError("ZIP 中缺少 site-settings.json")
+            if archive.getinfo("site-settings.json").file_size > 20 * 1024 * 1024:
+                raise ValueError("站点设置文件过大")
+            payload = json.loads(archive.read("site-settings.json"))
+        credentials, automations, sources = _validated_site_settings_backup(
+            payload, request.app.state.registry
+        )
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+        raise HTTPException(status_code=422, detail=f"无法恢复站点设置：{exc}") from exc
+
+    secrets_box = request.app.state.credentials.secrets
+    with request.app.state.sessions.begin() as session:
+        session.execute(delete(ExecutionRecord))
+        session.execute(delete(AutomationRecord))
+        session.execute(delete(CredentialRecord))
+        session.execute(delete(CookieCloudBlob))
+        session.execute(delete(CookieCloudSource))
+        for item in credentials:
+            session.add(CredentialRecord(
+                id=item["id"],
+                name=item["name"],
+                provider=item["provider"],
+                domain=item["domain"],
+                encrypted_payload=secrets_box.encrypt_json(item["payload"]),
+                version=item["version"],
+                updated_at=item["updated_at"],
+            ))
+        session.flush()
+        for item in sources:
+            session.add(CookieCloudSource(
+                uuid=item["uuid"],
+                encrypted_password=secrets_box.encrypt_json(item["password"])
+                if item["password"] is not None else "",
+                auto_import=item["auto_import"],
+                last_import_at=None,
+                last_error=None,
+            ))
+        for item in automations:
+            session.add(AutomationRecord(
+                id=item["id"],
+                name=item["name"],
+                handler_type=item["handler_type"],
+                enabled=item["enabled"],
+                interval_seconds=item["interval_seconds"],
+                next_run_at=item["next_run_at"],
+                config_json=json.dumps(item["config"], ensure_ascii=False),
+                credential_id=item["credential_id"],
+            ))
+
+    return {
+        "restored": True,
+        "credential_count": len(credentials),
+        "automation_count": len(automations),
+        "cookiecloud_source_count": len(sources),
+    }
+
+
+def _validated_site_settings_backup(
+    payload: Any, registry: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("不支持的备份版本")
+    credentials = payload.get("credentials")
+    automations = payload.get("automations")
+    sources = payload.get("cookiecloud_sources")
+    if not all(isinstance(items, list) for items in (credentials, automations, sources)):
+        raise ValueError("备份数据结构不完整")
+
+    credential_ids: set[str] = set()
+    credential_names: set[str] = set()
+    checked_credentials = []
+    for raw_item in credentials:
+        if not isinstance(raw_item, dict):
+            raise ValueError("凭据数据无效")
+        item = {
+            "id": str(raw_item.get("id") or ""),
+            "name": str(raw_item.get("name") or ""),
+            "provider": str(raw_item.get("provider") or "manual"),
+            "domain": str(raw_item.get("domain") or "").lower().lstrip("."),
+            "payload": raw_item.get("payload"),
+            "version": int(raw_item.get("version") or 1),
+            "updated_at": _backup_datetime(raw_item.get("updated_at")),
+        }
+        if not item["id"] or len(item["id"]) > 36 or not item["name"] or len(item["name"]) > 128:
+            raise ValueError("凭据标识或名称无效")
+        if not item["domain"] or len(item["domain"]) > 255 or item["version"] < 1:
+            raise ValueError("凭据域名或版本无效")
+        if item["id"] in credential_ids or item["name"] in credential_names:
+            raise ValueError("备份中存在重复凭据")
+        credential_ids.add(item["id"])
+        credential_names.add(item["name"])
+        checked_credentials.append(item)
+
+    automation_ids: set[str] = set()
+    checked_automations = []
+    for raw_item in automations:
+        if not isinstance(raw_item, dict):
+            raise ValueError("周期任务数据无效")
+        handler_type = str(raw_item.get("handler_type") or "")
+        registry.get(handler_type)
+        interval_seconds = int(raw_item.get("interval_seconds") or 0)
+        config = raw_item.get("config")
+        credential_id = raw_item.get("credential_id")
+        item = {
+            "id": str(raw_item.get("id") or ""),
+            "name": str(raw_item.get("name") or ""),
+            "handler_type": handler_type,
+            "enabled": bool(raw_item.get("enabled", True)),
+            "interval_seconds": interval_seconds,
+            "next_run_at": _backup_datetime(raw_item.get("next_run_at")),
+            "config": config,
+            "credential_id": str(credential_id) if credential_id is not None else None,
+        }
+        if not item["id"] or len(item["id"]) > 36 or item["id"] in automation_ids:
+            raise ValueError("周期任务标识无效或重复")
+        if not item["name"] or len(item["name"]) > 128:
+            raise ValueError("周期任务名称无效")
+        if interval_seconds < 60 or interval_seconds > 31_536_000 or not isinstance(config, dict):
+            raise ValueError("周期任务配置无效")
+        if item["credential_id"] and item["credential_id"] not in credential_ids:
+            raise ValueError("周期任务引用了不存在的凭据")
+        automation_ids.add(item["id"])
+        checked_automations.append(item)
+
+    source_ids: set[str] = set()
+    checked_sources = []
+    for raw_item in sources:
+        if not isinstance(raw_item, dict):
+            raise ValueError("CookieCloud 配置无效")
+        uuid = str(raw_item.get("uuid") or "")
+        password = raw_item.get("password")
+        if not uuid or len(uuid) > 128 or uuid in source_ids:
+            raise ValueError("CookieCloud UUID 无效或重复")
+        if password is not None and (not isinstance(password, str) or len(password) > 1024):
+            raise ValueError("CookieCloud 密码无效")
+        source_ids.add(uuid)
+        checked_sources.append({
+            "uuid": uuid,
+            "password": password,
+            "auto_import": bool(raw_item.get("auto_import", True)),
+        })
+    return checked_credentials, checked_automations, checked_sources
+
+
+def _backup_datetime(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("备份时间无效")
+    try:
+        return datetime.fromisoformat(value.removesuffix("Z"))
+    except ValueError as exc:
+        raise ValueError("备份时间无效") from exc
+
+
 @router.get("/handlers")
 def handlers(request: Request) -> dict[str, list[str]]:
     return {"items": request.app.state.registry.types()}
@@ -504,6 +764,137 @@ def list_executions(request: Request, limit: int = 50) -> dict[str, Any]:
     limit = min(max(limit, 1), 200)
     with request.app.state.sessions() as session:
         records = session.scalars(select(ExecutionRecord).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
+        return {"items": [execution_view(item) for item in records]}
+
+
+@router.post("/periodic-signin/sites", status_code=201)
+def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> dict[str, Any]:
+    handler_type = data.handler_type.strip().lower()
+    if handler_type not in {"browser_signin", "http_signin"}:
+        raise HTTPException(status_code=422, detail="普通周期任务仅支持浏览器或 HTTP 执行")
+    method = data.method.strip().upper()
+    if method not in {"GET", "POST"}:
+        raise HTTPException(status_code=422, detail="HTTP 方法仅支持 GET 或 POST")
+    credential = None
+    with request.app.state.sessions() as session:
+        if data.credential_id:
+            credential = session.get(CredentialRecord, data.credential_id)
+            if credential is None:
+                raise HTTPException(status_code=422, detail="所选站点凭据不存在")
+            _validate_site_url(data.url, credential.domain)
+        else:
+            _validate_site_url(data.url)
+    if data.template_key == "nodeseek" and (
+        credential is None or credential.provider != "cookiecloud"
+    ):
+        raise HTTPException(status_code=422, detail="NodeSeek 周期签到需要选择 CookieCloud 凭据")
+    if bool(data.click_role) != bool(data.click_name):
+        raise HTTPException(status_code=422, detail="按按钮文字点击时必须同时填写角色和名称")
+
+    config = {
+        "template_key": data.template_key or None,
+        "url": data.url,
+        "timeout_seconds": data.timeout_seconds,
+        "random_delay_minutes": data.random_delay_minutes,
+        "retry_interval_minutes": data.retry_interval_hours * 60,
+        "max_retries": data.max_retries,
+        "method": method,
+        "wait_for_selector": data.wait_for_selector or None,
+        "click_selector": data.click_selector or None,
+        "click_role": data.click_role or None,
+        "click_name": data.click_name or None,
+        "click_exact": data.click_exact,
+        "wait_after_click_ms": data.wait_after_click_ms,
+        "success_patterns": data.success_patterns,
+        "already_patterns": data.already_patterns,
+        "auth_expired_patterns": data.auth_expired_patterns,
+    }
+    try:
+        record = request.app.state.automations.create(
+            data.name, handler_type, data.interval_hours * 3600, config, data.credential_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with request.app.state.sessions() as session:
+        return _periodic_signin_site_view(session.get(AutomationRecord, record.id), None)
+
+
+@router.get("/periodic-signin/sites")
+def list_periodic_signin_sites(request: Request) -> dict[str, Any]:
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
+        ).order_by(AutomationRecord.name)).all()
+        ids = [record.id for record in records]
+        latest: dict[str, ExecutionRecord] = {}
+        if ids:
+            executions = session.scalars(select(ExecutionRecord).where(
+                ExecutionRecord.automation_id.in_(ids)
+            ).order_by(ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc())).all()
+            for execution in executions:
+                latest.setdefault(execution.automation_id, execution)
+        return {
+            "items": [
+                _periodic_signin_site_view(record, latest.get(record.id)) for record in records
+            ]
+        }
+
+
+@router.patch("/periodic-signin/sites/{automation_id}/schedule")
+def set_periodic_signin_schedule(
+    automation_id: str, data: PeriodicSignInScheduleInput, request: Request,
+) -> dict[str, Any]:
+    with request.app.state.sessions.begin() as session:
+        record = _require_periodic_automation(session.get(AutomationRecord, automation_id))
+        config = json.loads(record.config_json)
+        config.update({
+            "timeout_seconds": data.timeout_seconds,
+            "random_delay_minutes": data.random_delay_minutes,
+            "retry_interval_minutes": data.retry_interval_hours * 60,
+            "max_retries": data.max_retries,
+        })
+        record.interval_seconds = data.interval_hours * 3600
+        record.config_json = json.dumps(config, ensure_ascii=False)
+        session.flush()
+        return _periodic_signin_site_view(record, None)
+
+
+@router.patch("/periodic-signin/sites/{automation_id}/enabled")
+def set_periodic_signin_site_enabled(
+    automation_id: str, data: PtSignInEnabledInput, request: Request,
+) -> dict[str, Any]:
+    with request.app.state.sessions.begin() as session:
+        record = _require_periodic_automation(session.get(AutomationRecord, automation_id))
+        record.enabled = data.enabled
+        if data.enabled:
+            record.next_run_at = utc_now()
+        session.flush()
+        return _periodic_signin_site_view(record, None)
+
+
+@router.delete("/periodic-signin/sites/{automation_id}", status_code=204)
+def delete_periodic_signin_site(automation_id: str, request: Request) -> None:
+    with request.app.state.sessions.begin() as session:
+        record = _require_periodic_automation(session.get(AutomationRecord, automation_id))
+        session.execute(delete(ExecutionRecord).where(ExecutionRecord.automation_id == automation_id))
+        session.delete(record)
+
+
+@router.post("/periodic-signin/sites/{automation_id}/run", status_code=202)
+def run_periodic_signin_site(automation_id: str, request: Request) -> dict[str, str]:
+    with request.app.state.sessions() as session:
+        _require_periodic_automation(session.get(AutomationRecord, automation_id))
+    execution = request.app.state.queue.enqueue_now(automation_id)
+    return {"execution_id": execution.id, "status": execution.status}
+
+
+@router.get("/periodic-signin/executions")
+def list_periodic_signin_executions(request: Request, limit: int = 50) -> dict[str, Any]:
+    limit = min(max(limit, 1), 200)
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(ExecutionRecord).join(AutomationRecord).where(
+            AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
+        ).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
         return {"items": [execution_view(item) for item in records]}
 
 
@@ -880,14 +1271,20 @@ def pt_signin_history(
         }
 
 
-def _validate_pt_url(url: str, credential_domain: str) -> None:
+def _validate_site_url(url: str, credential_domain: str | None = None) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise HTTPException(status_code=422, detail="签到地址必须是有效的 HTTP(S) URL")
+    if credential_domain is None:
+        return
     hostname = parsed.hostname.lower().rstrip(".")
     domain = credential_domain.lower().lstrip(".").rstrip(".")
     if hostname != domain and not hostname.endswith(f".{domain}"):
         raise HTTPException(status_code=422, detail="签到地址必须属于所选凭据域名")
+
+
+def _validate_pt_url(url: str, credential_domain: str) -> None:
+    _validate_site_url(url, credential_domain)
 
 
 def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[str, Any]]:
@@ -986,6 +1383,48 @@ def _require_pt_automation(record: AutomationRecord | None) -> AutomationRecord:
     if record is None or record.handler_type != "pt_signin":
         raise HTTPException(status_code=404, detail="PT 签到任务不存在")
     return record
+
+
+def _require_periodic_automation(record: AutomationRecord | None) -> AutomationRecord:
+    if record is None or record.handler_type not in {"browser_signin", "http_signin"}:
+        raise HTTPException(status_code=404, detail="普通周期任务不存在")
+    return record
+
+
+def _periodic_signin_site_view(
+    record: AutomationRecord | None, latest: ExecutionRecord | None,
+) -> dict[str, Any]:
+    record = _require_periodic_automation(record)
+    config = json.loads(record.config_json)
+    credential = record.credential
+    return {
+        "id": record.id,
+        "name": record.name,
+        "handler_type": record.handler_type,
+        "enabled": record.enabled,
+        "interval_hours": record.interval_seconds // 3600,
+        "next_run_at": record.next_run_at,
+        "url": config.get("url"),
+        "template_key": config.get("template_key"),
+        "credential": credential_view(credential) if credential else None,
+        "config": {
+            "timeout_seconds": config.get("timeout_seconds", 60),
+            "random_delay_minutes": config.get("random_delay_minutes", 30),
+            "retry_interval_hours": max(int(config.get("retry_interval_minutes", 120)) // 60, 1),
+            "max_retries": config.get("max_retries", 5),
+            "method": config.get("method", "GET"),
+            "wait_for_selector": config.get("wait_for_selector"),
+            "click_selector": config.get("click_selector"),
+            "click_role": config.get("click_role"),
+            "click_name": config.get("click_name"),
+            "click_exact": bool(config.get("click_exact", False)),
+            "wait_after_click_ms": config.get("wait_after_click_ms", 1500),
+            "success_patterns": config.get("success_patterns", []),
+            "already_patterns": config.get("already_patterns", []),
+            "auth_expired_patterns": config.get("auth_expired_patterns", []),
+        },
+        "last_execution": execution_view(latest) if latest else None,
+    }
 
 
 def _pt_signin_site_view(record: AutomationRecord | None,

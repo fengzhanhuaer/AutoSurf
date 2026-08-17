@@ -19,6 +19,10 @@
           <span class="nav-icon" aria-hidden="true">P</span>
           <span>PT 站点</span>
         </a>
+        <a class="nav-item" href="/app#periodic-signin" data-view="periodic-signin">
+          <span class="nav-icon" aria-hidden="true">C</span>
+          <span>周期签到</span>
+        </a>
         <a class="nav-item" href="/app#cookiecloud" data-view="cookiecloud">
           <span class="nav-icon" aria-hidden="true">S</span>
           <span>系统设置</span>
@@ -54,6 +58,11 @@
                 aria-selected="false" aria-controls="web-credentials-settings-panel"
                 data-settings-tab="web-credentials" tabindex="-1">
           Web 凭据
+        </button>
+        <button class="settings-tab" id="settings-tab-site-settings" type="button" role="tab"
+                aria-selected="false" aria-controls="site-settings-panel"
+                data-settings-tab="site-settings" tabindex="-1">
+          站点设置
         </button>
         <button class="settings-tab" id="settings-tab-upgrade" type="button" role="tab"
                 aria-selected="false" aria-controls="upgrade-settings-panel" data-settings-tab="upgrade" tabindex="-1">
@@ -291,6 +300,90 @@
         </form>
       </dialog>
 
+      <section class="settings-panel" id="periodic-signin-panel" hidden>
+        <section class="summary-strip" aria-label="周期签到概况">
+          <div class="summary-item"><span class="summary-label">普通站点</span><strong id="periodic-site-count">0</strong></div>
+          <div class="summary-item"><span class="summary-label">已启用</span><strong id="periodic-enabled-count">0</strong></div>
+          <div class="summary-item status-summary"><span class="summary-label">最近执行</span><strong id="periodic-recent-state">暂无记录</strong></div>
+        </section>
+
+        <div class="periodic-grid">
+          <section class="panel config-panel" aria-labelledby="periodic-config-title">
+            <div class="panel-heading">
+              <div>
+                <h2 id="periodic-config-title">新增普通站点任务</h2>
+                <p>内置 NodeSeek 模板，也可配置浏览器或 HTTP 任务。</p>
+              </div>
+            </div>
+            <form id="periodic-site-form">
+              <label class="field"><span>站点模板</span>
+                <select id="periodic-template">
+                  <option value="nodeseek">NodeSeek</option>
+                  <option value="custom_browser">自定义浏览器任务</option>
+                  <option value="custom_http">自定义 HTTP 任务</option>
+                </select>
+              </label>
+              <label class="field"><span>任务名称</span><input id="periodic-name" maxlength="128" required></label>
+              <label class="field"><span>站点凭据</span>
+                <select id="periodic-credential"><option value="">无需凭据</option></select>
+              </label>
+              <label class="field"><span>执行地址</span><input id="periodic-url" type="url" maxlength="2048" required></label>
+              <div class="form-grid">
+                <label class="field"><span>执行周期（小时）</span><input id="periodic-interval" type="number" min="1" max="720" value="24" required></label>
+                <label class="field"><span>超时（秒）</span><input id="periodic-timeout" type="number" min="1" max="180" value="60" required></label>
+              </div>
+              <div class="form-grid scheduling-grid">
+                <label class="field"><span>随机延迟（分钟）</span><input id="periodic-random-delay" type="number" min="0" max="1440" value="30" required></label>
+                <label class="field"><span>重试间隔（小时）</span><input id="periodic-retry-interval" type="number" min="1" max="168" value="2" required></label>
+                <label class="field"><span>重试次数</span><input id="periodic-max-retries" type="number" min="0" max="20" value="5" required></label>
+              </div>
+              <details class="advanced-settings">
+                <summary>高级执行与识别设置</summary>
+                <div class="form-grid">
+                  <label class="field"><span>执行方式</span><select id="periodic-handler"><option value="browser_signin">浏览器</option><option value="http_signin">HTTP</option></select></label>
+                  <label class="field"><span>HTTP 方法</span><select id="periodic-method"><option>GET</option><option>POST</option></select></label>
+                </div>
+                <label class="field"><span>页面就绪选择器</span><input id="periodic-wait-selector" maxlength="1024"></label>
+                <label class="field"><span>点击 CSS 选择器</span><input id="periodic-click-selector" maxlength="1024"></label>
+                <div class="form-grid">
+                  <label class="field"><span>按钮角色</span><input id="periodic-click-role" maxlength="64"></label>
+                  <label class="field"><span>按钮文字</span><input id="periodic-click-name" maxlength="256"></label>
+                </div>
+                <label class="row-toggle"><span><strong>精确匹配按钮文字</strong><small>避免点到同名或相似操作。</small></span><input id="periodic-click-exact" type="checkbox"><span class="toggle" aria-hidden="true"></span></label>
+                <label class="field"><span>点击后等待（毫秒）</span><input id="periodic-wait-after" type="number" min="0" max="30000" value="1500"></label>
+                <label class="field"><span>成功特征（每行一个正则）</span><textarea id="periodic-success-patterns"></textarea></label>
+                <label class="field"><span>已完成特征（每行一个正则）</span><textarea id="periodic-already-patterns"></textarea></label>
+                <label class="field"><span>登录失效特征（每行一个正则）</span><textarea id="periodic-auth-patterns"></textarea></label>
+              </details>
+              <div class="form-actions"><button class="button primary" id="periodic-save-button" type="submit">创建周期任务</button></div>
+            </form>
+          </section>
+
+          <section class="panel periodic-task-panel" aria-labelledby="periodic-task-title">
+            <div class="panel-heading"><div><h2 id="periodic-task-title">周期任务</h2><p>普通站点与 PT 站点相互独立。</p></div></div>
+            <div class="table-wrap periodic-table-wrap">
+              <table><thead><tr><th>站点</th><th>凭据</th><th>周期</th><th>下次执行</th><th>状态</th><th>启用</th><th>操作</th></tr></thead>
+                <tbody id="periodic-site-rows"><tr><td class="empty" colspan="7">暂无普通站点任务</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <dialog class="schedule-dialog" id="periodic-schedule-dialog" aria-labelledby="periodic-schedule-title">
+        <form id="periodic-schedule-form" method="dialog">
+          <div class="dialog-heading"><div><h2 id="periodic-schedule-title">周期调度</h2><p id="periodic-schedule-site">站点</p></div><button class="dialog-close" id="periodic-schedule-cancel" type="button" aria-label="关闭" title="关闭">×</button></div>
+          <div class="dialog-fields">
+            <label class="field"><span>执行周期（小时）</span><input id="periodic-schedule-interval" type="number" min="1" max="720" required></label>
+            <label class="field"><span>随机延迟（分钟）</span><input id="periodic-schedule-random-delay" type="number" min="0" max="1440" required></label>
+            <label class="field"><span>页面超时（秒）</span><input id="periodic-schedule-timeout" type="number" min="1" max="180" required></label>
+            <label class="field"><span>重试间隔（小时）</span><input id="periodic-schedule-retry-interval" type="number" min="1" max="168" required></label>
+            <label class="field"><span>重试次数</span><input id="periodic-schedule-max-retries" type="number" min="0" max="20" required></label>
+          </div>
+          <div class="dialog-actions"><button class="button secondary" id="periodic-schedule-dismiss" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
+        </form>
+      </dialog>
+
       <section class="settings-panel" id="cookiecloud-settings-panel" role="tabpanel"
                aria-labelledby="settings-tab-cookiecloud" hidden>
         <section class="summary-strip" aria-label="同步概况">
@@ -428,7 +521,19 @@
             </div>
           </div>
           <div class="token-sync-actions">
-            <button class="button primary" id="token-script-button" type="button">生成同步脚本</button>
+            <button class="button secondary" id="token-script-copy-button" type="button">复制脚本</button>
+            <button class="button primary" id="token-script-button" type="button">下载脚本</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="settings-panel" id="site-settings-panel" role="tabpanel"
+               aria-labelledby="settings-tab-site-settings" hidden>
+        <section class="panel site-settings-panel" aria-labelledby="site-settings-title">
+          <div class="panel-heading"><div><h2 id="site-settings-title">站点设置备份</h2><p>备份站点任务、凭据和 CookieCloud 配置，不包含执行历史。</p></div></div>
+          <div class="site-settings-content">
+            <div class="site-setting-row"><div><strong>访问范围</strong><p>默认仅允许局域网、回环地址及 198.18.0.0/15 访问。</p></div><span class="status-badge succeeded">仅限局域网</span></div>
+            <div class="site-setting-row"><div><strong>一键备份与恢复</strong><p>ZIP 内含敏感 Cookie 和密码，请妥善保管。恢复会替换现有站点配置。</p></div><div class="site-setting-actions"><input id="site-restore-file" type="file" accept=".zip,application/zip" hidden><button class="button secondary" id="site-restore-button" type="button">一键恢复</button><button class="button primary" id="site-backup-button" type="button">一键备份</button></div></div>
           </div>
         </section>
       </section>
