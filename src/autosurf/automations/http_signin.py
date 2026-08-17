@@ -27,9 +27,19 @@ class HttpSignInHandler:
             "User-Agent": str(config.get("user_agent") or context.user_agent or "AutoSurf/0.1"),
             "Accept": "application/json, text/plain, */*",
         }
+        if config.get("origin"):
+            headers["Origin"] = str(config["origin"])
+        if config.get("referer"):
+            headers["Referer"] = str(config["referer"])
+
+        request_kwargs = {}
+        if "json" in config:
+            request_kwargs["json"] = config["json"]
+        elif config.get("form") is not None:
+            request_kwargs["data"] = config["form"]
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, cookies=context.cookies,
                                      headers=headers) as client:
-            response = await client.request(method, url, data=config.get("form"))
+            response = await client.request(method, url, **request_kwargs)
 
         body = response.text[:1_000_000]
         details = {"url": str(response.url), "status_code": response.status_code}

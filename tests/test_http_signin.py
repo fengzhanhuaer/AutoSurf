@@ -19,8 +19,8 @@ async def test_http_signin_uses_cookiecloud_browser_user_agent(monkeypatch):
         async def __aexit__(self, *_args):
             return None
 
-        async def request(self, method, url, data=None):
-            captured.update({"method": method, "url": url, "data": data})
+        async def request(self, method, url, **kwargs):
+            captured.update({"method": method, "url": url, **kwargs})
             return httpx.Response(
                 200,
                 text='{"success":true,"message":"签到成功"}',
@@ -33,6 +33,9 @@ async def test_http_signin_uses_cookiecloud_browser_user_agent(monkeypatch):
         config={
             "url": "https://www.nodeseek.com/api/attendance?random=false",
             "method": "POST",
+            "origin": "https://www.nodeseek.com",
+            "referer": "https://www.nodeseek.com/board",
+            "json": {"random": False},
             "success_patterns": [r'"success"\s*:\s*true'],
         },
         cookies={"session": "secret"},
@@ -40,6 +43,9 @@ async def test_http_signin_uses_cookiecloud_browser_user_agent(monkeypatch):
     ))
 
     assert captured["headers"]["User-Agent"] == "Chrome-from-cookiecloud/151"
+    assert captured["headers"]["Origin"] == "https://www.nodeseek.com"
+    assert captured["headers"]["Referer"] == "https://www.nodeseek.com/board"
     assert captured["method"] == "POST"
+    assert captured["json"] == {"random": False}
     assert result.outcome == RunOutcome.SUCCESS
     assert result.details["status_code"] == 200
