@@ -1813,6 +1813,31 @@ def test_sunnypt_discovered_task_migrates_current_attendance_route(settings):
         assert config["discovery_strategy"] == "generic_browser"
 
 
+def test_pttime_discovered_task_migrates_to_www_cookie_scope(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:www.pttime.org", "www.pttime.org", [{
+            "name": "c_secure_uid", "value": "7",
+            "domain": ".www.pttime.org", "path": "/",
+        }], provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "PTTime", "pt_signin", 86400, {
+            "url": "https://pttime.org/attendance.php",
+            "credential_domain": "pttime.org",
+            "discovered": True,
+            "discovery_reason": "site_catalog",
+        }, credential.id,
+    )
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        config = json.loads(session.get(AutomationRecord, task.id).config_json)
+        assert config["url"] == "https://www.pttime.org/attendance.php"
+        assert config["credential_domain"] == "pttime.org"
+
+
 def test_soulvoice_discovered_task_migrates_to_catalog(settings):
     app = create_app(settings)
     credential = app.state.credentials.upsert(
@@ -2078,7 +2103,7 @@ async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(setti
     assert by_id[refresh_only.id]["profile_refresh_supported"] is True
     assert by_id[refresh_only.id]["profile_url"] == "https://zhuque.in/user/info"
     assert by_id[pttime_www.id]["name"] == "PTTime"
-    assert by_id[pttime_www.id]["url"] == "https://pttime.org/attendance.php"
+    assert by_id[pttime_www.id]["url"] == "https://www.pttime.org/attendance.php"
     assert set(by_id[pttime_www.id]["credential_ids"]) == {pttime_root.id, pttime_www.id}
     assert "c_secure_uid" not in candidates.text
     assert "secret" not in candidates.text

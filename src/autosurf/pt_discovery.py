@@ -47,7 +47,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("tjupt.org", "TJUPT"),
     PtSiteDefinition("club.hares.top", "Hares", "/attendance.php?action=sign"),
     PtSiteDefinition("pt.btschool.club", "BTSchool", "/index.php?action=addbonus"),
-    PtSiteDefinition("pttime.org", "PTTime"),
+    PtSiteDefinition("pttime.org", "PTTime", target_domain="www.pttime.org"),
     PtSiteDefinition("pt.0ff.cc", "pt.0ff.cc", default_profile_refresh=True),
     PtSiteDefinition("ptchdbits.co", "CHDBits", "/bakatest.php"),
     PtSiteDefinition("hdcity.city", "HDCity", "/"),
