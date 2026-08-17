@@ -20,6 +20,7 @@ from autosurf.automations.pt_signin import (
     _classify_pt_homepage,
     _complete_0ff_slider,
     _enrich_0ff_calendar_history,
+    _open_pt_signin_page,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
@@ -574,6 +575,24 @@ def test_site_signin_history_normalization_rejects_invalid_entries():
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "获得 [10]", {"success_patterns": ["获得 [10]"]}
     ) == RunOutcome.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_pttime_opens_signin_endpoint_instead_of_history_link():
+    class Page:
+        async def goto(self, url, **kwargs):
+            assert url == "https://www.pttime.org/attendance.php"
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60_000}
+            return "direct-response"
+
+        def locator(self, _selector):
+            raise AssertionError("PTTime homepage history link must not be clicked")
+
+    response = await _open_pt_signin_page(
+        Page(), "https://www.pttime.org/attendance.php", 60_000,
+    )
+
+    assert response == "direct-response"
 
 
 def test_text_signin_history_supports_pttime_records():

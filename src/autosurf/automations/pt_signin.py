@@ -1223,6 +1223,9 @@ async def _complete_0ff_slider(page: Any) -> bool:
 
 async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
     expected = validated_http_url(url)
+    hostname = (expected.hostname or "").lower().rstrip(".")
+    if hostname == "pttime.org" or hostname.endswith(".pttime.org"):
+        return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     link = page.locator('a[href*="attendance"]').filter(
         has_text=re.compile(r"签到|簽到", re.IGNORECASE),
     ).first
