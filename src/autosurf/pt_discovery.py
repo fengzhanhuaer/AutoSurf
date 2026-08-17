@@ -32,6 +32,7 @@ class PtSiteDefinition:
     aliases: tuple[str, ...] = ()
     profile_path: str | None = None
     target_domain: str | None = None
+    default_profile_refresh: bool = False
 
 
 # This catalog supplies stable names and known sign-in paths. Cookie signatures
@@ -47,6 +48,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("club.hares.top", "Hares", "/attendance.php?action=sign"),
     PtSiteDefinition("pt.btschool.club", "BTSchool", "/index.php?action=addbonus"),
     PtSiteDefinition("pttime.org", "PTTime"),
+    PtSiteDefinition("pt.0ff.cc", "pt.0ff.cc", default_profile_refresh=True),
     PtSiteDefinition("ptchdbits.co", "CHDBits", "/bakatest.php"),
     PtSiteDefinition("hdcity.city", "HDCity", "/"),
     PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
@@ -72,6 +74,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition(
         "sunnypt.top", "SunnyPT", "/user/attendance",
     ),
+    PtSiteDefinition("oshen.win", "OshenPT"),
 )
 
 
@@ -83,6 +86,7 @@ class PtDiscovery:
     reason: str
     strategy: str
     profile_url: str | None = None
+    profile_refresh_default: bool = False
 
     @property
     def supported(self) -> bool:
@@ -105,7 +109,7 @@ class PtDiscovery:
 
     @property
     def default_profile_refresh_enabled(self) -> bool:
-        return self.strategy in {
+        return self.profile_refresh_default or self.strategy in {
             "profile_refresh_only", "web_storage_browser", "web_storage_profile_refresh_only",
         }
 
@@ -143,6 +147,7 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
                 urljoin(f"https://{target_domain}/", definition.profile_path.lstrip("/"))
                 if definition.profile_path else None
             ),
+            profile_refresh_default=definition.default_profile_refresh,
         )
     if markers:
         return PtDiscovery(

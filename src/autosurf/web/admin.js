@@ -568,15 +568,21 @@ function renderPtHistory() {
 function renderPtStats() {
   elements.ptStatsRows.replaceChildren();
   if (!state.ptStats.length) {
-    elements.ptStatsRows.innerHTML = '<tr><td class="empty" colspan="9">暂无站点信息统计</td></tr>';
+    elements.ptStatsRows.innerHTML = '<tr><td class="empty" colspan="10">暂无站点信息统计</td></tr>';
     return;
   }
   for (const item of state.ptStats) {
     const row = document.createElement("tr");
-    row.title = item.updated_at ? `更新时间：${formatDate(item.updated_at)}` : "等待首次刷新";
     const stats = item.stats || {};
+    const refresh = ptStatsRefreshState(item, stats);
+    const title = [];
+    if (item.refresh_message) title.push(item.refresh_message);
+    if (item.refresh_updated_at) title.push(`最近刷新：${formatDate(item.refresh_updated_at)}`);
+    if (item.updated_at) title.push(`数据时间：${formatDate(item.updated_at)}`);
+    row.title = title.join("；") || "等待首次刷新";
     const values = [
       item.name,
+      refresh.label,
       stats.username || "-",
       stats.user_level || "-",
       stats.uploaded || "-",
@@ -588,14 +594,34 @@ function renderPtStats() {
     ];
     values.forEach((value, index) => {
       const cell = document.createElement("td");
-      cell.textContent = value;
+      if (index === 1) {
+        const badge = document.createElement("span");
+        badge.className = `status-badge ${refresh.key}`;
+        badge.textContent = value;
+        cell.append(badge);
+      } else {
+        cell.textContent = value;
+      }
       if (index === 0) cell.title = item.domain || item.name;
-      if (index === 3) cell.className = "stat-uploaded";
-      if (index === 4) cell.className = "stat-downloaded";
+      if (index === 4) cell.className = "stat-uploaded";
+      if (index === 5) cell.className = "stat-downloaded";
       row.append(cell);
     });
     elements.ptStatsRows.append(row);
   }
+}
+
+function ptStatsRefreshState(item, stats) {
+  if (item.refresh_outcome === "success" || item.refresh_outcome === "already_done") {
+    return Object.keys(stats).length
+      ? { key: "succeeded", label: "已刷新" }
+      : { key: "retry_wait", label: "未解析数据" };
+  }
+  if (item.refresh_outcome === "auth_expired") return { key: "failed", label: "登录失效" };
+  if (item.refresh_outcome === "blocked") return { key: "retry_wait", label: "验证受阻" };
+  if (item.refresh_outcome === "failed") return { key: "failed", label: "刷新失败" };
+  if (!item.profile_refresh_enabled) return { key: "", label: "已停用" };
+  return { key: "running", label: "等待刷新" };
 }
 
 function openPtSchedule(site) {

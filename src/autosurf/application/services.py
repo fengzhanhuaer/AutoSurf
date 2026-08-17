@@ -463,6 +463,10 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
             discovery = discover_pt_site(credential.domain, credential_markers)
             if discovery and config.get("discovered"):
                 changed = False
+                newly_cataloged = (
+                    config.get("discovery_reason") == "cookie_signature"
+                    and discovery.reason == "site_catalog"
+                )
                 if credential.provider == "cookiecloud":
                     aliases = pt_site_domain_aliases(credential.domain)
                     related = session.scalars(select(CredentialRecord).where(
@@ -501,6 +505,9 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                 if config.get("discovery_strategy") != discovery.strategy:
                     config["discovery_strategy"] = discovery.strategy
                     changed = True
+                if config.get("discovery_reason") != discovery.reason:
+                    config["discovery_reason"] = discovery.reason
+                    changed = True
                 if config.get("profile_url") != discovery.profile_url:
                     config["profile_url"] = discovery.profile_url
                     changed = True
@@ -528,7 +535,7 @@ def reconcile_pt_site_aliases(sessions: sessionmaker[Session],
                 if (
                     discovery.default_profile_refresh_enabled
                     and discovery.profile_refresh_supported
-                    and not previous_profile_refresh_supported
+                    and (newly_cataloged or not previous_profile_refresh_supported)
                     and not config.get("profile_refresh_enabled", False)
                 ):
                     config["profile_refresh_enabled"] = True

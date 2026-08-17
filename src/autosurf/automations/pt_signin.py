@@ -15,6 +15,7 @@ from autosurf.automations.browser_session import (
     validated_http_url,
     with_browser_details,
 )
+from autosurf.automations.captcha_ocr import recognize_oshen_captcha
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.pt_discovery import discover_pt_site, is_ignored_pt_domain
 
@@ -429,69 +430,59 @@ class SunnyPtAdapter:
         return hostname == "sunnypt.top" or hostname.endswith(".sunnypt.top")
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
-        body = await page_body_text(page)
-        initial = classify_pt_page(page.url, None, body, context.config)
-        if initial in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
-            return _classified_result(initial, page.url, None)
-        if _sunnypt_signed_in(body):
-            history = await extract_site_signin_history(page)
+        status = await _sunnypt_api(page, "GET", "/api/v1/attendance/status")
+        failure = _sunnypt_api_failure(status, page.url, "签到状态读取")
+        if failure:
+            return RunResult(
+                failure.outcome,
+                failure.message,
+                {**(failure.details or {}), "clicked": False},
+            )
+        attendance = _sunnypt_api_data(status)
+        if not isinstance(attendance.get("checked_in"), bool):
+            return RunResult(
+                RunOutcome.FAILED,
+                "SunnyPT 签到状态返回无效",
+                {"url": page.url, "status_code": status.get("status"), "clicked": False},
+            )
+        if attendance.get("checked_in") is True:
+            history = await _sunnypt_history(page)
             return RunResult(
                 RunOutcome.ALREADY_DONE,
                 "SunnyPT 今日已经签到",
-                {"url": page.url, "clicked": False, "site_history": history},
+                {
+                    "url": page.url,
+                    "status_code": status.get("status"),
+                    "clicked": False,
+                    "site_history": history,
+                },
             )
 
-        button = page.get_by_role(
-            "button", name=re.compile(r"^\s*(?:立即)?\s*签到\s*$"),
-        ).first
-        with suppress(Exception):
-            await button.wait_for(state="visible", timeout=5_000)
-        if not await button.is_visible():
-            session = await _sunnypt_profile_api(page)
-            if session["status"] in {401, 403, 404} or not session.get("authenticated"):
-                return RunResult(
-                    RunOutcome.AUTH_EXPIRED,
-                    "SunnyPT 登录状态已失效",
-                    {"url": page.url, "status_code": session["status"], "clicked": False},
-                )
+        check_in = await _sunnypt_api(page, "POST", "/api/v1/attendance/check-in")
+        failure = _sunnypt_api_failure(check_in, page.url, "签到")
+        if failure:
             return RunResult(
-                RunOutcome.FAILED,
-                "SunnyPT 签到页没有找到立即签到按钮",
-                {"url": page.url, "clicked": False},
+                failure.outcome,
+                failure.message,
+                {**(failure.details or {}), "clicked": True},
             )
-
-        await button.click()
-        for _ in range(10):
-            await page.wait_for_timeout(500)
-            body = await page_body_text(page)
-            outcome = classify_pt_page(page.url, None, body, context.config)
-            if outcome in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
-                return _classified_result(outcome, page.url, None, clicked=True)
-            if outcome == RunOutcome.SUCCESS or _sunnypt_signed_in(body):
-                history = await extract_site_signin_history(page)
-                return RunResult(
-                    RunOutcome.SUCCESS,
-                    "SunnyPT 签到成功",
-                    {"url": page.url, "clicked": True, "site_history": history},
-                )
+        history = await _sunnypt_history(page)
         return RunResult(
-            RunOutcome.FAILED,
-            "SunnyPT 点击签到后未确认今日状态",
-            {"url": page.url, "clicked": True},
+            RunOutcome.SUCCESS,
+            "SunnyPT 签到成功",
+            {
+                "url": page.url,
+                "status_code": check_in.get("status"),
+                "clicked": True,
+                "site_history": history,
+            },
         )
 
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
         response = await _sunnypt_profile_api(page)
-        if response["status"] in {401, 403, 404}:
-            return RunResult(
-                RunOutcome.AUTH_EXPIRED, "SunnyPT 登录状态已失效",
-                {"url": page.url, "status_code": response["status"]},
-            )
-        if response["status"] < 200 or response["status"] >= 300:
-            return RunResult(
-                RunOutcome.FAILED, "SunnyPT 个人信息刷新失败",
-                {"url": page.url, "status_code": response["status"]},
-            )
+        failure = _sunnypt_api_failure(response, page.url, "个人信息刷新")
+        if failure:
+            return failure
         profile = dict(response.get("profile") or {})
         profile["uploaded"] = _normalize_profile_size(profile.get("uploaded"))
         profile["downloaded"] = _normalize_profile_size(profile.get("downloaded"))
@@ -507,36 +498,112 @@ class SunnyPtAdapter:
         )
 
 
-def _sunnypt_signed_in(value: str) -> bool:
-    return bool(re.search(r"(?:今日|今天)\s*(?:已签到|已簽到)", value))
-
-
 async def _sunnypt_profile_api(page: Any) -> dict[str, Any]:
-    return await page.evaluate(r"""async () => {
-      const response = await fetch('/api/v1/user/basic-info', {credentials: 'same-origin'});
-      let payload = null;
-      try { payload = await response.json(); } catch (_) {}
-      let data = payload;
-      for (const key of ['data', 'result']) {
-        if (data && typeof data === 'object' && data[key] && typeof data[key] === 'object') {
-          data = data[key];
-        }
-      }
-      const profile = data && typeof data === 'object' ? {
-        username: data.username ?? '',
-        user_level: data.title || data.user_level || data.level || data.class || '',
-        uploaded: data.uploaded ?? '',
-        downloaded: data.downloaded ?? '',
-        ratio: data.ratio ?? '',
-        bonus: data.seed_bonus ?? data.bonus ?? '',
-        seeding_count: data.upload_num ?? data.seeding_count ?? '',
-      } : null;
-      return {
-        status: response.status,
-        authenticated: Boolean(data && typeof data === 'object' && (data.id || data.username)),
-        profile,
-      };
-    }""")
+    response = await _sunnypt_api(page, "GET", "/api/v1/user/details/info")
+    data = _sunnypt_api_data(response)
+    response["profile"] = {
+        "username": data.get("username", ""),
+        "user_level": data.get("title") or data.get("class") or "",
+        "uploaded": data.get("uploaded", ""),
+        "downloaded": data.get("downloaded", ""),
+        "ratio": data.get("ratio", ""),
+        "bonus": data.get("seed_bonus", data.get("bonus", "")),
+        "seeding_count": data.get("upload_num", data.get("seeding_count", "")),
+    } if data else None
+    response["authenticated"] = bool(
+        response.get("authenticated") and data and (data.get("id") or data.get("username"))
+    )
+    return response
+
+
+async def _sunnypt_history(page: Any) -> list[dict[str, str]]:
+    today = date.today()
+    response = await _sunnypt_api(
+        page, "GET", f"/api/v1/attendance/monthly?month={today.month}&year={today.year}",
+    )
+    if _sunnypt_api_failure(response, page.url, "签到历史读取"):
+        return []
+    records = _sunnypt_api_data(response).get("records")
+    if not isinstance(records, list):
+        return []
+    return normalize_site_signin_history([
+        {"date": item.get("date"), "reward": item.get("points", "")}
+        for item in records
+        if isinstance(item, dict)
+    ])
+
+
+async def _sunnypt_api(page: Any, method: str, path: str) -> dict[str, Any]:
+    return await page.evaluate(
+        r"""async ({method, path}) => {
+          const sessionResponse = await fetch('/api/auth/session', {credentials: 'same-origin'});
+          let session = null;
+          try { session = await sessionResponse.json(); } catch (_) {}
+          const token = session?.data?.accessToken;
+          if (!token) {
+            return {
+              session_status: sessionResponse.status,
+              status: 0,
+              authenticated: false,
+              body: null,
+            };
+          }
+          const target = new URL(path, 'https://api.sunnypt.top');
+          if (target.origin !== 'https://api.sunnypt.top') {
+            throw new Error('invalid SunnyPT API URL');
+          }
+          try {
+            const response = await fetch(target, {
+              method,
+              headers: {Authorization: `Bearer ${token}`},
+            });
+            let body = null;
+            try { body = await response.json(); } catch (_) {}
+            return {
+              session_status: sessionResponse.status,
+              status: response.status,
+              authenticated: true,
+              body,
+            };
+          } catch (error) {
+            return {
+              session_status: sessionResponse.status,
+              status: 0,
+              authenticated: true,
+              body: null,
+              error: String(error || '').slice(0, 300),
+            };
+          }
+        }""",
+        {"method": method, "path": path},
+    )
+
+
+def _sunnypt_api_data(response: dict[str, Any]) -> dict[str, Any]:
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return {}
+    data = body.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _sunnypt_api_failure(response: dict[str, Any], url: str, action: str) -> RunResult | None:
+    status_code = int(response.get("status") or 0)
+    if not response.get("authenticated") or status_code in {401, 403}:
+        return RunResult(
+            RunOutcome.AUTH_EXPIRED,
+            "SunnyPT 登录状态已失效",
+            {"url": url, "status_code": status_code or response.get("session_status")},
+        )
+    body = response.get("body")
+    code = body.get("code") if isinstance(body, dict) else None
+    if status_code < 200 or status_code >= 300 or code not in {None, 0}:
+        return RunResult(
+            RunOutcome.FAILED,
+            f"SunnyPT {action}失败",
+            {"url": url, "status_code": status_code, "code": code},
+        )
+    return None
 
 
 class ZhuqueAdapter:
@@ -748,6 +815,69 @@ class OpenCdAdapter:
             RunOutcome.FAILED,
             "OpenCD 签到接口没有返回可识别结果",
             {"url": response.url, "status_code": response.status, "clicked": True},
+        )
+
+
+class OshenPtAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "oshen.win" or hostname.endswith(".oshen.win")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = await page_body_text(page)
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome:
+            return _classified_result(outcome, page.url, None)
+
+        form = page.locator(
+            'form:has(input[name="imagestring"]):has(input[name="imagehash"])'
+        ).first
+        captcha = form.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
+        answer = form.locator('input[name="imagestring"]').first
+        submit = form.locator('input[type="submit"], button[type="submit"]').first
+        if not all([
+            await form.is_visible(),
+            await captcha.is_visible(),
+            await answer.is_visible(),
+            await submit.is_visible(),
+        ]):
+            return RunResult(
+                RunOutcome.FAILED,
+                "OshenPT 签到页没有找到完整的验证码表单",
+                {"url": page.url, "clicked": False},
+            )
+
+        value = recognize_oshen_captcha(await captcha.screenshot(type="png"))
+        if value is None:
+            return RunResult(
+                RunOutcome.BLOCKED,
+                "OshenPT 图片验证码未能可靠识别",
+                {"url": page.url, "clicked": False},
+            )
+
+        await answer.fill(value)
+        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+            await submit.click()
+        response = await navigation.value
+        status_code = response.status if response else None
+        body = await page_body_text(page)
+        outcome = classify_pt_page(page.url, status_code, body, context.config)
+        if outcome:
+            return _classified_result(outcome, page.url, status_code, clicked=True)
+        if re.search(
+            r"(?:验证码|驗證碼).{0,12}(?:错误|錯誤|不正确|不正確)|invalid\s+captcha",
+            body,
+            re.IGNORECASE,
+        ):
+            return RunResult(
+                RunOutcome.FAILED,
+                "OshenPT 图片验证码识别错误",
+                {"url": page.url, "status_code": status_code, "clicked": True},
+            )
+        return RunResult(
+            RunOutcome.FAILED,
+            "OshenPT 提交签到后未识别到结果",
+            {"url": page.url, "status_code": status_code, "clicked": True},
         )
 
 

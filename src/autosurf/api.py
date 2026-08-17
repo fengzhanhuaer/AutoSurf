@@ -744,14 +744,17 @@ def list_pt_site_stats(request: Request) -> dict[str, Any]:
         ).order_by(ExecutionRecord.finished_at.desc(), ExecutionRecord.scheduled_at.desc())).all() \
             if site_ids else []
         latest: dict[str, tuple[dict[str, str], datetime]] = {}
+        latest_refresh: dict[str, tuple[str | None, str | None, datetime]] = {}
         for execution in executions:
-            if execution.automation_id in latest:
-                continue
-            stats = _profile_stats_from_result(execution.result_json)
-            if stats:
-                latest[execution.automation_id] = (
-                    stats, execution.finished_at or execution.scheduled_at,
-                )
+            timestamp = execution.finished_at or execution.scheduled_at
+            if execution.automation_id not in latest_refresh:
+                refresh = _profile_refresh_status_from_result(execution.result_json)
+                if refresh is not None:
+                    latest_refresh[execution.automation_id] = (*refresh, timestamp)
+            if execution.automation_id not in latest:
+                stats = _profile_stats_from_result(execution.result_json)
+                if stats:
+                    latest[execution.automation_id] = (stats, timestamp)
 
         items = []
         for site in sites:
@@ -760,6 +763,9 @@ def list_pt_site_stats(request: Request) -> dict[str, Any]:
             if not config.get("profile_refresh_enabled", False) and snapshot is None:
                 continue
             stats, updated_at = snapshot if snapshot else ({}, None)
+            refresh_outcome, refresh_message, refresh_updated_at = latest_refresh.get(
+                site.id, (None, None, None),
+            )
             items.append({
                 "automation_id": site.id,
                 "name": site.name,
@@ -767,6 +773,9 @@ def list_pt_site_stats(request: Request) -> dict[str, Any]:
                 "profile_refresh_enabled": bool(config.get("profile_refresh_enabled", False)),
                 "updated_at": updated_at,
                 "stats": stats,
+                "refresh_outcome": refresh_outcome,
+                "refresh_message": refresh_message,
+                "refresh_updated_at": refresh_updated_at,
             })
         return {"items": items}
 
@@ -1098,6 +1107,25 @@ def _profile_stats_from_result(result_json: str | None) -> dict[str, str]:
                 if value is not None and str(value).strip()
             })
     return {}
+
+
+def _profile_refresh_status_from_result(
+    result_json: str | None,
+) -> tuple[str | None, str | None] | None:
+    if not result_json:
+        return None
+    with suppress(ValueError, TypeError):
+        result = json.loads(result_json)
+        actions = (result.get("details") or {}).get("actions")
+        if not isinstance(actions, dict):
+            return None
+        refresh = actions.get("profile_refresh")
+        if not isinstance(refresh, dict) or not refresh.get("enabled"):
+            return None
+        outcome = str(refresh.get("outcome") or "").strip() or None
+        message = str(refresh.get("message") or "").strip()[:300] or None
+        return outcome, message
+    return None
 
 
 @router.put("/cookiecloud/sources/{uuid}")

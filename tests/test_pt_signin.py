@@ -11,6 +11,7 @@ from autosurf.automations.pt_signin import (
     FiftyTwoPtAdapter,
     MTeamAdapter,
     OpenCdAdapter,
+    OshenPtAdapter,
     PtSignInHandler,
     SunnyPtAdapter,
     TjuptAdapter,
@@ -499,16 +500,33 @@ async def test_pt_stats_api_returns_latest_profile_snapshot(settings):
         }, credential.id,
     )
     execution = app.state.queue.enqueue_now(automation.id)
+    first_finished_at = utc_now() - timedelta(minutes=1)
     with app.state.sessions.begin() as session:
         record = session.get(ExecutionRecord, execution.id)
         record.status = "succeeded"
-        record.finished_at = utc_now()
+        record.finished_at = first_finished_at
         record.result_json = json.dumps({
             "outcome": "success",
             "message": "done",
             "details": {"actions": {"profile_refresh": {"details": {
                 "profile_stats": {"username": "mapleren", "uploaded": "32.77 TiB"},
             }}}},
+        })
+    latest = app.state.queue.enqueue_now(automation.id)
+    latest_finished_at = utc_now()
+    with app.state.sessions.begin() as session:
+        record = session.get(ExecutionRecord, latest.id)
+        record.status = "failed"
+        record.finished_at = latest_finished_at
+        record.result_json = json.dumps({
+            "outcome": "auth_expired",
+            "message": "expired",
+            "details": {"actions": {"profile_refresh": {
+                "enabled": True,
+                "outcome": "auth_expired",
+                "message": "个人信息页要求重新登录",
+                "details": {"status_code": 401},
+            }}},
         })
 
     transport = httpx.ASGITransport(app=app)
@@ -517,9 +535,16 @@ async def test_pt_stats_api_returns_latest_profile_snapshot(settings):
             "/api/v1/pt-signin/stats", auth=(settings.username, settings.password)
         )
     assert response.status_code == 200
-    assert response.json()["items"][0]["stats"] == {
+    item = response.json()["items"][0]
+    assert item["stats"] == {
         "username": "mapleren", "uploaded": "32.77 TiB",
     }
+    assert item["refresh_outcome"] == "auth_expired"
+    assert item["refresh_message"] == "个人信息页要求重新登录"
+    assert item["updated_at"].startswith(first_finished_at.isoformat(timespec="seconds"))
+    assert item["refresh_updated_at"].startswith(
+        latest_finished_at.isoformat(timespec="seconds")
+    )
 
 
 def test_site_signin_history_normalization_rejects_invalid_entries():
@@ -718,49 +743,34 @@ async def test_mteam_adapter_does_not_treat_signature_failure_as_success():
 
 
 @pytest.mark.asyncio
-async def test_sunnypt_adapter_clicks_and_confirms_today_status():
-    class Body:
-        def __init__(self, page):
-            self.page = page
+async def test_sunnypt_adapter_uses_current_api_and_returns_monthly_history(monkeypatch):
+    calls = []
 
-        async def inner_text(self):
-            return "今日 已签到" if self.page.signed else "今日 未签到\n今天别忘了签到"
+    async def sunny_api(_page, method, path):
+        calls.append((method, path))
+        if path == "/api/v1/attendance/status":
+            return {
+                "status": 200, "authenticated": True,
+                "body": {"code": 0, "data": {"checked_in": False}},
+            }
+        if path == "/api/v1/attendance/check-in":
+            return {
+                "status": 200, "authenticated": True,
+                "body": {"code": 0, "data": {"days": 1, "points": 10}},
+            }
+        assert path.startswith("/api/v1/attendance/monthly?")
+        return {
+            "status": 200, "authenticated": True,
+            "body": {"code": 0, "data": {"records": [
+                {"date": "2026-08-05", "points": 10},
+                {"date": "2026-08-08", "points": 10},
+            ]}},
+        }
 
-    class Button:
-        def __init__(self, page):
-            self.page = page
-            self.first = self
-
-        async def wait_for(self, **_kwargs):
-            return None
-
-        async def is_visible(self):
-            return True
-
-        async def click(self):
-            self.page.clicked = True
-            self.page.signed = True
+    monkeypatch.setattr("autosurf.automations.pt_signin._sunnypt_api", sunny_api)
 
     class Page:
         url = "https://sunnypt.top/user/attendance"
-        frames = None
-
-        def __init__(self):
-            self.clicked = False
-            self.signed = False
-
-        def locator(self, selector):
-            if selector == "body":
-                return Body(self)
-            raise ValueError(selector)
-
-        def get_by_role(self, role, name):
-            assert role == "button"
-            assert name.search("立即签到")
-            return Button(self)
-
-        async def wait_for_timeout(self, _timeout):
-            return None
 
     page = Page()
     adapter = SunnyPtAdapter()
@@ -770,46 +780,28 @@ async def test_sunnypt_adapter_clicks_and_confirms_today_status():
 
     assert adapter.matches(page.url) is True
     assert adapter.matches("https://not-sunnypt.top/") is False
-    assert page.clicked is True
     assert result.outcome == RunOutcome.SUCCESS
     assert result.message == "SunnyPT 签到成功"
     assert result.details["clicked"] is True
+    assert result.details["site_history"] == [
+        {"date": "2026-08-05", "reward": "10"},
+        {"date": "2026-08-08", "reward": "10"},
+    ]
+    assert calls[:2] == [
+        ("GET", "/api/v1/attendance/status"),
+        ("POST", "/api/v1/attendance/check-in"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_sunnypt_missing_button_reports_expired_profile_session():
-    class Body:
-        async def inner_text(self):
-            return "正在加载..."
+async def test_sunnypt_status_api_reports_expired_session(monkeypatch):
+    async def sunny_api(_page, _method, _path):
+        return {"status": 401, "authenticated": True, "body": None}
 
-    class Button:
-        first = None
-
-        def __init__(self):
-            self.first = self
-
-        async def wait_for(self, **_kwargs):
-            return None
-
-        async def is_visible(self):
-            return False
+    monkeypatch.setattr("autosurf.automations.pt_signin._sunnypt_api", sunny_api)
 
     class Page:
         url = "https://sunnypt.top/user/attendance"
-        frames = None
-
-        def locator(self, selector):
-            assert selector == "body"
-            return Body()
-
-        def get_by_role(self, role, name):
-            assert role == "button"
-            assert name.search("立即签到")
-            return Button()
-
-        async def evaluate(self, script):
-            assert "/api/v1/user/basic-info" in script
-            return {"status": 404, "authenticated": False, "profile": None}
 
     result = await SunnyPtAdapter().sign_in(
         Page(), RunContext("test", {"url": Page.url}, {"sid": "expired"}, []),
@@ -817,30 +809,58 @@ async def test_sunnypt_missing_button_reports_expired_profile_session():
 
     assert result.outcome == RunOutcome.AUTH_EXPIRED
     assert result.message == "SunnyPT 登录状态已失效"
-    assert result.details["status_code"] == 404
+    assert result.details["status_code"] == 401
     assert result.details["clicked"] is False
 
 
 @pytest.mark.asyncio
-async def test_sunnypt_adapter_refreshes_current_basic_info_api():
+async def test_sunnypt_does_not_submit_when_status_payload_is_invalid(monkeypatch):
+    calls = []
+
+    async def sunny_api(_page, method, path):
+        calls.append((method, path))
+        return {
+            "status": 200, "authenticated": True,
+            "body": {"code": 0, "data": {}},
+        }
+
+    monkeypatch.setattr("autosurf.automations.pt_signin._sunnypt_api", sunny_api)
+
     class Page:
         url = "https://sunnypt.top/user/attendance"
 
-        async def evaluate(self, script):
-            assert "/api/v1/user/basic-info" in script
-            return {
-                "status": 200,
-                "authenticated": True,
-                "profile": {
-                    "username": "mapleren",
-                    "user_level": "Power User",
-                    "uploaded": "5676238811136",
-                    "downloaded": "228267147264",
-                    "ratio": 24.866,
-                    "bonus": 520,
-                    "seeding_count": 12,
-                },
-            }
+    result = await SunnyPtAdapter().sign_in(
+        Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
+    )
+
+    assert result.outcome == RunOutcome.FAILED
+    assert result.message == "SunnyPT 签到状态返回无效"
+    assert calls == [("GET", "/api/v1/attendance/status")]
+
+
+@pytest.mark.asyncio
+async def test_sunnypt_adapter_refreshes_current_details_api(monkeypatch):
+    async def sunny_api(_page, method, path):
+        assert (method, path) == ("GET", "/api/v1/user/details/info")
+        return {
+            "status": 200,
+            "authenticated": True,
+            "body": {"code": 0, "data": {
+                "id": 7,
+                "username": "mapleren",
+                "title": "Power User",
+                "uploaded": "5676238811136",
+                "downloaded": "228267147264",
+                "ratio": 24.866,
+                "seed_bonus": 520,
+                "upload_num": 12,
+            }},
+        }
+
+    monkeypatch.setattr("autosurf.automations.pt_signin._sunnypt_api", sunny_api)
+
+    class Page:
+        url = "https://sunnypt.top/user/attendance"
 
     result = await SunnyPtAdapter().refresh_profile(
         Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
@@ -952,7 +972,7 @@ async def test_site_profile_api_reports_expired_login(adapter):
     class Page:
         url = "https://tracker.test/"
 
-        async def evaluate(self, _script):
+        async def evaluate(self, _script, *_args):
             return {"status": 401, "authenticated": False, "profile": None}
 
         def expect_response(self, predicate, **kwargs):
@@ -1121,6 +1141,133 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 
     assert result.outcome == RunOutcome.BLOCKED
     assert result.message == "OpenCD 签到需要图片验证码"
+
+
+@pytest.mark.asyncio
+async def test_oshenpt_adapter_recognizes_captcha_and_confirms_success(monkeypatch):
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.recognize_oshen_captcha",
+        lambda _image: "MEP5MP",
+    )
+
+    class Locator:
+        first = None
+
+        def __init__(self, page, kind):
+            self.page = page
+            self.kind = kind
+            self.first = self
+
+        def locator(self, selector):
+            if "img" in selector:
+                return Locator(self.page, "captcha")
+            if "imagestring" in selector:
+                return Locator(self.page, "answer")
+            return Locator(self.page, "submit")
+
+        async def inner_text(self):
+            return "签到成功，本次签到获得 10 魔力值" if self.page.submitted else "签到"
+
+        async def is_visible(self):
+            return True
+
+        async def screenshot(self, **_kwargs):
+            return b"captcha-image"
+
+        async def fill(self, value):
+            self.page.answer = value
+
+        async def click(self):
+            self.page.submitted = True
+
+    class Response:
+        status = 200
+
+    class Navigation:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return Response()
+            return resolve()
+
+    class Page:
+        url = "https://www.oshen.win/attendance.php"
+        frames = None
+
+        def __init__(self):
+            self.answer = None
+            self.submitted = False
+
+        def locator(self, selector):
+            return Locator(self, "body" if selector == "body" else "form")
+
+        def expect_navigation(self, **_kwargs):
+            return Navigation()
+
+    page = Page()
+    result = await OshenPtAdapter().sign_in(
+        page, RunContext("test", {"url": page.url}, {"sid": "secret"}, []),
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.message == "PT 站签到成功"
+    assert result.details["clicked"] is True
+    assert page.answer == "MEP5MP"
+    assert "MEP5MP" not in json.dumps(result.details)
+
+
+@pytest.mark.asyncio
+async def test_oshenpt_adapter_does_not_submit_unreliable_captcha(monkeypatch):
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.recognize_oshen_captcha",
+        lambda _image: None,
+    )
+
+    class Locator:
+        first = None
+
+        def __init__(self, kind):
+            self.kind = kind
+            self.first = self
+
+        def locator(self, selector):
+            if "img" in selector:
+                return Locator("captcha")
+            if "imagestring" in selector:
+                return Locator("answer")
+            return Locator("submit")
+
+        async def inner_text(self):
+            return "签到"
+
+        async def is_visible(self):
+            return True
+
+        async def screenshot(self, **_kwargs):
+            return b"captcha-image"
+
+        async def click(self):
+            raise AssertionError("unreliable captcha must not be submitted")
+
+    class Page:
+        url = "https://www.oshen.win/attendance.php"
+        frames = None
+
+        def locator(self, selector):
+            return Locator("body" if selector == "body" else "form")
+
+    result = await OshenPtAdapter().sign_in(
+        Page(), RunContext("test", {"url": Page.url}, {"sid": "secret"}, []),
+    )
+
+    assert result.outcome == RunOutcome.BLOCKED
+    assert result.details["clicked"] is False
 
 
 @pytest.mark.asyncio
@@ -1479,6 +1626,20 @@ def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
     assert sunny.profile_url is None
 
 
+def test_oshen_and_0ff_are_cataloged_with_expected_actions():
+    oshen = discover_pt_site("www.oshen.win", {"c_secure_uid"})
+    zeroff = discover_pt_site("pt.0ff.cc", {"c_secure_uid"})
+
+    assert oshen is not None
+    assert oshen.site_key == "oshen.win"
+    assert oshen.name == "OshenPT"
+    assert oshen.url == "https://oshen.win/attendance.php"
+    assert zeroff is not None
+    assert zeroff.sign_in_supported is True
+    assert zeroff.profile_refresh_supported is True
+    assert zeroff.default_profile_refresh_enabled is True
+
+
 @pytest.mark.parametrize(
     "domain", ["www.ptlover.cc", "raingfh.top", "lemonhd.club", "pt.gtk.pw"],
 )
@@ -1610,6 +1771,43 @@ def test_sunnypt_discovered_task_migrates_current_attendance_route(settings):
         assert config["discovery_strategy"] == "generic_browser"
 
 
+def test_newly_cataloged_0ff_task_enables_profile_refresh_once(settings):
+    app = create_app(settings)
+    credential = app.state.credentials.upsert(
+        "cookiecloud:test:pt.0ff.cc", "pt.0ff.cc", {"c_secure_uid": "7"},
+        provider="cookiecloud",
+    )
+    task = app.state.automations.create(
+        "pt.0ff.cc", "pt_signin", 86400, {
+            "url": "https://pt.0ff.cc/attendance.php",
+            "credential_domain": "pt.0ff.cc",
+            "discovered": True,
+            "discovery_reason": "cookie_signature",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": False,
+            "sign_in_supported": True,
+            "profile_refresh_supported": True,
+        }, credential.id,
+    )
+
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+
+    with app.state.sessions() as session:
+        config = json.loads(session.get(AutomationRecord, task.id).config_json)
+        assert config["profile_refresh_enabled"] is True
+        assert config["discovery_reason"] == "site_catalog"
+
+    with app.state.sessions.begin() as session:
+        record = session.get(AutomationRecord, task.id)
+        config = json.loads(record.config_json)
+        config["profile_refresh_enabled"] = False
+        record.config_json = json.dumps(config)
+    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+    with app.state.sessions() as session:
+        config = json.loads(session.get(AutomationRecord, task.id).config_json)
+        assert config["profile_refresh_enabled"] is False
+
+
 @pytest.mark.asyncio
 async def test_pt_handler_rejects_cross_domain_before_starting_browser():
     handler = PtSignInHandler()
@@ -1629,6 +1827,7 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     assert "pt_signin" in app.state.registry.types()
     handler = app.state.registry.get("pt_signin")
     assert any(isinstance(adapter, MTeamAdapter) for adapter in handler.adapters)
+    assert any(isinstance(adapter, OshenPtAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, SunnyPtAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, ZhuqueAdapter) for adapter in handler.adapters)
     credential = app.state.credentials.upsert(

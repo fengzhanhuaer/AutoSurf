@@ -28,6 +28,7 @@ from autosurf.automations.pt_signin import (
     FiftyTwoPtAdapter,
     MTeamAdapter,
     OpenCdAdapter,
+    OshenPtAdapter,
     PtSignInHandler,
     RousiAdapter,
     SunnyPtAdapter,
@@ -54,7 +55,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
     registry.register(PtSignInHandler([
-        FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), TjuptAdapter(), RousiAdapter(),
+        FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), OshenPtAdapter(),
+        TjuptAdapter(), RousiAdapter(),
         MTeamAdapter(), SunnyPtAdapter(), ZhuqueAdapter(),
     ]))
     secrets = SecretBox(settings.secret_key)
