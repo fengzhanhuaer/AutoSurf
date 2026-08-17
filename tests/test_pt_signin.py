@@ -1633,7 +1633,7 @@ def test_oshen_and_0ff_are_cataloged_with_expected_actions():
     assert oshen is not None
     assert oshen.site_key == "oshen.win"
     assert oshen.name == "OshenPT"
-    assert oshen.url == "https://oshen.win/attendance.php"
+    assert oshen.url == "https://www.oshen.win/attendance.php"
     assert zeroff is not None
     assert zeroff.sign_in_supported is True
     assert zeroff.profile_refresh_supported is True
