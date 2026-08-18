@@ -103,6 +103,60 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
     assert deleted.status_code == 204
 
 
+@pytest.mark.asyncio
+async def test_periodic_candidates_collect_templates_and_expose_execution_history(settings):
+    app = create_app(settings)
+    root = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:nodeseek.com", "nodeseek.com",
+        [{"name": "cf_clearance", "value": "cf", "domain": ".nodeseek.com", "path": "/"}],
+    )
+    www = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
+        [{"name": "session", "value": "secret", "domain": "www.nodeseek.com", "path": "/"}],
+    )
+    unknown = app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:example.test", "example.test",
+        [{"name": "session", "value": "secret", "domain": "example.test", "path": "/"}],
+    )
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        candidates = await client.get("/api/v1/periodic-signin/candidates", auth=auth)
+        rejected = await client.post("/api/v1/periodic-signin/sites/collect", auth=auth, json={
+            "credential_ids": [unknown.id],
+        })
+        collected = await client.post("/api/v1/periodic-signin/sites/collect", auth=auth, json={
+            "credential_ids": [root.id],
+            "interval_hours": 12,
+            "timeout_seconds": 45,
+            "random_delay_minutes": 10,
+            "retry_interval_hours": 1,
+            "max_retries": 3,
+        })
+        site = collected.json()["created"][0]
+        queued = await client.post(
+            f"/api/v1/periodic-signin/sites/{site['id']}/run", auth=auth,
+        )
+        history = await client.get("/api/v1/periodic-signin/executions", auth=auth)
+        configured = await client.get("/api/v1/periodic-signin/candidates", auth=auth)
+
+    candidate = candidates.json()["items"][0]
+    assert candidates.status_code == 200
+    assert len(candidates.json()["items"]) == 1
+    assert candidate["template_key"] == "nodeseek"
+    assert candidate["credential"]["id"] == www.id
+    assert set(candidate["credential_ids"]) == {root.id, www.id}
+    assert candidate["configured"] is False
+    assert rejected.status_code == 422
+    assert collected.status_code == 201
+    assert site["handler_type"] == "http_signin"
+    assert site["interval_hours"] == 12
+    assert queued.status_code == 202
+    assert history.json()["items"][0]["automation_name"] == "NodeSeek"
+    assert history.json()["items"][0]["domain"] == "www.nodeseek.com"
+    assert configured.json()["items"][0]["configured"] is True
+
+
 def test_periodic_cookiecloud_snapshot_merges_root_and_www(settings):
     app = create_app(settings)
     app.state.credentials.upsert_cookie_records(
@@ -270,6 +324,8 @@ async def test_management_session_login_and_logout(settings):
         assert 'id="periodic-signin-panel"' in app_page.text
         assert 'id="periodic-site-form"' in app_page.text
         assert 'id="periodic-site-rows"' in app_page.text
+        assert 'id="periodic-candidate-rows"' in app_page.text
+        assert 'id="periodic-history-rows"' in app_page.text
         assert 'id="token-sync-base-url"' in app_page.text
         assert 'id="token-script-button"' in app_page.text
         assert 'id="token-script-copy-button"' in app_page.text

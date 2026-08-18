@@ -307,7 +307,47 @@
           <div class="summary-item status-summary"><span class="summary-label">最近执行</span><strong id="periodic-recent-state">暂无记录</strong></div>
         </section>
 
-        <div class="periodic-grid">
+        <div class="settings-tabs signin-tabs" id="periodic-signin-tabs" role="tablist" aria-label="周期签到">
+          <button class="settings-tab active" id="periodic-signin-tab-tasks" type="button" role="tab"
+                  aria-selected="true" aria-controls="periodic-tasks-panel" data-periodic-tab="tasks">
+            周期任务
+          </button>
+          <button class="settings-tab" id="periodic-signin-tab-history" type="button" role="tab"
+                  aria-selected="false" aria-controls="periodic-history-panel" data-periodic-tab="history" tabindex="-1">
+            执行记录
+          </button>
+        </div>
+
+        <section class="signin-subpanel" id="periodic-tasks-panel" role="tabpanel"
+                 aria-labelledby="periodic-signin-tab-tasks">
+          <section class="panel discovery-panel" aria-labelledby="periodic-discovery-title">
+            <div class="panel-heading discovery-heading">
+              <div>
+                <h2 id="periodic-discovery-title">发现的普通站点</h2>
+                <p>CookieCloud · 内置周期模板</p>
+              </div>
+              <div class="discovery-settings">
+                <label><span>周期</span><select id="periodic-collect-interval" aria-label="周期任务执行周期"><option value="12">12 小时</option><option value="24" selected>24 小时</option><option value="48">48 小时</option><option value="168">7 天</option></select></label>
+                <label><span>超时</span><select id="periodic-collect-timeout" aria-label="周期任务超时"><option value="30">30 秒</option><option value="60" selected>60 秒</option><option value="90">90 秒</option><option value="120">120 秒</option></select></label>
+                <label><span>随机（分）</span><input id="periodic-collect-random-delay" type="number" min="0" max="1440" value="30" aria-label="周期任务随机延迟分钟"></label>
+                <label><span>重试（时）</span><input id="periodic-collect-retry-interval" type="number" min="1" max="168" value="2" aria-label="周期任务重试间隔小时"></label>
+                <label><span>重试次数</span><input id="periodic-collect-max-retries" type="number" min="0" max="20" value="5" aria-label="周期任务最大重试次数"></label>
+              </div>
+            </div>
+            <div class="discovery-actions">
+              <button class="button secondary" id="periodic-select-all-button" type="button">全选可添加站点</button>
+              <button class="button primary" id="periodic-collect-button" type="button" disabled>添加所选站点</button>
+            </div>
+            <div class="table-wrap discovery-table-wrap">
+              <table>
+                <thead><tr><th class="select-column"><span class="visually-hidden">选择</span></th><th>站点</th><th>凭据域名</th><th>识别依据</th><th>状态</th></tr></thead>
+                <tbody id="periodic-candidate-rows"><tr><td class="empty" colspan="5">暂无识别到的普通站点</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <details class="manual-site-panel">
+            <summary>手动添加自定义周期任务</summary>
           <section class="panel config-panel" aria-labelledby="periodic-config-title">
             <div class="panel-heading">
               <div>
@@ -358,6 +398,7 @@
               <div class="form-actions"><button class="button primary" id="periodic-save-button" type="submit">创建周期任务</button></div>
             </form>
           </section>
+          </details>
 
           <section class="panel periodic-task-panel" aria-labelledby="periodic-task-title">
             <div class="panel-heading"><div><h2 id="periodic-task-title">周期任务</h2><p>普通站点与 PT 站点相互独立。</p></div></div>
@@ -367,7 +408,20 @@
               </table>
             </div>
           </section>
-        </div>
+        </section>
+
+        <section class="signin-subpanel" id="periodic-history-panel" role="tabpanel"
+                 aria-labelledby="periodic-signin-tab-history" hidden>
+          <section class="table-section" aria-labelledby="periodic-history-title">
+            <div class="section-heading"><div><h2 id="periodic-history-title">执行记录</h2></div></div>
+            <div class="table-wrap">
+              <table class="periodic-history-table">
+                <thead><tr><th>任务</th><th>计划时间</th><th>开始时间</th><th>状态</th><th>尝试</th><th>结果</th></tr></thead>
+                <tbody id="periodic-history-rows"><tr><td class="empty" colspan="6">暂无执行记录</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
       </section>
 
       <dialog class="schedule-dialog" id="periodic-schedule-dialog" aria-labelledby="periodic-schedule-title">

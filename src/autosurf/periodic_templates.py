@@ -1,6 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class PeriodicSiteTemplate:
+    key: str
+    name: str
+    domains: tuple[str, ...]
+
+
+PERIODIC_SITE_TEMPLATES = (
+    PeriodicSiteTemplate("nodeseek", "NodeSeek", ("nodeseek.com", "www.nodeseek.com")),
+)
 
 
 NODESEEK_TEMPLATE_CONFIG: dict[str, Any] = {
@@ -21,6 +34,11 @@ NODESEEK_TEMPLATE_CONFIG: dict[str, Any] = {
     "already_patterns": ["今日已签到", "已经签到", "重复签到"],
     "auth_expired_patterns": ["请先登录", "未登录", "登录后"],
 }
+
+
+def discover_periodic_template(domain: str) -> PeriodicSiteTemplate | None:
+    normalized = domain.lower().strip().lstrip(".").rstrip(".")
+    return next((item for item in PERIODIC_SITE_TEMPLATES if normalized in item.domains), None)
 
 
 def apply_periodic_template(

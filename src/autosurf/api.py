@@ -34,7 +34,7 @@ from autosurf.infrastructure.database import (
     ExecutionRecord,
 )
 from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site, is_ignored_pt_domain
-from autosurf.periodic_templates import apply_periodic_template
+from autosurf.periodic_templates import apply_periodic_template, discover_periodic_template
 from autosurf.userscripts import (
     WEB_CREDENTIAL_SCRIPT_SOURCES,
     build_web_credential_userscript_bundle,
@@ -142,6 +142,10 @@ class PeriodicSignInScheduleInput(BaseModel):
     random_delay_minutes: int = Field(default=30, ge=0, le=1440)
     retry_interval_hours: int = Field(default=2, ge=1, le=168)
     max_retries: int = Field(default=5, ge=0, le=20)
+
+
+class PeriodicSignInCollectInput(PeriodicSignInScheduleInput):
+    credential_ids: list[str] = Field(min_length=1, max_length=200)
 
 
 class LoginInput(BaseModel):
@@ -843,6 +847,74 @@ def list_periodic_signin_sites(request: Request) -> dict[str, Any]:
         }
 
 
+@router.get("/periodic-signin/candidates")
+def list_periodic_signin_candidates(request: Request) -> dict[str, Any]:
+    return {"items": _periodic_signin_candidates(request)}
+
+
+@router.post("/periodic-signin/sites/collect", status_code=201)
+def collect_periodic_signin_sites(
+    data: PeriodicSignInCollectInput, request: Request,
+) -> dict[str, Any]:
+    credential_ids = list(dict.fromkeys(data.credential_ids))
+    candidate_items = _periodic_signin_candidates(request)
+    candidates = {
+        credential_id: item
+        for item in candidate_items
+        for credential_id in item["credential_ids"]
+    }
+    selected = [candidates.get(credential_id) for credential_id in credential_ids]
+    if any(item is None for item in selected):
+        raise HTTPException(status_code=422, detail="所选凭据中包含未识别的周期站点")
+
+    requested: list[dict[str, Any]] = []
+    selected_keys: set[str] = set()
+    for item in selected:
+        assert item is not None
+        if item["template_key"] in selected_keys:
+            continue
+        selected_keys.add(item["template_key"])
+        requested.append(item)
+
+    created_ids: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in requested:
+        if candidate["configured"]:
+            skipped.append(candidate)
+            continue
+        config = {
+            "handler_type": candidate["handler_type"],
+            "template_key": candidate["template_key"],
+            "url": candidate["url"],
+            "timeout_seconds": data.timeout_seconds,
+            "random_delay_minutes": data.random_delay_minutes,
+            "retry_interval_minutes": data.retry_interval_hours * 60,
+            "max_retries": data.max_retries,
+        }
+        handler_type, config = apply_periodic_template(config, candidate["handler_type"])
+        try:
+            record = request.app.state.automations.create(
+                candidate["name"], handler_type, data.interval_hours * 3600, config,
+                candidate["credential"]["id"],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        created_ids.append(record.id)
+
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.id.in_(created_ids)
+        ).order_by(AutomationRecord.name)).all() if created_ids else []
+        return {
+            "created": [_periodic_signin_site_view(record, None) for record in records],
+            "skipped": [{
+                "credential_id": item["credential"]["id"],
+                "automation_id": item["automation_id"],
+                "reason": "already_configured",
+            } for item in skipped],
+        }
+
+
 @router.patch("/periodic-signin/sites/{automation_id}/schedule")
 def set_periodic_signin_schedule(
     automation_id: str, data: PeriodicSignInScheduleInput, request: Request,
@@ -898,7 +970,7 @@ def list_periodic_signin_executions(request: Request, limit: int = 50) -> dict[s
         records = session.scalars(select(ExecutionRecord).join(AutomationRecord).where(
             AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
         ).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
-        return {"items": [execution_view(item) for item in records]}
+        return {"items": [_periodic_execution_view(item) for item in records]}
 
 
 @router.post("/pt-signin/sites", status_code=201)
@@ -1290,6 +1362,59 @@ def _validate_pt_url(url: str, credential_domain: str) -> None:
     _validate_site_url(url, credential_domain)
 
 
+def _periodic_signin_candidates(request: Request) -> list[dict[str, Any]]:
+    with request.app.state.sessions() as session:
+        credentials = session.scalars(select(CredentialRecord).where(
+            CredentialRecord.provider == "cookiecloud"
+        ).order_by(CredentialRecord.domain, CredentialRecord.name)).all()
+        automations = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
+        )).all()
+        configured: dict[str, str] = {}
+        for automation in automations:
+            with suppress(TypeError, ValueError):
+                template_key = str(json.loads(automation.config_json).get("template_key") or "")
+                if template_key:
+                    configured.setdefault(template_key, automation.id)
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for credential in credentials:
+            template = discover_periodic_template(credential.domain)
+            if template is None:
+                continue
+            handler_type, config = apply_periodic_template({"template_key": template.key})
+            item = {
+                "credential": credential_view(credential),
+                "credential_ids": [credential.id],
+                "template_key": template.key,
+                "site_key": template.key,
+                "name": template.name,
+                "url": config["url"],
+                "site_url": config.get("site_url") or config["url"],
+                "handler_type": handler_type,
+                "reason": "site_template",
+                "supported": True,
+                "configured": template.key in configured,
+                "automation_id": configured.get(template.key),
+                "_score": (
+                    credential.domain.lower().startswith("www."), credential.updated_at,
+                ),
+            }
+            existing = grouped.get(template.key)
+            if existing is None:
+                grouped[template.key] = item
+            elif item["_score"] > existing["_score"]:
+                item["credential_ids"] = [credential.id, *existing["credential_ids"]]
+                grouped[template.key] = item
+            else:
+                existing["credential_ids"].append(credential.id)
+
+    items = list(grouped.values())
+    for item in items:
+        item.pop("_score", None)
+    return sorted(items, key=lambda item: item["name"].casefold())
+
+
 def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[str, Any]]:
     with request.app.state.sessions() as session:
         credentials = session.scalars(select(CredentialRecord).where(
@@ -1505,6 +1630,17 @@ def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
     result = execution_view(record)
     result.update({
         "automation_name": record.automation.name,
+        "domain": record.automation.credential.domain if record.automation.credential else None,
+    })
+    return result
+
+
+def _periodic_execution_view(record: ExecutionRecord) -> dict[str, Any]:
+    result = execution_view(record)
+    config = json.loads(record.automation.config_json)
+    result.update({
+        "automation_name": record.automation.name,
+        "url": config.get("site_url") or config.get("url"),
         "domain": record.automation.credential.domain if record.automation.credential else None,
     })
     return result

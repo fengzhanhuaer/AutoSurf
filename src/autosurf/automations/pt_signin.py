@@ -960,8 +960,14 @@ def web_storage_init_script(url: str, values: dict[str, str]) -> str:
 
 
 def profile_refresh_skip_result(sign_in: RunResult | None, url: str) -> RunResult | None:
-    if sign_in is None or sign_in.outcome != RunOutcome.AUTH_EXPIRED:
+    if sign_in is None or sign_in.outcome not in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
         return None
+    if sign_in.outcome == RunOutcome.BLOCKED:
+        return RunResult(
+            RunOutcome.BLOCKED,
+            "访问验证未通过，未刷新个人信息",
+            {"url": url},
+        )
     return RunResult(
         RunOutcome.AUTH_EXPIRED,
         "登录已失效，未刷新个人信息",
@@ -1045,6 +1051,9 @@ class PtSignInHandler:
                                 )
                             if sign_in_result is None:
                                 response = await _open_pt_signin_page(page, url, timeout_ms)
+                                sign_in_result = await _resolve_0ff_slider(
+                                    page, url, response.status if response else None, screenshot,
+                                )
                         if sign_in_result is None:
                             if adapter:
                                 sign_in_result = await adapter.sign_in(page, context)
@@ -1219,6 +1228,31 @@ async def _complete_0ff_slider(page: Any) -> bool:
     except Exception:
         return False
     return False
+
+
+async def _resolve_0ff_slider(
+    page: Any, url: str, status_code: int | None, screenshot: Path,
+) -> RunResult | None:
+    if (urlparse(url).hostname or "").lower().rstrip(".") != "pt.0ff.cc":
+        return None
+    try:
+        handler = page.locator("#dragHandler")
+        container = page.locator("#dragContainer")
+        required = await handler.is_visible() and await container.is_visible()
+    except Exception:
+        required = False
+    if not required:
+        return None
+    if await _complete_0ff_slider(page):
+        with suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        return None
+    await _save_screenshot(page, screenshot)
+    return RunResult(
+        RunOutcome.BLOCKED,
+        "拖动滑块验证未通过",
+        {"url": page.url or url, "status_code": status_code, "screenshot": str(screenshot)},
+    )
 
 
 async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:

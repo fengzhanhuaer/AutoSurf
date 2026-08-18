@@ -219,8 +219,11 @@ td:first-child { color: var(--text); font-weight: 600; }
 .token-sync-table td:last-child, .token-sync-table th:last-child { text-align: right; }
 .token-sync-actions { padding: 16px 20px 20px; display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--border); }
 .periodic-grid { display: grid; grid-template-columns: minmax(340px, .8fr) minmax(600px, 1.45fr); gap: 18px; align-items: start; }
-.periodic-task-panel { min-width: 0; }
+.periodic-task-panel { min-width: 0; margin-top: 18px; }
 .periodic-table-wrap { border: 0; border-radius: 0 0 var(--radius) var(--radius); }
+.periodic-history-table { min-width: 900px; }
+.periodic-history-table th:first-child { width: 190px; }
+.periodic-history-table th:last-child { min-width: 280px; }
 .site-settings-panel { width: min(820px, 100%); }
 .site-settings-content { padding: 2px 20px; }
 .site-setting-row { min-height: 92px; padding: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--border); }

@@ -21,6 +21,7 @@ from autosurf.automations.pt_signin import (
     _complete_0ff_slider,
     _enrich_0ff_calendar_history,
     _open_pt_signin_page,
+    _resolve_0ff_slider,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
@@ -268,6 +269,41 @@ async def test_0ff_slider_completion_drags_the_fixed_track():
         ("up",),
     ]
     assert page.loaded is True
+
+
+@pytest.mark.asyncio
+async def test_0ff_slider_failure_is_reported_as_blocked(tmp_path):
+    class Locator:
+        async def is_visible(self):
+            return True
+
+        async def bounding_box(self):
+            return None
+
+    class Page:
+        url = "https://pt.0ff.cc/attendance.php"
+
+        def __init__(self):
+            self.screenshot_path = None
+
+        def locator(self, selector):
+            assert selector in {"#dragHandler", "#dragContainer"}
+            return Locator()
+
+        async def screenshot(self, **kwargs):
+            self.screenshot_path = kwargs["path"]
+
+    page = Page()
+    screenshot = tmp_path / "0ff-slider.png"
+    result = await _resolve_0ff_slider(
+        page, "https://pt.0ff.cc/attendance.php", 200, screenshot,
+    )
+
+    assert result is not None
+    assert result.outcome == RunOutcome.BLOCKED
+    assert result.message == "拖动滑块验证未通过"
+    assert result.details["screenshot"] == str(screenshot)
+    assert page.screenshot_path == str(screenshot)
 
 
 def test_pt_profile_url_and_combined_action_results():
@@ -572,6 +608,13 @@ def test_site_signin_history_normalization_rejects_invalid_entries():
     assert skipped_refresh is not None
     assert skipped_refresh.outcome == RunOutcome.AUTH_EXPIRED
     assert skipped_refresh.message == "登录已失效，未刷新个人信息"
+    blocked_refresh = profile_refresh_skip_result(
+        RunResult(RunOutcome.BLOCKED, "拖动滑块验证未通过"),
+        "https://pt.0ff.cc/attendance.php",
+    )
+    assert blocked_refresh is not None
+    assert blocked_refresh.outcome == RunOutcome.BLOCKED
+    assert blocked_refresh.message == "访问验证未通过，未刷新个人信息"
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "获得 [10]", {"success_patterns": ["获得 [10]"]}
     ) == RunOutcome.SUCCESS
