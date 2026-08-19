@@ -1319,7 +1319,9 @@ async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch)
             self.kind = kind
             self.first = self
 
-        def locator(self, _selector):
+        def locator(self, selector):
+            if self.kind == "answer" and selector == "xpath=preceding::img[1]":
+                return Element(self.page, "captcha")
             return Element(self.page, "missing")
 
         async def is_visible(self):
@@ -1374,8 +1376,6 @@ async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch)
                 return Element(self, "missing")
             if selector == "body":
                 return Element(self, "body")
-            if selector.startswith("img"):
-                return Element(self, "captcha")
             if selector == 'input[name="imagestring"]':
                 return Element(self, "answer")
             return Element(self, "missing")

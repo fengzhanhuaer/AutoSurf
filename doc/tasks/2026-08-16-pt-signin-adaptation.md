@@ -137,7 +137,7 @@
 - 当前阶段：发布
 - 当前计划步骤：TASK-013 提交、推送、在线升级和逐站有界回归
 - 当前门禁：准备门禁通过；完成门禁已重开
-- 最近完成检查点：2026-08-19 23:47 +08:00 第一轮正式复测闭合八项；修正 OpenCD AJAX 控件和复用执行记录的旧截图，聚焦 92 项、全量 153 项通过。
+- 最近完成检查点：2026-08-19 23:58 +08:00 `19dc9eb` 正式验证旧截图已清理；OpenCD 图片无标准属性，改为从答案输入框定位最近图片，聚焦 92 项、全量 153 项通过。
 - 工作区状态：`main` 与 `origin/main` 为 `ed67365`，启用本轮前工作区干净；当前仅本账本将产生任务内修改。
 - 下一步唯一动作：提交并推送当前差异，等待 CI 后通过 Web 在线升级。
 - 恢复时先读取：本账本、`git status`、PT 管理 API 汇总、`pt_discovery.py`、`pt_signin.py`。
@@ -269,7 +269,7 @@
 | DEF-018 | REQ-016 / TEST-012 | 高 | SunnyPT 首页内容和登录态已完整渲染，但 `DOMContentLoaded` 未在 60 秒内完成，外层导航超时使专用 API 适配器完全没有执行 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 同源且正文可用的部分加载页继续执行，`about:blank` 仍抛超时 |
 | DEF-019 | REQ-016 / TEST-012 | 中 | Audiences 点击签到后显示“人机验证/验证通过后自动完成签到”，通用挑战词未覆盖而误报普通失败 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 当前正文稳定归类为 `blocked`，不误报成功 |
 | DEF-020 | REQ-016 / TEST-012 | 高 | HDDolby Cookie 进入异地登录二步验证码页，仍被当作已登录页面并继续资料刷新，最终误报“没有签到入口；资料刷新成功” | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 二步登录正文归类为 `auth_expired`，处理器会跳过资料刷新 |
-| DEF-021 | REQ-016 / TEST-012 | 高 | OpenCD 已确认是六位 NexusPHP 字符验证码；首次接线仍假设完整表单和整页导航，正式页面实际把验证码以 AJAX 控件注入首页 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 同时支持完整表单与页面级控件；OpenCD 等待插件响应；可靠六位值才提交且必须确认成功 |
+| DEF-021 | REQ-016 / TEST-012 | 高 | OpenCD 已确认是六位 NexusPHP 字符验证码；正式页面把无标准 `alt/src` 特征的验证码以 AJAX 控件注入首页，不形成完整表单或整页导航 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 完整表单优先；页面级控件从 `imagestring` 定位最近图片和签到按钮；等待插件响应；可靠六位值才提交且必须确认成功 |
 | DEF-022 | REQ-016 / TEST-012 | 中 | NodeSeek `ConnectTimeout` 直接逃逸到工作队列，执行记录没有结果；周期重试间隔较长且一次瞬时连接失败即结束本次处理 | `已完成` | `http_signin.py`、`tests/test_http_signin.py` | 只对连接尚未建立的超时/错误安全重试一次；最终返回带类型和次数的 `blocked` 结果 |
 | DEF-023 | REQ-016 / TEST-012 | 低 | 等待重试复用原执行 ID，先前失败截图文件会在本次成功后继续被调试 API 当作当前截图展示 | `已完成` | `pt_signin.py` | 每次 PT 执行开始前删除同一执行 ID 的旧截图；仅本次新失败重新生成 |
 
@@ -319,6 +319,7 @@
 | FACT-034 | 外部当前访问可到达 U2 并进入 `/portal.php` 认证页；NodeSeek 对通用抓取入口返回 403 | 两站当前公开入口 | U2 不是全站死亡，正式容器的 `about:blank` 超时保留为部署网络/凭据侧问题；NodeSeek 以正式安全重试结果为准 |
 | FACT-035 | `c6eef4a` 正式复测中 SunnyPT `success`、U2 `already_done`；Audiences/HDDolby 分别准确为 `blocked/auth_expired`；HDKyl/OKPT 保持 `blocked`；NodeSeek 返回两次安全连接失败的结构化结果 | 正式调试和任务 API | SunnyPT、U2 与四项分类修复闭合；外部阻断未伪装成成功 |
 | FACT-036 | OpenCD 正式截图显示六位字符码、输入框和“签到”按钮直接位于首页顶部，页面 URL 仍为 `/`；插件响应并未形成完整表单导航 | 正式受控截图 | DEF-021 增加 AJAX 控件和响应确认路径 |
+| FACT-037 | `19dc9eb` 正式 SunnyPT 新执行为 `already_done` 且 `artifact_url=null`；OpenCD 仍停在页面级控件，离线裁剪同一正式截图可稳定识别为六位 `8C32MN` | 正式调试 API、受控截图与本地 OCR | DEF-023 正式闭合；OpenCD 剩余问题仅为图片 DOM 定位，OCR 能力已由当前样本验证 |
 
 ## 十一、风险与阻塞
 
@@ -391,6 +392,7 @@
 | 2026-08-19 23:15 +08:00 | 完成 58 个任务矩阵并读取三张受控失败截图；重试 SSH 仍拒绝连接 | 确认四项代码缺陷；U2、TJUPT、HDKyl、OKPT、NodeSeek 为外部或待有界复测项 | REQ-015/TEST-011 通过，准备门禁通过，TASK-011 进行中 | 修复 DEF-018 至 DEF-021 并补聚焦测试 |
 | 2026-08-19 23:25 +08:00 | 完成 DEF-018 至 DEF-022 实现和回归 | 聚焦 91 项、全量 152 项、编译和差异检查通过；U2 外部可达但正式容器仍需发布后复测 | REQ-016、TASK-011、TASK-012、TEST-012、TEST-013 完成 | 提交、推送、在线升级并逐站有界回归 |
 | 2026-08-19 23:47 +08:00 | `c6eef4a` CI 与在线升级完成，九项有界执行进入终态或等待重试；读取 OpenCD 新截图并完成后续补丁 | SunnyPT/U2 成功；Audiences/HDDolby/CF/NodeSeek 分类准确；OpenCD 暴露 AJAX 控件差异；成功记录存在旧截图残留风险 | 新增并关闭 DEF-023，补强 DEF-021；最终 92 项聚焦、153 项全量通过 | 发布后续提交，仅复测 OpenCD 与成功截图状态 |
+| 2026-08-19 23:58 +08:00 | `19dc9eb` CI、在线升级及 SunnyPT/OpenCD 有界复测完成 | SunnyPT 旧截图清理生效；OpenCD 图片缺少既有 CSS 特征，但当前样本 OCR 正确 | DEF-023 正式闭合；DEF-021 改用答案输入框的相邻图片定位并通过 92/153 项测试 | 发布最终 OpenCD 定位补丁并触发一次复测 |
 
 ## 十四、完成摘要
 

@@ -937,13 +937,20 @@ async def _nexusphp_captcha_controls(page: Any) -> tuple[Any, Any, Any] | None:
         pass
 
     try:
-        captcha = page.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
         answer = page.locator('input[name="imagestring"]').first
+        with suppress(Exception):
+            await answer.wait_for(state="visible", timeout=5_000)
+        captcha = answer.locator("xpath=preceding::img[1]")
         submit = page.get_by_role(
             "button", name=re.compile(r"^\s*(?:签到|簽到)\s*$"),
         ).first
         with suppress(Exception):
             await captcha.wait_for(state="visible", timeout=5_000)
+        if not await submit.is_visible():
+            submit = answer.locator(
+                "xpath=following::*[self::button or "
+                "self::input[@type='submit' or @type='button']][1]"
+            )
         if all([
             await captcha.is_visible(),
             await answer.is_visible(),
