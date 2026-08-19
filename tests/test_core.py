@@ -318,6 +318,7 @@ async def test_management_uses_dedicated_login_page_and_docs_require_session(set
     assert "CookieCloud" not in login_page.text
     assert css.status_code == 200
     assert javascript.status_code == 200
+    assert 'document.execCommand("copy")' in javascript.text
     assert login_css.status_code == 200
     assert login_javascript.status_code == 200
 

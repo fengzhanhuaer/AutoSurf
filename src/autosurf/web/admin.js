@@ -1197,9 +1197,39 @@ function updateCredentialCopyControls() {
   elements.copyPasswordButton.setAttribute("aria-label", label);
 }
 
+async function writeClipboardText(value) {
+  const text = String(value ?? "");
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) {}
+  }
+
+  const previousFocus = document.activeElement;
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.readOnly = true;
+  textArea.setAttribute("aria-hidden", "true");
+  Object.assign(textArea.style, {
+    position: "fixed", top: "0", left: "0", width: "1px", height: "1px",
+    padding: "0", border: "0", opacity: "0", pointerEvents: "none",
+  });
+  document.body.append(textArea);
+  try {
+    textArea.focus();
+    textArea.select();
+    textArea.setSelectionRange(0, text.length);
+    if (!document.execCommand("copy")) throw new Error("copy command was rejected");
+  } finally {
+    textArea.remove();
+    if (previousFocus instanceof HTMLElement) previousFocus.focus({ preventScroll: true });
+  }
+}
+
 async function copyCredentialValue(value, successMessage) {
   try {
-    await navigator.clipboard.writeText(value);
+    await writeClipboardText(value);
     showToast(successMessage);
   } catch (_) {
     showToast("浏览器未允许复制，请手动选择内容", true);
@@ -1551,7 +1581,7 @@ elements.refreshButton.addEventListener("click", () => {
 });
 elements.copyButton.addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(elements.endpoint.textContent);
+    await writeClipboardText(elements.endpoint.textContent);
     showToast("连接地址已复制");
   } catch (_) {
     showToast("浏览器未允许复制，请手动选择地址", true);
@@ -1623,7 +1653,7 @@ elements.tokenScriptCopyButton.addEventListener("click", async () => {
   setBusy(true);
   try {
     const script = await generateWebCredentialScript();
-    await navigator.clipboard.writeText(script);
+    await writeClipboardText(script);
     showToast("同步脚本已复制；旧脚本的上传密钥同时失效");
   } catch (error) {
     if (error.status === 401) goToLogin();
