@@ -37,9 +37,44 @@ class HttpSignInHandler:
             request_kwargs["json"] = config["json"]
         elif config.get("form") is not None:
             request_kwargs["data"] = config["form"]
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, cookies=context.cookies,
-                                     headers=headers) as client:
-            response = await client.request(method, url, **request_kwargs)
+        response = None
+        connect_error: httpx.RequestError | None = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=timeout,
+                    cookies=context.cookies,
+                    headers=headers,
+                ) as client:
+                    response = await client.request(method, url, **request_kwargs)
+                break
+            except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                connect_error = exc
+                if attempt == 0:
+                    continue
+            except httpx.TimeoutException as exc:
+                return RunResult(
+                    RunOutcome.BLOCKED,
+                    "站点请求超时",
+                    {"url": url, "error_type": type(exc).__name__, "attempts": attempt + 1},
+                )
+            except httpx.RequestError as exc:
+                return RunResult(
+                    RunOutcome.FAILED,
+                    "站点网络请求失败",
+                    {"url": url, "error_type": type(exc).__name__, "attempts": attempt + 1},
+                )
+        if response is None:
+            return RunResult(
+                RunOutcome.BLOCKED,
+                "站点连接超时，安全重试后仍不可达",
+                {
+                    "url": url,
+                    "error_type": type(connect_error).__name__ if connect_error else "RequestError",
+                    "attempts": 2,
+                },
+            )
 
         body = response.text[:1_000_000]
         details = {"url": str(response.url), "status_code": response.status_code}

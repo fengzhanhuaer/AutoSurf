@@ -60,6 +60,9 @@ AUTH_EXPIRED_PATTERNS = (
     r"not\s+logged\s+in",
     r"sign\s+in\s+to\s+continue",
     r"name=[\"'](?:username|user|email)[\"']",
+    r"异地登录提醒",
+    r"(?:两步|二步|兩步).{0,8}(?:验证码|驗證碼)",
+    r"完成.{0,8}(?:两步|二步|兩步).{0,8}(?:验证|驗證).{0,16}成功登录",
 )
 CHALLENGE_PATTERNS = (
     r"cf-chl-",
@@ -67,6 +70,9 @@ CHALLENGE_PATTERNS = (
     r"just\s+a\s+moment",
     r"attention\s+required",
     r"验证您是真人",
+    r"人机验证",
+    r"人機驗證",
+    r"(?:验证|驗證)通过后将自动完成签到",
     r"雷池\s*WAF",
     r"客户端异常.{0,24}合法用户",
 )
@@ -803,6 +809,11 @@ class OpenCdAdapter:
         response = await pending.value
         response_body = (await response.text())[:1_000_000]
         if "name=\"imagehash\"" in response_body and "name=\"imagestring\"" in response_body:
+            with suppress(Exception):
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            result = await _submit_nexusphp_captcha(page, context, "OpenCD")
+            if result is not None:
+                return result
             return RunResult(
                 RunOutcome.BLOCKED,
                 "OpenCD 签到需要图片验证码",
@@ -835,6 +846,20 @@ class NexusPhpCaptchaAdapter:
         if outcome:
             return _classified_result(outcome, page.url, None)
 
+        result = await _submit_nexusphp_captcha(page, context, self.site_name)
+        if result is not None:
+            return result
+        return RunResult(
+            RunOutcome.FAILED,
+            f"{self.site_name} 签到页没有找到完整的验证码表单",
+            {"url": page.url, "clicked": False},
+        )
+
+
+async def _submit_nexusphp_captcha(
+    page: Any, context: RunContext, site_name: str,
+) -> RunResult | None:
+    try:
         form = page.locator(
             'form:has(input[name="imagestring"]):has(input[name="imagehash"])'
         ).first
@@ -849,44 +874,42 @@ class NexusPhpCaptchaAdapter:
             await answer.is_visible(),
             await submit.is_visible(),
         ]):
-            return RunResult(
-                RunOutcome.FAILED,
-                f"{self.site_name} 签到页没有找到完整的验证码表单",
-                {"url": page.url, "clicked": False},
-            )
+            return None
+    except Exception:
+        return None
 
-        value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
-        if value is None:
-            return RunResult(
-                RunOutcome.BLOCKED,
-                f"{self.site_name} 图片验证码未能可靠识别",
-                {"url": page.url, "clicked": False},
-            )
+    value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
+    if value is None:
+        return RunResult(
+            RunOutcome.BLOCKED,
+            f"{site_name} 图片验证码未能可靠识别",
+            {"url": page.url, "clicked": False},
+        )
 
-        await answer.fill(value)
-        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-            await submit.click()
-        response = await navigation.value
-        status_code = response.status if response else None
-        body = await page_body_text(page)
-        outcome = classify_pt_page(page.url, status_code, body, context.config)
-        if outcome:
-            return _classified_result(outcome, page.url, status_code, clicked=True)
-        if re.search(
-            r"(?:验证码|驗證碼).{0,12}(?:错误|錯誤|不正确|不正確)|invalid\s+captcha",
-            body,
-            re.IGNORECASE,
-        ):
-            return RunResult(
-                RunOutcome.FAILED,
-                f"{self.site_name} 图片验证码识别错误",
-                {"url": page.url, "status_code": status_code, "clicked": True},
-            )
+    await answer.fill(value)
+    async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+        await submit.click()
+    response = await navigation.value
+    status_code = response.status if response else None
+    body = await page_body_text(page)
+    outcome = classify_pt_page(page.url, status_code, body, context.config)
+    if outcome:
+        return _classified_result(outcome, page.url, status_code, clicked=True)
+    if re.search(
+        r"(?:验证码|驗證碼).{0,12}(?:错误|錯誤|不正确|不正確)|invalid\s+captcha",
+        body,
+        re.IGNORECASE,
+    ):
         return RunResult(
             RunOutcome.FAILED,
-            f"{self.site_name} 提交签到后未识别到结果",
+            f"{site_name} 图片验证码识别错误",
             {"url": page.url, "status_code": status_code, "clicked": True},
         )
+    return RunResult(
+        RunOutcome.FAILED,
+        f"{site_name} 提交签到后未识别到结果",
+        {"url": page.url, "status_code": status_code, "clicked": True},
+    )
 
 
 class OshenPtAdapter(NexusPhpCaptchaAdapter):
@@ -1034,9 +1057,7 @@ class PtSignInHandler:
                 page.set_default_timeout(timeout_ms)
                 try:
                     origin = pt_home_url(url)
-                    home_response = await page.goto(
-                        origin, wait_until="domcontentloaded", timeout=timeout_ms,
-                    )
+                    home_response = await _goto_pt_page(page, origin, timeout_ms)
                     adapter = next((item for item in self.adapters if item.matches(url)), None)
                     sign_in_result = None
                     if sign_in_enabled:
@@ -1061,6 +1082,9 @@ class PtSignInHandler:
                                 sign_in_result = await self._generic_sign_in(
                                     page, context, response.status if response else None, screenshot
                                 )
+                        sign_in_result = await _attach_failure_screenshot(
+                            page, sign_in_result, screenshot,
+                        )
                     profile_result = None
                     if profile_refresh_enabled:
                         profile_result = profile_refresh_skip_result(
@@ -1259,7 +1283,7 @@ async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
     expected = validated_http_url(url)
     hostname = (expected.hostname or "").lower().rstrip(".")
     if hostname == "pttime.org" or hostname.endswith(".pttime.org"):
-        return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        return await _goto_pt_page(page, url, timeout_ms)
     link = page.locator('a[href*="attendance"]').filter(
         has_text=re.compile(r"签到|簽到", re.IGNORECASE),
     ).first
@@ -1278,7 +1302,33 @@ async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
                 return await navigation.value
     if clicked and page.url != pt_home_url(url):
         return None
-    return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    return await _goto_pt_page(page, url, timeout_ms)
+
+
+async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    try:
+        return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        if await _usable_partial_pt_page(page, url):
+            return None
+        raise
+
+
+async def _usable_partial_pt_page(page: Any, expected_url: str) -> bool:
+    try:
+        expected = validated_http_url(expected_url)
+        current = validated_http_url(page.url)
+        if (
+            current.scheme != expected.scheme
+            or (current.hostname or "").lower() != (expected.hostname or "").lower()
+        ):
+            return False
+        body = page.locator("body")
+        return await body.count() > 0 and bool((await body.inner_text()).strip())
+    except Exception:
+        return False
 
 
 def classify_pt_page(url: str, status_code: int | None, body: str,
@@ -1985,3 +2035,20 @@ async def _click_common_signin_control(page: Any) -> bool:
 async def _save_screenshot(page: Any, path: Path) -> None:
     with suppress(Exception):
         await page.screenshot(path=str(path), full_page=True)
+
+
+async def _attach_failure_screenshot(
+    page: Any, result: RunResult | None, path: Path,
+) -> RunResult | None:
+    if (
+        result is None
+        or result.outcome in {RunOutcome.SUCCESS, RunOutcome.ALREADY_DONE}
+        or (result.details or {}).get("screenshot")
+    ):
+        return result
+    await _save_screenshot(page, path)
+    if not path.is_file():
+        return result
+    details = dict(result.details or {})
+    details["screenshot"] = str(path)
+    return RunResult(result.outcome, result.message, details)

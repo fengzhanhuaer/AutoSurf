@@ -20,6 +20,7 @@ from autosurf.automations.pt_signin import (
     _classify_pt_homepage,
     _complete_0ff_slider,
     _enrich_0ff_calendar_history,
+    _goto_pt_page,
     _open_pt_signin_page,
     _resolve_0ff_slider,
     classify_pt_page,
@@ -209,6 +210,16 @@ async def test_0ff_homepage_already_done_is_enriched_from_calendar_page():
         468,
         "安全检测能力由 雷池 WAF 驱动，客户端异常，请确认您是合法用户",
     ) == RunOutcome.BLOCKED
+    assert classify_pt_page(
+        "https://audiences.me/attendance.php",
+        200,
+        "人机验证 验证通过后将自动完成签到",
+    ) == RunOutcome.BLOCKED
+    assert classify_pt_page(
+        "https://www.hddolby.com/take2fa.php",
+        200,
+        "异地登录提醒！两步验证码 完成两步验证登录后才计算为成功登录。",
+    ) == RunOutcome.AUTH_EXPIRED
 
 
 @pytest.mark.asyncio
@@ -1207,6 +1218,82 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 
 
 @pytest.mark.asyncio
+async def test_opencd_adapter_routes_captcha_page_to_local_ocr(monkeypatch):
+    captured = {}
+
+    async def submit(page, context, site_name):
+        captured.update({"page": page, "context": context, "site_name": site_name})
+        return RunResult(
+            RunOutcome.SUCCESS,
+            "PT 站签到成功",
+            {"url": "https://open.cd/plugin_sign-in.php", "clicked": True},
+        )
+
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin._submit_nexusphp_captcha", submit,
+    )
+
+    class Locator:
+        first = None
+
+        def __init__(self, body=""):
+            self.body = body
+            self.first = self
+
+        def filter(self, **_kwargs):
+            return self
+
+        async def inner_text(self):
+            return self.body
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            return None
+
+    class Response:
+        url = "https://open.cd/plugin_sign-in.php"
+        status = 200
+
+        async def text(self):
+            return '<input name="imagehash"><input name="imagestring">'
+
+    class Pending:
+        @property
+        def value(self):
+            async def response():
+                return Response()
+            return response()
+
+    class ResponseContext:
+        async def __aenter__(self):
+            return Pending()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Page:
+        url = "https://open.cd/"
+
+        def locator(self, selector):
+            return Locator("OpenCD 欢迎回来") if selector == "body" else Locator()
+
+        def expect_response(self, _predicate):
+            return ResponseContext()
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+    page = Page()
+    context = RunContext("test", {"url": page.url}, {"sid": "secret"})
+    result = await OpenCdAdapter().sign_in(page, context)
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert captured == {"page": page, "context": context, "site_name": "OpenCD"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter", "url"),
     [
@@ -1818,6 +1905,45 @@ def test_playwright_navigation_errors_are_structured(error, message):
     assert result.outcome == RunOutcome.FAILED
     assert result.message == message
     assert error in result.details["error"]
+
+
+@pytest.mark.asyncio
+async def test_pt_navigation_tolerates_only_usable_same_origin_partial_page():
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    class Body:
+        def __init__(self, text):
+            self.text = text
+
+        async def count(self):
+            return 1
+
+        async def inner_text(self):
+            return self.text
+
+    class Page:
+        def __init__(self, current_url, body):
+            self.url = current_url
+            self.body = body
+
+        async def goto(self, *_args, **_kwargs):
+            raise PlaywrightTimeoutError("DOMContentLoaded timed out")
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self.body)
+
+    assert await _goto_pt_page(
+        Page("https://sunnypt.top/", "SUNNYPT 扬帆启航"),
+        "https://sunnypt.top/",
+        60_000,
+    ) is None
+    with pytest.raises(PlaywrightTimeoutError):
+        await _goto_pt_page(
+            Page("about:blank", ""),
+            "https://u2.dmhy.org/",
+            60_000,
+        )
 
 
 def test_hdvideo_uses_current_catalog_domain():
