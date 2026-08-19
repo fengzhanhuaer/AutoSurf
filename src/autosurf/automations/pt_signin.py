@@ -917,8 +917,21 @@ async def _submit_nexusphp_captcha(
 
 
 async def _nexusphp_captcha_controls(page: Any) -> tuple[Any, Any, Any] | None:
+    frames = [page]
+    frames.extend(
+        frame for frame in (getattr(page, "frames", None) or [])
+        if frame is not page
+    )
+    for root in frames:
+        controls = await _nexusphp_captcha_controls_in(root)
+        if controls is not None:
+            return controls
+    return None
+
+
+async def _nexusphp_captcha_controls_in(root: Any) -> tuple[Any, Any, Any] | None:
     try:
-        form = page.locator(
+        form = root.locator(
             'form:has(input[name="imagestring"]):has(input[name="imagehash"])'
         ).first
         captcha = form.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
@@ -937,29 +950,51 @@ async def _nexusphp_captcha_controls(page: Any) -> tuple[Any, Any, Any] | None:
         pass
 
     try:
-        answer = page.locator('input[name="imagestring"]').first
-        with suppress(Exception):
-            await answer.wait_for(state="visible", timeout=5_000)
-        captcha = answer.locator("xpath=preceding::img[1]")
-        submit = page.get_by_role(
-            "button", name=re.compile(r"^\s*(?:签到|簽到)\s*$"),
+        answer = root.locator(
+            'input[name="imagestring"]:visible, input[type="text"]:visible, '
+            'input:not([type]):visible'
         ).first
         with suppress(Exception):
+            await answer.wait_for(state="visible", timeout=5_000)
+        captcha = answer.locator(
+            "xpath=preceding::*[self::img or self::canvas][1]"
+        )
+        submit = answer.locator(
+            "xpath=following::*[self::button or "
+            "self::input[@type='submit' or @type='button']][1]"
+        )
+        with suppress(Exception):
             await captcha.wait_for(state="visible", timeout=5_000)
-        if not await submit.is_visible():
-            submit = answer.locator(
-                "xpath=following::*[self::button or "
-                "self::input[@type='submit' or @type='button']][1]"
-            )
         if all([
             await captcha.is_visible(),
             await answer.is_visible(),
             await submit.is_visible(),
-        ]):
+        ]) and await _captcha_controls_are_adjacent(captcha, answer, submit):
             return captcha, answer, submit
     except Exception:
         pass
     return None
+
+
+async def _captcha_controls_are_adjacent(captcha: Any, answer: Any, submit: Any) -> bool:
+    try:
+        captcha_box = await captcha.bounding_box()
+        answer_box = await answer.bounding_box()
+        submit_box = await submit.bounding_box()
+        if not captcha_box or not answer_box or not submit_box:
+            return False
+        captcha_center = captcha_box["x"] + captcha_box["width"] / 2
+        answer_center = answer_box["x"] + answer_box["width"] / 2
+        vertical_gap = answer_box["y"] - (captcha_box["y"] + captcha_box["height"])
+        return (
+            60 <= captcha_box["width"] <= 400
+            and 20 <= captcha_box["height"] <= 150
+            and -10 <= vertical_gap <= 120
+            and abs(captcha_center - answer_center) <= 250
+            and abs(submit_box["y"] - answer_box["y"]) <= 100
+        )
+    except Exception:
+        return False
 
 
 class OshenPtAdapter(NexusPhpCaptchaAdapter):

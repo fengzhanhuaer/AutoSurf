@@ -1320,12 +1320,22 @@ async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch)
             self.first = self
 
         def locator(self, selector):
-            if self.kind == "answer" and selector == "xpath=preceding::img[1]":
-                return Element(self.page, "captcha")
+            if self.kind == "answer":
+                if selector == "xpath=preceding::*[self::img or self::canvas][1]":
+                    return Element(self.page, "captcha")
+                if selector.startswith("xpath=following::"):
+                    return Element(self.page, "submit")
             return Element(self.page, "missing")
 
         async def is_visible(self):
             return self.kind != "missing"
+
+        async def bounding_box(self):
+            return {
+                "captcha": {"x": 100, "y": 50, "width": 150, "height": 40},
+                "answer": {"x": 100, "y": 95, "width": 80, "height": 22},
+                "submit": {"x": 190, "y": 95, "width": 44, "height": 22},
+            }.get(self.kind)
 
         async def wait_for(self, **_kwargs):
             return None
@@ -1376,13 +1386,9 @@ async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch)
                 return Element(self, "missing")
             if selector == "body":
                 return Element(self, "body")
-            if selector == 'input[name="imagestring"]':
+            if 'input[name="imagestring"]' in selector:
                 return Element(self, "answer")
             return Element(self, "missing")
-
-        def get_by_role(self, role, **_kwargs):
-            assert role == "button"
-            return Element(self, "submit")
 
         def expect_response(self, predicate, **kwargs):
             assert predicate(Response()) is True
