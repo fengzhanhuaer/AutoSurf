@@ -811,7 +811,9 @@ class OpenCdAdapter:
         if "name=\"imagehash\"" in response_body and "name=\"imagestring\"" in response_body:
             with suppress(Exception):
                 await page.wait_for_load_state("domcontentloaded", timeout=10_000)
-            result = await _submit_nexusphp_captcha(page, context, "OpenCD")
+            result = await _submit_nexusphp_captcha(
+                page, context, "OpenCD", response_suffix="/plugin_sign-in.php",
+            )
             if result is not None:
                 return result
             return RunResult(
@@ -857,26 +859,15 @@ class NexusPhpCaptchaAdapter:
 
 
 async def _submit_nexusphp_captcha(
-    page: Any, context: RunContext, site_name: str,
+    page: Any,
+    context: RunContext,
+    site_name: str,
+    response_suffix: str | None = None,
 ) -> RunResult | None:
-    try:
-        form = page.locator(
-            'form:has(input[name="imagestring"]):has(input[name="imagehash"])'
-        ).first
-        captcha = form.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
-        answer = form.locator('input[name="imagestring"]').first
-        submit = form.locator('input[type="submit"], button[type="submit"]').first
-        with suppress(Exception):
-            await captcha.wait_for(state="visible", timeout=5_000)
-        if not all([
-            await form.is_visible(),
-            await captcha.is_visible(),
-            await answer.is_visible(),
-            await submit.is_visible(),
-        ]):
-            return None
-    except Exception:
+    controls = await _nexusphp_captcha_controls(page)
+    if controls is None:
         return None
+    captcha, answer, submit = controls
 
     value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
     if value is None:
@@ -887,11 +878,24 @@ async def _submit_nexusphp_captcha(
         )
 
     await answer.fill(value)
-    async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-        await submit.click()
-    response = await navigation.value
-    status_code = response.status if response else None
-    body = await page_body_text(page)
+    response_body = ""
+    if response_suffix:
+        async with page.expect_response(
+            lambda item: urlparse(item.url).path.endswith(response_suffix),
+            timeout=30_000,
+        ) as pending:
+            await submit.click()
+        response = await pending.value
+        status_code = response.status
+        response_body = (await response.text())[:1_000_000]
+        with suppress(Exception):
+            await page.wait_for_timeout(500)
+    else:
+        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+            await submit.click()
+        response = await navigation.value
+        status_code = response.status if response else None
+    body = response_body + "\n" + await page_body_text(page)
     outcome = classify_pt_page(page.url, status_code, body, context.config)
     if outcome:
         return _classified_result(outcome, page.url, status_code, clicked=True)
@@ -910,6 +914,45 @@ async def _submit_nexusphp_captcha(
         f"{site_name} 提交签到后未识别到结果",
         {"url": page.url, "status_code": status_code, "clicked": True},
     )
+
+
+async def _nexusphp_captcha_controls(page: Any) -> tuple[Any, Any, Any] | None:
+    try:
+        form = page.locator(
+            'form:has(input[name="imagestring"]):has(input[name="imagehash"])'
+        ).first
+        captcha = form.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
+        answer = form.locator('input[name="imagestring"]').first
+        submit = form.locator('input[type="submit"], button[type="submit"]').first
+        with suppress(Exception):
+            await captcha.wait_for(state="visible", timeout=5_000)
+        if all([
+            await form.is_visible(),
+            await captcha.is_visible(),
+            await answer.is_visible(),
+            await submit.is_visible(),
+        ]):
+            return captcha, answer, submit
+    except Exception:
+        pass
+
+    try:
+        captcha = page.locator('img[alt="CAPTCHA"], img[src*="image.php"]').first
+        answer = page.locator('input[name="imagestring"]').first
+        submit = page.get_by_role(
+            "button", name=re.compile(r"^\s*(?:签到|簽到)\s*$"),
+        ).first
+        with suppress(Exception):
+            await captcha.wait_for(state="visible", timeout=5_000)
+        if all([
+            await captcha.is_visible(),
+            await answer.is_visible(),
+            await submit.is_visible(),
+        ]):
+            return captcha, answer, submit
+    except Exception:
+        pass
+    return None
 
 
 class OshenPtAdapter(NexusPhpCaptchaAdapter):
@@ -1043,6 +1086,7 @@ class PtSignInHandler:
         artifact_dir = Path(os.environ.get("AUTOSURF_DATA_DIR", "data")) / "browser-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         screenshot = artifact_dir / f"{context.execution_id}.png"
+        screenshot.unlink(missing_ok=True)
 
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:

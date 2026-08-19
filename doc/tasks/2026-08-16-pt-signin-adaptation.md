@@ -137,7 +137,7 @@
 - 当前阶段：发布
 - 当前计划步骤：TASK-013 提交、推送、在线升级和逐站有界回归
 - 当前门禁：准备门禁通过；完成门禁已重开
-- 最近完成检查点：2026-08-19 23:25 +08:00 完成五项代码缺陷修复；聚焦 91 项、全量 152 项、编译和差异检查通过。
+- 最近完成检查点：2026-08-19 23:47 +08:00 第一轮正式复测闭合八项；修正 OpenCD AJAX 控件和复用执行记录的旧截图，聚焦 92 项、全量 153 项通过。
 - 工作区状态：`main` 与 `origin/main` 为 `ed67365`，启用本轮前工作区干净；当前仅本账本将产生任务内修改。
 - 下一步唯一动作：提交并推送当前差异，等待 CI 后通过 Web 在线升级。
 - 恢复时先读取：本账本、`git status`、PT 管理 API 汇总、`pt_discovery.py`、`pt_signin.py`。
@@ -173,7 +173,7 @@
 | `src/autosurf/pt_discovery.py` | Rousi 默认启用资料刷新；SunnyPT 移除失效 `/user/profile` | 对齐当前站点能力与接口 | REQ-013 / TASK-008 | 目录与迁移测试 | 第九章 |
 | `src/autosurf/application/services.py` | 启动时同时协调 CookieCloud 与 Web Storage PT 任务能力 | 正式旧任务未迁移 M-Team/Rousi 新能力 | REQ-014 / TASK-009 | 重启协调测试与正式任务配置 | 第九章 |
 | `src/autosurf/automations/pt_signin.py` | 0ff 保留首页结论、自动完成固定滑块并过滤空日历事件；Zhuque 消费前端 CSRF 请求响应；SunnyPT 404 归为登录失效；分享率统一格式化 | 解决正式回归暴露的历史、CSRF、分类和统计展示缺陷 | REQ-009、REQ-011、REQ-013、REQ-014 / TASK-009 | 聚焦、全量测试与正式有界回归 | 第九章 |
-| `src/autosurf/automations/pt_signin.py` | 容忍同源有正文的部分加载页；补充人机/二步登录分类；OpenCD 接入本地 OCR；失败结果保留受控截图 | 修复 SunnyPT、Audiences、HDDolby、OpenCD 当前异常 | REQ-016 / TASK-011 | TEST-012、TEST-013、TEST-014 | 第九章 |
+| `src/autosurf/automations/pt_signin.py` | 容忍同源有正文的部分加载页；补充人机/二步登录分类；OpenCD 接入本地 OCR；失败结果保留受控截图；支持首页 AJAX 验证码控件并在复用执行前清理旧截图 | 修复 SunnyPT、Audiences、HDDolby、OpenCD 当前异常及调试截图陈旧问题 | REQ-016 / TASK-011 | TEST-012、TEST-013、TEST-014 | 第九章 |
 | `src/autosurf/automations/http_signin.py` | 连接建立前失败时安全重试一次，最终网络失败返回结构化结果 | 修复 NodeSeek `ConnectTimeout` 只有空结果的问题 | REQ-016 / TASK-011 | TEST-012、TEST-014 | 第九章 |
 | `tests/test_pt_signin.py`、`tests/test_http_signin.py` | 增加当前五类异常的正反例 | 防止放宽成功判定或重复 POST | REQ-016 / TASK-011 | TEST-012、TEST-013 | 不适用 |
 
@@ -194,8 +194,8 @@
 | TEST-009 | 图片验证自动识别可行性 | REQ-012 / TASK-008 | 正式最近执行分类；`pip install --dry-run ddddocr`；当前适配器路径复核；0ff 固定滑块只读实测 | 明确固定滑块、字符 OCR、语义视觉和人机挑战边界，不提交未确认答案 | 0ff 固定轨道滑块已自动处理；OpenCD 可采用本地 OCR 试验；TJUPT 需视觉语义模型；Cloudflare 保持人工浏览器处理；当前容器未安装 OCR 运行时 | `已通过` | 正式执行、依赖 dry-run、代码复核与滑块实测 |
 | TEST-010 | 发布与正式实例验证 | REQ-014 / TASK-009 | GitHub Actions、`/api/v1/system/upgrade`、容器与 PT 管理 API | 推送 SHA 与正式 HEAD 一致，升级 complete、服务 healthy、行为生效 | 六次 CI 均通过；代码版本 `16f633b` 在线升级完成；正式仓库干净、健康恢复、入口进程正确；0ff、Zhuque、SunnyPT、M-Team、Rousi、Audiences 与 TJUPT 结果核验完成 | `已通过` | CI 31953828485、31954179331、31954516199、31955443019、31956785138、31957354173；正式执行与统计 API |
 | TEST-011 | 当前全部任务异常审计 | REQ-015 / TASK-010 | `/api/v1/pt-signin/sites`、`/api/v1/periodic-signin/sites`、`/api/v1/debug/executions?limit=200`、历史与统计接口 | 58 个任务全部入矩阵，异常族可复查 | 44 个启用 PT 当前健康、2 个死亡站已停用、3 个 PT 尚未首跑；其余 8 个 PT 与 NodeSeek 均有执行、截图或错误证据和处置分类 | `已通过` | 正式脱敏管理 API 与受控截图接口 |
-| TEST-012 | 本轮代码缺陷聚焦回归 | REQ-016 / TASK-011、TASK-012 | `.venv\Scripts\python.exe -m pytest -q tests/test_pt_signin.py tests/test_captcha_ocr.py tests/test_http_signin.py` | 确认缺陷均有正反例覆盖 | 91 项通过 | `已通过` | pytest |
-| TEST-013 | 完整工程回归 | REQ-016、REQ-017 / TASK-012 | `.venv\Scripts\python.exe -m pytest -q`、`compileall`、`git diff --check` | 全量通过且无意外差异 | 152 项通过，1 个既有 SQLAlchemy 弃用警告；编译和差异检查通过 | `已通过` | pytest、Git |
+| TEST-012 | 本轮代码缺陷聚焦回归 | REQ-016 / TASK-011、TASK-012 | `.venv\Scripts\python.exe -m pytest -q tests/test_pt_signin.py tests/test_captcha_ocr.py tests/test_http_signin.py` | 确认缺陷均有正反例覆盖 | 最终 92 项通过 | `已通过` | pytest |
+| TEST-013 | 完整工程回归 | REQ-016、REQ-017 / TASK-012 | `.venv\Scripts\python.exe -m pytest -q`、`compileall`、`git diff --check` | 全量通过且无意外差异 | 最终 153 项通过，1 个既有 SQLAlchemy 弃用警告；编译和差异检查通过 | `已通过` | pytest、Git |
 | TEST-014 | 发布和受影响站点实测 | REQ-017 / TASK-013 | 在线升级 API、健康检查、每站单次 `run` 与有界轮询 | 代码版本一致；成功/已签到或准确外部阻塞；不重复触发 | 待执行 | `待开始` | 正式 API |
 
 ### 5.2 未执行测试
@@ -269,8 +269,9 @@
 | DEF-018 | REQ-016 / TEST-012 | 高 | SunnyPT 首页内容和登录态已完整渲染，但 `DOMContentLoaded` 未在 60 秒内完成，外层导航超时使专用 API 适配器完全没有执行 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 同源且正文可用的部分加载页继续执行，`about:blank` 仍抛超时 |
 | DEF-019 | REQ-016 / TEST-012 | 中 | Audiences 点击签到后显示“人机验证/验证通过后自动完成签到”，通用挑战词未覆盖而误报普通失败 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 当前正文稳定归类为 `blocked`，不误报成功 |
 | DEF-020 | REQ-016 / TEST-012 | 高 | HDDolby Cookie 进入异地登录二步验证码页，仍被当作已登录页面并继续资料刷新，最终误报“没有签到入口；资料刷新成功” | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 二步登录正文归类为 `auth_expired`，处理器会跳过资料刷新 |
-| DEF-021 | REQ-016 / TEST-012 | 高 | OpenCD 已确认是六位 NexusPHP 字符验证码，项目已有本地 OCR 与可信格式门槛，但专用适配器只返回阻塞，没有接入识别和提交确认 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 可靠六位值才提交，提交后仍需站点明确成功；接线与共用 OCR 测试通过 |
+| DEF-021 | REQ-016 / TEST-012 | 高 | OpenCD 已确认是六位 NexusPHP 字符验证码；首次接线仍假设完整表单和整页导航，正式页面实际把验证码以 AJAX 控件注入首页 | `已完成` | `pt_signin.py`、`tests/test_pt_signin.py` | 同时支持完整表单与页面级控件；OpenCD 等待插件响应；可靠六位值才提交且必须确认成功 |
 | DEF-022 | REQ-016 / TEST-012 | 中 | NodeSeek `ConnectTimeout` 直接逃逸到工作队列，执行记录没有结果；周期重试间隔较长且一次瞬时连接失败即结束本次处理 | `已完成` | `http_signin.py`、`tests/test_http_signin.py` | 只对连接尚未建立的超时/错误安全重试一次；最终返回带类型和次数的 `blocked` 结果 |
+| DEF-023 | REQ-016 / TEST-012 | 低 | 等待重试复用原执行 ID，先前失败截图文件会在本次成功后继续被调试 API 当作当前截图展示 | `已完成` | `pt_signin.py` | 每次 PT 执行开始前删除同一执行 ID 的旧截图；仅本次新失败重新生成 |
 
 ## 九、回滚方案
 
@@ -316,6 +317,8 @@
 | FACT-032 | OpenCD 返回同时含 `imagehash` 和 `imagestring` 的六位字符验证码表单，而 Oshen/SoulVoice 已使用同一 NexusPHP OCR 处理器 | 当前执行详情与代码 | OpenCD 可复用已有本地 OCR，不新增外部识别服务 |
 | FACT-033 | HomePc SSH `18963072950@198.18.0.13:10816` 本轮再次在 banner exchange 阶段拒绝连接；Web API 与截图下载仍正常 | HomePc SSH 包装器与管理 API | 容器内网络无法直接检查，U2/NodeSeek 以执行日志和发布后有界复测为准 |
 | FACT-034 | 外部当前访问可到达 U2 并进入 `/portal.php` 认证页；NodeSeek 对通用抓取入口返回 403 | 两站当前公开入口 | U2 不是全站死亡，正式容器的 `about:blank` 超时保留为部署网络/凭据侧问题；NodeSeek 以正式安全重试结果为准 |
+| FACT-035 | `c6eef4a` 正式复测中 SunnyPT `success`、U2 `already_done`；Audiences/HDDolby 分别准确为 `blocked/auth_expired`；HDKyl/OKPT 保持 `blocked`；NodeSeek 返回两次安全连接失败的结构化结果 | 正式调试和任务 API | SunnyPT、U2 与四项分类修复闭合；外部阻断未伪装成成功 |
+| FACT-036 | OpenCD 正式截图显示六位字符码、输入框和“签到”按钮直接位于首页顶部，页面 URL 仍为 `/`；插件响应并未形成完整表单导航 | 正式受控截图 | DEF-021 增加 AJAX 控件和响应确认路径 |
 
 ## 十一、风险与阻塞
 
@@ -387,6 +390,7 @@
 | 2026-08-19 23:00 +08:00 | 接收“连接部署库，修复所有签到异常”，恢复既有账本并确认正式基线 | 当前 57 个 PT、1 个周期任务、54 条执行记录；正式版本 `ed67365` 健康 | 新增 REQ-015 至 REQ-017，完成门禁重开，TASK-010 进行中 | 形成 58 个任务逐站异常矩阵 |
 | 2026-08-19 23:15 +08:00 | 完成 58 个任务矩阵并读取三张受控失败截图；重试 SSH 仍拒绝连接 | 确认四项代码缺陷；U2、TJUPT、HDKyl、OKPT、NodeSeek 为外部或待有界复测项 | REQ-015/TEST-011 通过，准备门禁通过，TASK-011 进行中 | 修复 DEF-018 至 DEF-021 并补聚焦测试 |
 | 2026-08-19 23:25 +08:00 | 完成 DEF-018 至 DEF-022 实现和回归 | 聚焦 91 项、全量 152 项、编译和差异检查通过；U2 外部可达但正式容器仍需发布后复测 | REQ-016、TASK-011、TASK-012、TEST-012、TEST-013 完成 | 提交、推送、在线升级并逐站有界回归 |
+| 2026-08-19 23:47 +08:00 | `c6eef4a` CI 与在线升级完成，九项有界执行进入终态或等待重试；读取 OpenCD 新截图并完成后续补丁 | SunnyPT/U2 成功；Audiences/HDDolby/CF/NodeSeek 分类准确；OpenCD 暴露 AJAX 控件差异；成功记录存在旧截图残留风险 | 新增并关闭 DEF-023，补强 DEF-021；最终 92 项聚焦、153 项全量通过 | 发布后续提交，仅复测 OpenCD 与成功截图状态 |
 
 ## 十四、完成摘要
 

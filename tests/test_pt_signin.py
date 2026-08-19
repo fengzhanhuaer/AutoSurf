@@ -23,6 +23,7 @@ from autosurf.automations.pt_signin import (
     _goto_pt_page,
     _open_pt_signin_page,
     _resolve_0ff_slider,
+    _submit_nexusphp_captcha,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
@@ -1221,8 +1222,13 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
 async def test_opencd_adapter_routes_captcha_page_to_local_ocr(monkeypatch):
     captured = {}
 
-    async def submit(page, context, site_name):
-        captured.update({"page": page, "context": context, "site_name": site_name})
+    async def submit(page, context, site_name, response_suffix=None):
+        captured.update({
+            "page": page,
+            "context": context,
+            "site_name": site_name,
+            "response_suffix": response_suffix,
+        })
         return RunResult(
             RunOutcome.SUCCESS,
             "PT 站签到成功",
@@ -1290,7 +1296,115 @@ async def test_opencd_adapter_routes_captcha_page_to_local_ocr(monkeypatch):
     result = await OpenCdAdapter().sign_in(page, context)
 
     assert result.outcome == RunOutcome.SUCCESS
-    assert captured == {"page": page, "context": context, "site_name": "OpenCD"}
+    assert captured == {
+        "page": page,
+        "context": context,
+        "site_name": "OpenCD",
+        "response_suffix": "/plugin_sign-in.php",
+    }
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch):
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.recognize_nexusphp_captcha",
+        lambda _image: "8C32MN",
+    )
+
+    class Element:
+        first = None
+
+        def __init__(self, page, kind):
+            self.page = page
+            self.kind = kind
+            self.first = self
+
+        def locator(self, _selector):
+            return Element(self.page, "missing")
+
+        async def is_visible(self):
+            return self.kind != "missing"
+
+        async def wait_for(self, **_kwargs):
+            return None
+
+        async def screenshot(self, **_kwargs):
+            return b"captcha-image"
+
+        async def fill(self, value):
+            self.page.answer = value
+
+        async def click(self):
+            self.page.submitted = True
+
+        async def inner_text(self):
+            return "签到成功，本次签到获得 10 魔力值" if self.page.submitted else "首页"
+
+    class Response:
+        url = "https://open.cd/plugin_sign-in.php"
+        status = 200
+
+        async def text(self):
+            return "签到成功，本次签到获得 10 魔力值"
+
+    class Pending:
+        @property
+        def value(self):
+            async def response():
+                return Response()
+            return response()
+
+    class ResponseContext:
+        async def __aenter__(self):
+            return Pending()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Page:
+        frames = None
+
+        def __init__(self):
+            self.url = "https://open.cd/"
+            self.answer = None
+            self.submitted = False
+
+        def locator(self, selector):
+            if selector.startswith("form:"):
+                return Element(self, "missing")
+            if selector == "body":
+                return Element(self, "body")
+            if selector.startswith("img"):
+                return Element(self, "captcha")
+            if selector == 'input[name="imagestring"]':
+                return Element(self, "answer")
+            return Element(self, "missing")
+
+        def get_by_role(self, role, **_kwargs):
+            assert role == "button"
+            return Element(self, "submit")
+
+        def expect_response(self, predicate, **kwargs):
+            assert predicate(Response()) is True
+            assert kwargs == {"timeout": 30_000}
+            return ResponseContext()
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = Page()
+    result = await _submit_nexusphp_captcha(
+        page,
+        RunContext("test", {"url": page.url}, {"sid": "secret"}),
+        "OpenCD",
+        response_suffix="/plugin_sign-in.php",
+    )
+
+    assert result is not None
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["clicked"] is True
+    assert page.answer == "8C32MN"
+    assert "8C32MN" not in json.dumps(result.details)
 
 
 @pytest.mark.asyncio
