@@ -229,6 +229,13 @@ td:first-child { color: var(--text); font-weight: 600; }
 .site-setting-row { min-height: 92px; padding: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--border); }
 .site-setting-row:last-child { border-bottom: 0; }
 .site-setting-row p { max-width: 560px; margin-top: 5px; color: var(--muted); line-height: 1.5; }
+.site-setting-toggle { position: relative; flex: 0 0 42px; width: 42px; height: 24px; }
+.site-setting-toggle input { position: absolute; z-index: 2; inset: 0; width: 42px; height: 24px; margin: 0; opacity: 0; cursor: pointer; }
+.site-setting-toggle .toggle { inset: 0; right: auto; }
+.site-setting-toggle input:checked + .toggle { background: var(--primary); }
+.site-setting-toggle input:checked + .toggle::after { transform: translateX(18px); }
+.site-setting-toggle input:focus-visible + .toggle { outline: 3px solid rgb(37 99 235 / 20%); }
+.site-setting-toggle input:disabled { cursor: wait; }
 .site-setting-actions { display: flex; flex: 0 0 auto; gap: 10px; }
 
 @media (max-width: 1100px) {

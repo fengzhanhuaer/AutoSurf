@@ -257,6 +257,42 @@ async def test_management_is_lan_only_and_allows_198_18_network(settings):
 
 
 @pytest.mark.asyncio
+async def test_lan_access_can_be_disabled_and_persists(settings):
+    app = create_app(settings)
+    lan_transport = httpx.ASGITransport(app=app, client=("198.18.1.20", 12345))
+    public_transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=lan_transport, base_url="http://test") as client:
+        current = await client.get("/api/v1/system/access", auth=auth)
+        disabled = await client.patch(
+            "/api/v1/system/access", auth=auth, json={"lan_only": False},
+        )
+    async with httpx.AsyncClient(transport=public_transport, base_url="http://test") as client:
+        public_login = await client.get("/login")
+        protected = await client.get("/api/v1/credentials")
+
+    assert current.json() == {"lan_only": True}
+    assert disabled.json() == {"lan_only": False}
+    assert public_login.status_code == 200
+    assert protected.status_code == 401
+
+    restarted_app = create_app(settings)
+    restarted_transport = httpx.ASGITransport(
+        app=restarted_app, client=("203.0.113.10", 12345),
+    )
+    async with httpx.AsyncClient(transport=restarted_transport, base_url="http://test") as client:
+        persisted = await client.get("/api/v1/system/access", auth=auth)
+        enabled = await client.patch(
+            "/api/v1/system/access", auth=auth, json={"lan_only": True},
+        )
+        blocked = await client.get("/login")
+
+    assert persisted.json() == {"lan_only": False}
+    assert enabled.json() == {"lan_only": True}
+    assert blocked.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_management_uses_dedicated_login_page_and_docs_require_session(settings):
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
@@ -331,6 +367,7 @@ async def test_management_session_login_and_logout(settings):
         assert 'id="token-script-copy-button"' in app_page.text
         assert 'id="site-backup-button"' in app_page.text
         assert 'id="site-restore-button"' in app_page.text
+        assert 'id="lan-only-access"' in app_page.text
         assert 'id="web-credential-rows"' in app_page.text
         assert "M-Team" not in app_page.text
         assert 'id="copy-uuid-button"' in app_page.text

@@ -12,7 +12,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from autosurf import __version__
-from autosurf.access import LanAccessMiddleware
+from autosurf.access import LanAccessMiddleware, LanAccessPolicy
 from autosurf.api import auth_router, cookiecloud_router, require_login, router, web_credential_router
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import (
@@ -54,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     upgrade_database(settings.database_url)
     sessions = create_session_factory(settings.database_url)
+    lan_access = LanAccessPolicy(sessions)
     registry = HandlerRegistry()
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
@@ -94,10 +95,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(LanAccessMiddleware)
+    app.add_middleware(LanAccessMiddleware, policy=lan_access)
     app.add_middleware(GZipRequestMiddleware)
     app.state.settings = settings
     app.state.sessions = sessions
+    app.state.lan_access = lan_access
     app.state.registry = registry
     app.state.credentials = credentials
     app.state.automations = automations

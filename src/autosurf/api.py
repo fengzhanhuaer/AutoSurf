@@ -153,6 +153,10 @@ class LoginInput(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class SystemAccessSettingsInput(BaseModel):
+    lan_only: bool = True
+
+
 class WebCredentialScriptInput(BaseModel):
     base_url: str = Field(min_length=8, max_length=2048)
 
@@ -464,6 +468,18 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
 @router.get("/system/upgrade")
 def upgrade_status(request: Request) -> dict[str, Any]:
     return _upgrade_status(request)
+
+
+@router.get("/system/access")
+def system_access_settings(request: Request) -> dict[str, bool]:
+    return {"lan_only": request.app.state.lan_access.lan_only}
+
+
+@router.patch("/system/access")
+def update_system_access_settings(
+    data: SystemAccessSettingsInput, request: Request,
+) -> dict[str, bool]:
+    return {"lan_only": request.app.state.lan_access.set_lan_only(data.lan_only)}
 
 
 @router.post("/system/upgrade", status_code=202)

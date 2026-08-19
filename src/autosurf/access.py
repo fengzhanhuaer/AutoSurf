@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import threading
+
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from autosurf.infrastructure.database import SystemSettingRecord
 
 
 _LAN_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
@@ -17,6 +23,7 @@ _LAN_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
     "fc00::/7",
     "fe80::/10",
 ))
+_LAN_ONLY_SETTING_KEY = "access.lan_only"
 
 
 def is_lan_address(host: str | None) -> bool:
@@ -30,8 +37,50 @@ def is_lan_address(host: str | None) -> bool:
 
 
 class LanAccessMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, policy: "LanAccessPolicy") -> None:
+        super().__init__(app)
+        self._policy = policy
+
     async def dispatch(self, request: Request, call_next):
         client_host = request.client.host if request.client else None
-        if not is_lan_address(client_host):
+        if self._policy.lan_only and not is_lan_address(client_host):
             return JSONResponse({"detail": "当前站点仅允许局域网访问"}, status_code=403)
         return await call_next(request)
+
+
+class LanAccessPolicy:
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+        self._lock = threading.Lock()
+        self._lan_only = self._load()
+
+    @property
+    def lan_only(self) -> bool:
+        with self._lock:
+            return self._lan_only
+
+    def set_lan_only(self, enabled: bool) -> bool:
+        value = bool(enabled)
+        with self._lock:
+            with self._sessions.begin() as session:
+                record = session.get(SystemSettingRecord, _LAN_ONLY_SETTING_KEY)
+                if record is None:
+                    session.add(SystemSettingRecord(
+                        key=_LAN_ONLY_SETTING_KEY,
+                        value_json=json.dumps(value),
+                    ))
+                else:
+                    record.value_json = json.dumps(value)
+            self._lan_only = value
+            return value
+
+    def _load(self) -> bool:
+        with self._sessions() as session:
+            record = session.get(SystemSettingRecord, _LAN_ONLY_SETTING_KEY)
+        if record is None:
+            return True
+        try:
+            value = json.loads(record.value_json)
+        except (TypeError, ValueError):
+            return True
+        return value if isinstance(value, bool) else True

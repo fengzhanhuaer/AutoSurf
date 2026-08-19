@@ -8,7 +8,8 @@ from sqlalchemy import create_engine, inspect
 
 
 INITIAL_REVISION = "0001_initial"
-HEAD_REVISION = "0002_cookiecloud_import"
+COOKIECLOUD_REVISION = "0002_cookiecloud_import"
+HEAD_REVISION = "0003_system_settings"
 CORE_TABLES = {"credentials", "automations", "executions", "cookiecloud_blobs"}
 
 
@@ -37,6 +38,11 @@ def _adopt_unversioned_database(config: Config, database_url: str) -> None:
         has_sources = "cookiecloud_sources" in tables
         if has_snapshot != has_sources:
             raise RuntimeError("cannot migrate an inconsistent database: CookieCloud migration is partially applied")
-        command.stamp(config, HEAD_REVISION if has_snapshot else INITIAL_REVISION)
+        if not has_snapshot:
+            command.stamp(config, INITIAL_REVISION)
+        elif "system_settings" in tables:
+            command.stamp(config, HEAD_REVISION)
+        else:
+            command.stamp(config, COOKIECLOUD_REVISION)
     finally:
         engine.dispose()

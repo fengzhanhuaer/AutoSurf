@@ -9,6 +9,7 @@ const state = {
   periodicSites: [],
   periodicExecutions: [],
   webCredentials: [],
+  lanOnly: true,
   ptSelection: new Set(),
   periodicSelection: new Set(),
   selected: "",
@@ -148,6 +149,7 @@ const elements = {
   siteBackupButton: document.querySelector("#site-backup-button"),
   siteRestoreButton: document.querySelector("#site-restore-button"),
   siteRestoreFile: document.querySelector("#site-restore-file"),
+  lanOnlyAccess: document.querySelector("#lan-only-access"),
 };
 
 elements.endpoint.textContent = `${location.origin}/cookiecloud`;
@@ -1246,7 +1248,7 @@ async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredentials,
+    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredentials, accessSettings,
       periodicCandidates, periodicSites, periodicExecutions] = await Promise.all([
       api("/api/v1/cookiecloud/sources"),
       api("/api/v1/credentials"),
@@ -1255,6 +1257,7 @@ async function refresh({ quiet = false } = {}) {
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
       api("/api/v1/pt-signin/stats"),
       api("/api/v1/web-credentials", { cache: "no-store" }),
+      api("/api/v1/system/access", { cache: "no-store" }),
       api("/api/v1/periodic-signin/candidates"),
       api("/api/v1/periodic-signin/sites"),
       api("/api/v1/periodic-signin/executions?limit=100"),
@@ -1266,6 +1269,8 @@ async function refresh({ quiet = false } = {}) {
     state.ptHistory = ptHistory;
     state.ptStats = ptStats.items;
     state.webCredentials = webCredentials.items;
+    state.lanOnly = accessSettings.lan_only;
+    elements.lanOnlyAccess.checked = state.lanOnly;
     state.periodicCandidates = periodicCandidates.items;
     state.periodicSites = periodicSites.items;
     state.periodicExecutions = periodicExecutions.items;
@@ -1648,6 +1653,24 @@ elements.siteBackupButton.addEventListener("click", async () => {
     showToast(error.message, true);
   } finally {
     setBusy(false);
+  }
+});
+elements.lanOnlyAccess.addEventListener("change", async () => {
+  const requested = elements.lanOnlyAccess.checked;
+  elements.lanOnlyAccess.disabled = true;
+  try {
+    const result = await api("/api/v1/system/access", {
+      method: "PATCH", body: JSON.stringify({ lan_only: requested }),
+    });
+    state.lanOnly = result.lan_only;
+    elements.lanOnlyAccess.checked = state.lanOnly;
+    showToast(state.lanOnly ? "已限制为局域网访问" : "已允许非局域网访问");
+  } catch (error) {
+    elements.lanOnlyAccess.checked = state.lanOnly;
+    if (error.status === 401) goToLogin();
+    else showToast(error.message, true);
+  } finally {
+    elements.lanOnlyAccess.disabled = false;
   }
 });
 elements.siteRestoreButton.addEventListener("click", () => elements.siteRestoreFile.click());

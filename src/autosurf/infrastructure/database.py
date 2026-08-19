@@ -75,6 +75,13 @@ class CookieCloudSource(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class SystemSettingRecord(Base):
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value_json: Mapped[str] = mapped_column(Text)
+
+
 def create_session_factory(database_url: str) -> sessionmaker[Session]:
     Path(database_url.removeprefix("sqlite:///" )).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(database_url, connect_args={"check_same_thread": False})

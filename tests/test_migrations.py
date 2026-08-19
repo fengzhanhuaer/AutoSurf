@@ -5,7 +5,12 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
-from autosurf.infrastructure.migrations import HEAD_REVISION, INITIAL_REVISION, upgrade_database
+from autosurf.infrastructure.migrations import (
+    COOKIECLOUD_REVISION,
+    HEAD_REVISION,
+    INITIAL_REVISION,
+    upgrade_database,
+)
 
 
 def migration_config(database_url: str) -> Config:
@@ -33,6 +38,7 @@ def test_empty_database_upgrades_to_head(tmp_path):
     try:
         inspector = inspect(engine)
         assert "cookiecloud_sources" in inspector.get_table_names()
+        assert "system_settings" in inspector.get_table_names()
         assert "credential_payload" in {column["name"] for column in inspector.get_columns("executions")}
         assert revision(url) == HEAD_REVISION
     finally:
@@ -73,6 +79,25 @@ def test_unversioned_current_database_is_adopted(tmp_path):
 
     upgrade_database(url)
     assert revision(url) == HEAD_REVISION
+
+
+def test_unversioned_cookiecloud_database_upgrades_to_head(tmp_path):
+    url = f"sqlite:///{(tmp_path / 'cookiecloud.db').as_posix()}"
+    config = migration_config(url)
+    command.upgrade(config, COOKIECLOUD_REVISION)
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+
+    upgrade_database(url)
+
+    engine = create_engine(url)
+    try:
+        assert "system_settings" in inspect(engine).get_table_names()
+        assert revision(url) == HEAD_REVISION
+    finally:
+        engine.dispose()
 
 
 def test_unversioned_partial_database_is_rejected(tmp_path):

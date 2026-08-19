@@ -584,9 +584,9 @@
       <section class="settings-panel" id="site-settings-panel" role="tabpanel"
                aria-labelledby="settings-tab-site-settings" hidden>
         <section class="panel site-settings-panel" aria-labelledby="site-settings-title">
-          <div class="panel-heading"><div><h2 id="site-settings-title">站点设置备份</h2><p>备份站点任务、凭据和 CookieCloud 配置，不包含执行历史。</p></div></div>
+          <div class="panel-heading"><div><h2 id="site-settings-title">站点设置</h2><p>管理访问范围，并备份站点任务、凭据和 CookieCloud 配置。</p></div></div>
           <div class="site-settings-content">
-            <div class="site-setting-row"><div><strong>访问范围</strong><p>默认仅允许局域网、回环地址及 198.18.0.0/15 访问。</p></div><span class="status-badge succeeded">仅限局域网</span></div>
+            <div class="site-setting-row"><div><strong>仅限局域网访问</strong><p>默认开启，仅允许局域网、回环地址及 198.18.0.0/15 访问。</p></div><label class="site-setting-toggle" title="仅限局域网访问"><input id="lan-only-access" type="checkbox" checked aria-label="仅限局域网访问"><span class="toggle" aria-hidden="true"></span></label></div>
             <div class="site-setting-row"><div><strong>一键备份与恢复</strong><p>ZIP 内含敏感 Cookie 和密码，请妥善保管。恢复会替换现有站点配置。</p></div><div class="site-setting-actions"><input id="site-restore-file" type="file" accept=".zip,application/zip" hidden><button class="button secondary" id="site-restore-button" type="button">一键恢复</button><button class="button primary" id="site-backup-button" type="button">一键备份</button></div></div>
           </div>
         </section>
