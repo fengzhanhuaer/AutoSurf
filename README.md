@@ -42,9 +42,18 @@ docker compose pull
 docker compose up -d
 ```
 
+On Linux, create the two bind-mount directories with the image user's ownership before the first start:
+
+```bash
+mkdir -p app tmp
+sudo chown -R 10001:10001 app tmp
+docker compose pull
+docker compose up -d
+```
+
 The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin a release by replacing the image tag in `compose.yaml`.
 
-The Docker image is a stable runtime shell. Application source and its Linux Python environment live in `./autosurf_program`, while Playwright's Chromium runtime lives in `./browser`. Both directories are mounted from the host and can be upgraded without replacing the container. The read-only shell also mounts host-visible temporary space from `./tmp` to `/tmp`; its contents are disposable and ignored by Git. On first start, the shell initializes any missing program or browser files. Do not run `autosurf_program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
+The Docker image is a stable runtime shell and keeps its startup and upgrade helpers under `/usr/local/bin`, outside the writable application mount. The host's `./app` directory is mounted as the complete `/app` tree: persistent data lives in `./app/data`, application source and its Linux Python environment live in `./app/program`, and Playwright's Chromium runtime lives in `./app/browser`. These directories can be upgraded without replacing the container. The read-only shell also mounts host-visible temporary space from `./tmp` to `/tmp`; its contents are disposable and ignored by Git. On first start, the shell initializes the missing application subdirectories. Do not run `app/program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
 
 AutoSurf pins the matching Playwright Python package and installs Chromium into the persistent browser mount. The Web upgrade action updates application code, Python dependencies, and that matching Chromium runtime together. Rebuild the shell only when Python itself or Chromium's required operating-system libraries change.
 
@@ -73,13 +82,13 @@ For normal upgrades, use the authenticated management page or keep the Docker sh
 docker exec autosurf autosurf-upgrade
 ```
 
-The helper gracefully stops only the AutoSurf application process, backs up SQLite, force-aligns `./autosurf_program` to `origin/$AUTOSURF_BRANCH`, updates its isolated Python environment, installs the matching browser into `./browser`, applies migrations, and asks the shell to start the new version. The container and all mounted directories remain in place. Remote source is authoritative during upgrades: tracked local changes and untracked non-ignored files inside `./autosurf_program` are deleted. Ignored runtime state such as `.venv` and the separately mounted `data` and `browser` directories is preserved.
+The helper gracefully stops only the AutoSurf application process, backs up SQLite, force-aligns `./app/program` to `origin/$AUTOSURF_BRANCH`, updates its isolated Python environment, installs the matching browser into `./app/browser`, applies migrations, and asks the shell to start the new version. The container and application mount remain in place. Remote source is authoritative during upgrades: tracked local changes and untracked non-ignored files inside `./app/program` are deleted. Ignored runtime state such as `.venv` and the sibling `app/data` and `app/browser` directories is preserved.
 
 In the management page, open **系统设置 > 系统升级**, review the program and browser versions, then choose **开始升级**. The page follows the application restart and reports the persisted result. Only one upgrade can run at a time.
 
 Only pull and recreate the container when the runtime shell itself changes, such as a Python or operating-system dependency update. `docker compose pull && docker compose up -d` is the separate shell-upgrade path.
 
-To roll back, replace the image with the previous release tag and run `docker compose up -d` again. Back up the `data` directory before upgrading across database versions.
+To roll back, replace the image with the previous release tag and run `docker compose up -d` again. Back up the `app/data` directory before upgrading across database versions.
 
 To build from the local source tree instead:
 

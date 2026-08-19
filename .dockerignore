@@ -4,5 +4,8 @@
 .pytest_cache
 __pycache__
 data
+app
+tmp
+autosurf_program
+browser
 tests
-

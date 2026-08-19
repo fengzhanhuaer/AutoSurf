@@ -4,11 +4,12 @@ set -eu
 program_dir=/app/program
 venv_dir="$program_dir/.venv"
 browser_dir=${PLAYWRIGHT_BROWSERS_PATH:-/app/browser}
+data_dir=${AUTOSURF_DATA_DIR:-/app/data}
 pid_file=/tmp/autosurf-app.pid
 restart_file=/tmp/autosurf-restart-requested
 upgrade_lock=/tmp/autosurf-upgrade-in-progress
 
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$data_dir" "$program_dir" "$browser_dir"
 
 if [ ! -d "$program_dir/.git" ]; then
     if [ -n "$(find "$program_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
@@ -30,7 +31,6 @@ if [ ! -x "$venv_dir/bin/autosurf" ]; then
     "$venv_dir/bin/python" -m pip install --disable-pip-version-check --no-cache-dir -e "$program_dir"
 fi
 
-mkdir -p "$browser_dir"
 chromium_executable=$("$venv_dir/bin/python" - <<'PY'
 from playwright.sync_api import sync_playwright
 with sync_playwright() as playwright:

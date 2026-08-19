@@ -4,28 +4,20 @@ services:
     # Keep only the base system shell stable; Web upgrades update program and browser mounts.
     pull_policy: missing
     container_name: autosurf
-    entrypoint:
-      - /usr/bin/tini
-      - --
-      - /bin/sh
-      - /app/bootstrap/entrypoint.sh
     ipc: host
     ports:
       - "0.0.0.0:18980:8080"
     volumes:
-      - ./data:/app/data
-      - ./autosurf_program:/app/program
-      - ./browser:/app/browser
+      # Keep all persistent application state under one host directory.
+      - ./app:/app
       # Writable, host-visible temp space while the container root remains read-only.
       - ./tmp:/tmp
-      - ./docker/entrypoint.sh:/app/bootstrap/entrypoint.sh:ro
-      - ./docker/autosurf-upgrade:/app/bootstrap/autosurf-upgrade:ro
     environment:
       HOME: /tmp/home
       TZ: Asia/Taipei
       AUTOSURF_DATA_DIR: /app/data
       AUTOSURF_PROGRAM_DIR: /app/program
-      AUTOSURF_UPGRADE_SCRIPT: /app/bootstrap/autosurf-upgrade
+      AUTOSURF_UPGRADE_SCRIPT: /usr/local/bin/autosurf-upgrade
       PLAYWRIGHT_BROWSERS_PATH: /app/browser
       AUTOSURF_SECRET_KEY: "CHANGE-ME-random-encryption-key-at-least-32-characters"
       AUTOSURF_USERNAME: "admin"
