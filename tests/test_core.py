@@ -318,6 +318,8 @@ async def test_management_uses_dedicated_login_page_and_docs_require_session(set
     assert "CookieCloud" not in login_page.text
     assert css.status_code == 200
     assert javascript.status_code == 200
+    assert css.headers["cache-control"] == "no-store"
+    assert javascript.headers["cache-control"] == "no-store"
     assert 'document.execCommand("copy")' in javascript.text
     assert login_css.status_code == 200
     assert login_javascript.status_code == 200
@@ -358,6 +360,10 @@ async def test_management_session_login_and_logout(settings):
         assert 'id="settings-tab-cookiecloud"' in app_page.text
         assert 'id="settings-tab-web-credentials"' in app_page.text
         assert 'id="settings-tab-site-settings"' in app_page.text
+        assert 'id="settings-tab-logs"' in app_page.text
+        assert 'id="logs-settings-panel"' in app_page.text
+        assert 'id="debug-log-rows"' in app_page.text
+        assert 'id="debug-log-dialog"' in app_page.text
         assert 'id="periodic-signin-panel"' in app_page.text
         assert 'id="periodic-site-form"' in app_page.text
         assert 'id="periodic-site-rows"' in app_page.text

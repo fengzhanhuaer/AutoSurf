@@ -9,6 +9,8 @@ const state = {
   periodicSites: [],
   periodicExecutions: [],
   webCredentials: [],
+  debugLogs: [],
+  debugAutomations: [],
   lanOnly: true,
   ptSelection: new Set(),
   periodicSelection: new Set(),
@@ -41,6 +43,7 @@ const elements = {
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
   webCredentialsPanel: document.querySelector("#web-credentials-settings-panel"),
   siteSettingsPanel: document.querySelector("#site-settings-panel"),
+  logsPanel: document.querySelector("#logs-settings-panel"),
   upgradePanel: document.querySelector("#upgrade-settings-panel"),
   form: document.querySelector("#source-form"),
   selector: document.querySelector("#source-selector"),
@@ -150,6 +153,25 @@ const elements = {
   siteRestoreButton: document.querySelector("#site-restore-button"),
   siteRestoreFile: document.querySelector("#site-restore-file"),
   lanOnlyAccess: document.querySelector("#lan-only-access"),
+  debugLogAutomation: document.querySelector("#debug-log-automation"),
+  debugLogStatus: document.querySelector("#debug-log-status"),
+  debugLogOutcome: document.querySelector("#debug-log-outcome"),
+  debugLogRefresh: document.querySelector("#debug-log-refresh"),
+  debugLogCount: document.querySelector("#debug-log-count"),
+  debugLogRows: document.querySelector("#debug-log-rows"),
+  debugLogDialog: document.querySelector("#debug-log-dialog"),
+  debugLogDialogTitle: document.querySelector("#debug-log-dialog-title"),
+  debugLogDialogSubtitle: document.querySelector("#debug-log-dialog-subtitle"),
+  debugLogDialogClose: document.querySelector("#debug-log-dialog-close"),
+  debugLogDialogDismiss: document.querySelector("#debug-log-dialog-dismiss"),
+  debugLogDetailStatus: document.querySelector("#debug-log-detail-status"),
+  debugLogDetailOutcome: document.querySelector("#debug-log-detail-outcome"),
+  debugLogDetailAttempts: document.querySelector("#debug-log-detail-attempts"),
+  debugLogDetailDuration: document.querySelector("#debug-log-detail-duration"),
+  debugLogArtifactSection: document.querySelector("#debug-log-artifact-section"),
+  debugLogArtifact: document.querySelector("#debug-log-artifact"),
+  debugLogArtifactState: document.querySelector("#debug-log-artifact-state"),
+  debugLogOutput: document.querySelector("#debug-log-output"),
 };
 
 elements.endpoint.textContent = `${location.origin}/cookiecloud`;
@@ -213,7 +235,7 @@ function goToLogin() {
 }
 
 async function setActiveView(value, { syncHash = true } = {}) {
-  const validViews = ["pt-signin", "periodic-signin", "cookiecloud", "web-credentials", "site-settings", "upgrade"];
+  const validViews = ["pt-signin", "periodic-signin", "cookiecloud", "web-credentials", "site-settings", "logs", "upgrade"];
   const activeView = validViews.includes(value) ? value : "pt-signin";
   state.activeView = activeView;
   const ptView = activeView === "pt-signin";
@@ -225,6 +247,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
   elements.webCredentialsPanel.hidden = activeView !== "web-credentials";
   elements.siteSettingsPanel.hidden = activeView !== "site-settings";
+  elements.logsPanel.hidden = activeView !== "logs";
   elements.upgradePanel.hidden = activeView !== "upgrade";
   elements.settingsTabList.hidden = !systemView;
   elements.ptTabList.hidden = !ptView;
@@ -248,7 +271,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
     elements.pageDescription.textContent = "普通站点周期任务";
   } else if (systemView) {
     elements.pageTitle.textContent = "系统设置";
-    elements.pageDescription.textContent = "CookieCloud、Web 凭据、站点备份与系统升级";
+    elements.pageDescription.textContent = "CookieCloud、Web 凭据、运行日志与系统升级";
   } else {
     elements.pageTitle.textContent = "PT 站点";
     elements.pageDescription.textContent = "站点管理与自动化";
@@ -259,6 +282,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
     cookiecloud: "刷新 CookieCloud 状态",
     "web-credentials": "刷新 Web 凭据同步状态",
     "site-settings": "刷新站点设置",
+    logs: "刷新运行日志",
     upgrade: "刷新升级状态",
   };
   elements.refreshButton.title = refreshLabels[activeView];
@@ -266,6 +290,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   if (syncHash && location.hash !== `#${activeView}`) {
     history.replaceState(null, "", `${location.pathname}${location.search}#${activeView}`);
   }
+  if (activeView === "logs") await loadDebugLogs({ quiet: true });
   if (activeView === "upgrade") await loadUpgradeStatus();
 }
 
@@ -1087,6 +1112,125 @@ async function loadWebCredentialStatus() {
   return status.items;
 }
 
+const DEBUG_STATUS_LABELS = {
+  pending: "等待执行",
+  running: "执行中",
+  retry_wait: "等待重试",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  timed_out: "已超时",
+};
+
+const DEBUG_OUTCOME_LABELS = {
+  success: "成功",
+  already_done: "无需执行",
+  auth_expired: "登录失效",
+  blocked: "访问被拦截",
+  failed: "执行失败",
+};
+
+function debugStatusLabel(value) {
+  return DEBUG_STATUS_LABELS[value] || value || "未知";
+}
+
+function debugOutcomeLabel(value) {
+  return DEBUG_OUTCOME_LABELS[value] || value || "尚无结果";
+}
+
+function debugOutcomeClass(value) {
+  if (["success", "already_done"].includes(value)) return "succeeded";
+  if (["blocked", "auth_expired", "failed"].includes(value)) return "failed";
+  return "";
+}
+
+function formatDuration(value) {
+  if (!Number.isFinite(value)) return "-";
+  if (value < 1000) return `${value} 毫秒`;
+  if (value < 60000) return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)} 秒`;
+  const minutes = Math.floor(value / 60000);
+  const seconds = Math.round((value % 60000) / 1000);
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
+}
+
+function renderDebugLogAutomationOptions(automations) {
+  const selected = elements.debugLogAutomation.value;
+  elements.debugLogAutomation.innerHTML = '<option value="">全部任务</option>' + automations.map((item) => (
+    `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`
+  )).join("");
+  if (automations.some((item) => item.id === selected)) elements.debugLogAutomation.value = selected;
+}
+
+function renderDebugLogs(payload) {
+  state.debugLogs = payload.items || [];
+  state.debugAutomations = payload.automations || [];
+  renderDebugLogAutomationOptions(state.debugAutomations);
+  elements.debugLogCount.textContent = `${state.debugLogs.length} 条`;
+  elements.debugLogRows.innerHTML = state.debugLogs.length ? state.debugLogs.map((item) => {
+    const message = item.message || item.error || "暂无详情";
+    const outcomeClass = debugOutcomeClass(item.outcome);
+    return `<tr>
+      <td>${escapeHtml(formatDate(item.started_at || item.scheduled_at))}</td>
+      <td><span class="debug-log-task"><strong>${escapeHtml(item.automation_name)}</strong><small>${escapeHtml(item.handler_type)}</small></span></td>
+      <td><span class="status-badge ${escapeHtml(item.status)}">${escapeHtml(debugStatusLabel(item.status))}</span></td>
+      <td>${escapeHtml(item.attempts)}</td>
+      <td><span class="status-badge ${outcomeClass}">${escapeHtml(debugOutcomeLabel(item.outcome))}</span></td>
+      <td class="debug-log-message" title="${escapeHtml(message)}">${escapeHtml(message)}</td>
+      <td><button class="table-button" type="button" data-debug-log-id="${escapeHtml(item.id)}">查看详情</button></td>
+    </tr>`;
+  }).join("") : '<tr><td class="empty" colspan="7">没有符合筛选条件的运行日志</td></tr>';
+}
+
+async function loadDebugLogs({ quiet = false } = {}) {
+  const params = new URLSearchParams({ limit: "100" });
+  if (elements.debugLogAutomation.value) params.set("automation_id", elements.debugLogAutomation.value);
+  if (elements.debugLogStatus.value) params.set("status", elements.debugLogStatus.value);
+  if (elements.debugLogOutcome.value) params.set("outcome", elements.debugLogOutcome.value);
+  elements.debugLogRefresh.disabled = true;
+  try {
+    const payload = await api(`/api/v1/debug/executions?${params}`, { cache: "no-store" });
+    renderDebugLogs(payload);
+    if (!quiet) showToast("运行日志已刷新");
+    return payload;
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+    else {
+      elements.debugLogRows.innerHTML = `<tr><td class="empty" colspan="7">${escapeHtml(error.message)}</td></tr>`;
+      showToast(error.message, true);
+    }
+    return null;
+  } finally {
+    elements.debugLogRefresh.disabled = false;
+  }
+}
+
+function openDebugLog(item) {
+  elements.debugLogDialogTitle.textContent = item.automation_name || "执行详情";
+  elements.debugLogDialogSubtitle.textContent = `${formatDate(item.started_at || item.scheduled_at)} · ${item.handler_type}`;
+  elements.debugLogDetailStatus.textContent = debugStatusLabel(item.status);
+  elements.debugLogDetailOutcome.textContent = debugOutcomeLabel(item.outcome);
+  elements.debugLogDetailAttempts.textContent = String(item.attempts ?? "-");
+  elements.debugLogDetailDuration.textContent = formatDuration(item.duration_ms);
+  elements.debugLogOutput.textContent = JSON.stringify({
+    message: item.message,
+    error: item.error,
+    result: item.result,
+    started_at: item.started_at,
+    finished_at: item.finished_at,
+  }, null, 2);
+  elements.debugLogArtifactState.hidden = true;
+  elements.debugLogArtifact.hidden = false;
+  elements.debugLogArtifactSection.hidden = !item.artifact_url;
+  elements.debugLogArtifact.removeAttribute("src");
+  if (item.artifact_url) elements.debugLogArtifact.src = `${item.artifact_url}?t=${Date.now()}`;
+  elements.debugLogDialog.showModal();
+}
+
+function closeDebugLog() {
+  elements.debugLogArtifact.removeAttribute("src");
+  elements.debugLogDialog.close();
+}
+
 function renderUpgradeStatus(status) {
   const localRevision = status.local_revision || status.revision;
   elements.upgradeRevision.textContent = localRevision ? `${status.branch}@${localRevision.slice(0, 12)}` : "未知";
@@ -1577,6 +1721,7 @@ elements.importButton.addEventListener("click", async () => {
 
 elements.refreshButton.addEventListener("click", () => {
   if (state.activeView === "upgrade") loadUpgradeStatus();
+  else if (state.activeView === "logs") loadDebugLogs();
   else refresh();
 });
 elements.copyButton.addEventListener("click", async () => {
@@ -1744,6 +1889,23 @@ elements.webCredentialRows.addEventListener("click", async (event) => {
   } finally {
     setBusy(false);
   }
+});
+elements.debugLogRefresh.addEventListener("click", () => loadDebugLogs());
+for (const filter of [elements.debugLogAutomation, elements.debugLogStatus, elements.debugLogOutcome]) {
+  filter.addEventListener("change", () => loadDebugLogs({ quiet: true }));
+}
+elements.debugLogRows.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-debug-log-id]");
+  if (!button) return;
+  const item = state.debugLogs.find((entry) => entry.id === button.dataset.debugLogId);
+  if (item) openDebugLog(item);
+});
+elements.debugLogDialogClose.addEventListener("click", closeDebugLog);
+elements.debugLogDialogDismiss.addEventListener("click", closeDebugLog);
+elements.debugLogDialog.addEventListener("close", () => elements.debugLogArtifact.removeAttribute("src"));
+elements.debugLogArtifact.addEventListener("error", () => {
+  elements.debugLogArtifact.hidden = true;
+  elements.debugLogArtifactState.hidden = false;
 });
 elements.logoutButton.addEventListener("click", async () => {
   try { await fetch("/api/auth/logout", { method: "POST" }); } finally { location.replace("/login"); }

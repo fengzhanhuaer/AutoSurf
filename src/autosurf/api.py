@@ -10,6 +10,7 @@ import io
 from importlib.metadata import PackageNotFoundError, version
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -19,11 +20,12 @@ from urllib.parse import urlparse
 import zipfile
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
-from autosurf.domain.models import utc_now
+from autosurf.domain.models import ExecutionStatus, RunOutcome, utc_now
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
 from autosurf.automations.browser_session import persistent_browser_mode
 from autosurf.infrastructure.database import (
@@ -786,6 +788,67 @@ def list_executions(request: Request, limit: int = 50) -> dict[str, Any]:
     with request.app.state.sessions() as session:
         records = session.scalars(select(ExecutionRecord).order_by(ExecutionRecord.scheduled_at.desc()).limit(limit)).all()
         return {"items": [execution_view(item) for item in records]}
+
+
+@router.get("/debug/executions")
+def list_debug_executions(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=200),
+    automation_id: str | None = Query(default=None, max_length=36),
+    execution_status: str | None = Query(default=None, alias="status", max_length=24),
+    outcome: str | None = Query(default=None, max_length=24),
+) -> dict[str, Any]:
+    valid_statuses = {item.value for item in ExecutionStatus}
+    valid_outcomes = {item.value for item in RunOutcome}
+    if execution_status and execution_status not in valid_statuses:
+        raise HTTPException(status_code=422, detail="执行状态筛选值无效")
+    if outcome and outcome not in valid_outcomes:
+        raise HTTPException(status_code=422, detail="执行结果筛选值无效")
+
+    with request.app.state.sessions() as session:
+        query = select(ExecutionRecord).join(AutomationRecord)
+        if automation_id:
+            query = query.where(ExecutionRecord.automation_id == automation_id)
+        if execution_status:
+            query = query.where(ExecutionRecord.status == execution_status)
+        records = session.scalars(query.order_by(
+            ExecutionRecord.scheduled_at.desc(), ExecutionRecord.id.desc(),
+        ).limit(1000 if outcome else limit)).all()
+        views = [
+            _debug_execution_view(record, request.app.state.settings.data_dir)
+            for record in records
+        ]
+        if outcome:
+            views = [item for item in views if item["outcome"] == outcome]
+        views = views[:limit]
+
+        automations = session.scalars(select(AutomationRecord).order_by(
+            AutomationRecord.name, AutomationRecord.id,
+        )).all()
+        return {
+            "items": views,
+            "automations": [{
+                "id": item.id,
+                "name": item.name,
+                "handler_type": item.handler_type,
+            } for item in automations],
+        }
+
+
+@router.get("/debug/executions/{execution_id}/artifact")
+def debug_execution_artifact(execution_id: str, request: Request) -> Response:
+    with request.app.state.sessions() as session:
+        if session.get(ExecutionRecord, execution_id) is None:
+            raise HTTPException(status_code=404, detail="执行记录不存在")
+    artifact_dir = request.app.state.settings.data_dir.joinpath("browser-artifacts").resolve()
+    artifact = artifact_dir.joinpath(f"{execution_id}.png").resolve()
+    if artifact.parent != artifact_dir or not artifact.is_file():
+        raise HTTPException(status_code=404, detail="执行截图不存在")
+    return FileResponse(
+        artifact,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 @router.post("/periodic-signin/sites", status_code=201)
@@ -1815,6 +1878,80 @@ def execution_view(record: ExecutionRecord) -> dict[str, Any]:
     return {"id": record.id, "automation_id": record.automation_id, "scheduled_at": record.scheduled_at,
             "status": record.status, "attempts": record.attempts, "result": json.loads(record.result_json) if record.result_json else None,
             "error": record.error, "started_at": record.started_at, "finished_at": record.finished_at}
+
+
+_DEBUG_SENSITIVE_KEYS = (
+    "access_key", "api_key", "authorization", "cookie", "credential", "password",
+    "private_key", "secret", "token", "upload_key",
+)
+_DEBUG_INLINE_SECRET = re.compile(
+    r"(?i)\b(access[_ -]?key|api[_ -]?key|authorization|cookie|password|private[_ -]?key|"
+    r"secret|token|upload[_ -]?key)(\s*[:=]\s*)([^\r\n]+)"
+)
+
+
+def _debug_execution_view(record: ExecutionRecord, data_dir: Path) -> dict[str, Any]:
+    raw_result: Any = None
+    if record.result_json:
+        with suppress(ValueError, TypeError):
+            raw_result = json.loads(record.result_json)
+    result = _sanitize_debug_value(raw_result)
+    artifact = data_dir.joinpath("browser-artifacts", f"{record.id}.png")
+    artifact_url = (
+        f"/api/v1/debug/executions/{record.id}/artifact" if artifact.is_file() else None
+    )
+    if isinstance(result, dict):
+        details = result.get("details")
+        if isinstance(details, dict) and "screenshot" in details:
+            details["screenshot"] = artifact_url or "截图文件不存在"
+    outcome = result.get("outcome") if isinstance(result, dict) else None
+    message = result.get("message") if isinstance(result, dict) else None
+    duration_ms = None
+    if record.started_at and record.finished_at:
+        duration_ms = max(int((record.finished_at - record.started_at).total_seconds() * 1000), 0)
+    return {
+        "id": record.id,
+        "automation_id": record.automation_id,
+        "automation_name": record.automation.name,
+        "handler_type": record.automation.handler_type,
+        "scheduled_at": record.scheduled_at,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "duration_ms": duration_ms,
+        "status": record.status,
+        "attempts": record.attempts,
+        "outcome": outcome,
+        "message": _sanitize_debug_text(message) if message is not None else None,
+        "error": _sanitize_debug_text(record.error) if record.error else None,
+        "result": result,
+        "artifact_url": artifact_url,
+    }
+
+
+def _sanitize_debug_value(value: Any, key: str = "", depth: int = 0) -> Any:
+    if any(part in key.casefold() for part in _DEBUG_SENSITIVE_KEYS):
+        return "[已脱敏]"
+    if depth >= 8:
+        return "[内容层级过深]"
+    if isinstance(value, dict):
+        return {
+            str(item_key)[:160]: _sanitize_debug_value(item_value, str(item_key), depth + 1)
+            for item_key, item_value in list(value.items())[:100]
+        }
+    if isinstance(value, list):
+        return [_sanitize_debug_value(item, key, depth + 1) for item in value[:100]]
+    if isinstance(value, str):
+        return _sanitize_debug_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _sanitize_debug_text(str(value))
+
+
+def _sanitize_debug_text(value: Any, limit: int = 8000) -> str:
+    text = _DEBUG_INLINE_SECRET.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[已脱敏]", str(value),
+    )
+    return text if len(text) <= limit else f"{text[:limit]}\n...[内容已截断]"
 
 
 @router.get("/web-credentials/rousi")
