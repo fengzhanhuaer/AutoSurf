@@ -1270,6 +1270,11 @@ async def _classify_pt_homepage(page: Any, context: RunContext,
     body = await page_body_text(page)
     body += "\n" + await rendered_signin_status_text(page)
     outcome = classify_pt_page(page.url, status_code, body, context.config)
+    target_host = (urlparse(str(context.config.get("url") or "")).hostname or "").lower()
+    if outcome == RunOutcome.ALREADY_DONE and target_host == "u2.dmhy.org":
+        # U2's homepage can contain historical check-in text. Only its
+        # attendance page is authoritative for today's result.
+        return None
     if outcome not in {
         RunOutcome.ALREADY_DONE,
         RunOutcome.AUTH_EXPIRED,

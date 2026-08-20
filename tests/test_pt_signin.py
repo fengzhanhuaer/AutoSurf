@@ -105,6 +105,38 @@ async def test_homepage_already_done_skips_hdkylin_challenge_page():
 
 
 @pytest.mark.asyncio
+async def test_u2_homepage_already_done_requires_attendance_page():
+    class Locator:
+        async def inner_text(self):
+            return "历史签到记录 今日已签到"
+
+        async def count(self):
+            return 0
+
+    class Page:
+        url = "https://u2.dmhy.org/"
+
+        def locator(self, _selector):
+            return Locator()
+
+        async def evaluate(self, _script):
+            return []
+
+    page = Page()
+    page.frames = [page]
+
+    result = await _classify_pt_homepage(
+        page,
+        RunContext(
+            "test", {"url": "https://u2.dmhy.org/attendance.php"}, {"nexusphp_u2": "secret"},
+        ),
+        200,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_0ff_homepage_already_done_is_enriched_from_calendar_page():
     class Locator:
         first = None
