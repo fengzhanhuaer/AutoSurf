@@ -1538,6 +1538,7 @@ async def test_opencd_adapter_uses_today_record_when_home_entry_disappears():
     class Page:
         url = "https://open.cd/"
         body = "OpenCD 欢迎回来 查看签到记录"
+        waits = 0
 
         def locator(self, selector):
             return Locator(self, "body" if selector == "body" else "links")
@@ -1546,8 +1547,13 @@ async def test_opencd_adapter_uses_today_record_when_home_entry_disappears():
             assert url == "https://open.cd/attendance.php?type=record"
             assert kwargs == {"wait_until": "domcontentloaded"}
             self.url = url
-            self.body = f"签到记录 签到时间 签到人 连续天数\n{today} 20:19:09 mapleren 0"
+            self.body = "签到记录 签到时间 签到人 连续天数"
             return Response()
+
+        async def wait_for_timeout(self, timeout):
+            assert timeout == 500
+            self.waits += 1
+            self.body = f"签到记录 签到时间 签到人 连续天数\n{today} 20:19:09 mapleren 0"
 
     page = Page()
     result = await OpenCdAdapter().sign_in(page, RunContext(
@@ -1556,6 +1562,7 @@ async def test_opencd_adapter_uses_today_record_when_home_entry_disappears():
 
     assert result.outcome == RunOutcome.ALREADY_DONE
     assert result.details["site_history"] == [{"date": today, "reward": ""}]
+    assert page.waits == 1
 
 
 @pytest.mark.asyncio

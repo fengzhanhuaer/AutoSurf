@@ -795,7 +795,7 @@ class OpenCdAdapter:
         return hostname == "open.cd" or hostname.endswith(".open.cd")
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
-        body = (await page.locator("body").inner_text())[:1_000_000]
+        body = await page_body_text(page)
         history = today_signin_history(body)
         if history:
             return _classified_result(
@@ -815,8 +815,7 @@ class OpenCdAdapter:
                     response = await page.goto(
                         urljoin(page.url, href), wait_until="domcontentloaded",
                     )
-                    body = (await page.locator("body").inner_text())[:1_000_000]
-                    history = today_signin_history(body)
+                    history = await wait_for_today_signin_history(page, timeout_ms=5_000)
                     if history:
                         return _classified_result(
                             RunOutcome.ALREADY_DONE,
@@ -2175,6 +2174,23 @@ def extract_text_signin_history(value: str) -> list[dict[str, str]]:
 def today_signin_history(value: str) -> list[dict[str, str]]:
     history = extract_text_signin_history(value)
     return history if any(item["date"] == date.today().isoformat() for item in history) else []
+
+
+async def wait_for_today_signin_history(
+    page: Any, timeout_ms: int = 0,
+) -> list[dict[str, str]]:
+    attempts = max(timeout_ms // 500, 0) + 1
+    for attempt in range(attempts):
+        history = today_signin_history(await page_body_text(page))
+        if history:
+            return history
+        if attempt + 1 >= attempts:
+            break
+        try:
+            await page.wait_for_timeout(500)
+        except Exception:
+            break
+    return []
 
 
 def _normalize_history_date(value: str) -> str | None:
