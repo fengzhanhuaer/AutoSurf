@@ -379,6 +379,9 @@ async def test_management_uses_dedicated_login_page_and_docs_require_session(set
     assert css.headers["cache-control"] == "no-store"
     assert javascript.headers["cache-control"] == "no-store"
     assert 'document.execCommand("copy")' in javascript.text
+    assert 'const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"])' in javascript.text
+    assert "window.setInterval(refreshExecutionStates, 15_000)" in javascript.text
+    assert 'api("/api/v1/periodic-signin/sites")' in javascript.text
     assert login_css.status_code == 200
     assert login_javascript.status_code == 200
 

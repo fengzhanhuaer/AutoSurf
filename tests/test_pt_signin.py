@@ -372,6 +372,162 @@ def test_pt_profile_url_and_combined_action_results():
 
 
 @pytest.mark.asyncio
+async def test_profile_refresh_navigates_away_from_blocked_signin_page():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Response:
+        status = 200
+
+    class Page:
+        url = "https://tracker.test/attendance.php"
+        body = "Just a moment... Cloudflare"
+        visited = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        async def goto(self, url, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60_000}
+            self.visited.append(url)
+            self.url = url
+            self.body = "用户详情 - mapleren 上传量: 1 TiB"
+            return Response()
+
+        async def evaluate(self, _script):
+            return {
+                "pairs": [["上传量", "1 TiB"]],
+                "body": self.body,
+                "title": "用户详情 - mapleren",
+            }
+
+    page = Page()
+    result = await refresh_pt_profile_page(
+        page,
+        RunContext(
+            "test",
+            {
+                "url": "https://tracker.test/attendance.php",
+                "profile_url": "/userdetails.php?id=7",
+            },
+            {"sid": "secret"},
+        ),
+        "https://tracker.test/attendance.php",
+        "tracker.test",
+        60_000,
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert page.visited == ["https://tracker.test/userdetails.php?id=7"]
+    assert result.details["profile_stats"]["uploaded"] == "1 TiB"
+
+
+@pytest.mark.asyncio
+async def test_handler_keeps_profile_refresh_after_signin_navigation_error(monkeypatch, tmp_path):
+    from playwright.async_api import Error as PlaywrightError
+
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Response:
+        status = 200
+
+    class Page:
+        url = "about:blank"
+        body = ""
+        visited = []
+
+        def set_default_timeout(self, _timeout):
+            return None
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        async def goto(self, url, **_kwargs):
+            self.visited.append(url)
+            self.url = url
+            self.body = "用户详情 - mapleren 上传量: 1 TiB"
+            return Response()
+
+        async def evaluate(self, _script):
+            return {
+                "pairs": [["上传量", "1 TiB"]],
+                "body": self.body,
+                "title": "用户详情 - mapleren",
+            }
+
+        async def screenshot(self, **_kwargs):
+            return None
+
+    page = Page()
+
+    class BrowserContext:
+        pages = [page]
+
+    class BrowserSession:
+        context = BrowserContext()
+        mode = "persistent_headless"
+        profile_key = "shared"
+
+    class SessionManager:
+        async def __aenter__(self):
+            return BrowserSession()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class PlaywrightManager:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def fail_home_navigation(*_args, **_kwargs):
+        raise PlaywrightError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+
+    monkeypatch.setenv("AUTOSURF_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "playwright.async_api.async_playwright", lambda: PlaywrightManager(),
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.persistent_chromium_session",
+        lambda *_args, **_kwargs: SessionManager(),
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin._goto_pt_page", fail_home_navigation,
+    )
+
+    result = await PtSignInHandler().run(RunContext(
+        "navigation-error",
+        {
+            "url": "https://u2.dmhy.org/attendance.php",
+            "credential_domain": "u2.dmhy.org",
+            "profile_url": "/userdetails.php?id=7",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+            "profile_refresh_supported": True,
+        },
+        {"c_secure_uid": "7"},
+    ))
+
+    assert result.outcome == RunOutcome.FAILED
+    assert result.details["actions"]["sign_in"]["outcome"] == RunOutcome.FAILED
+    assert result.details["actions"]["profile_refresh"]["outcome"] == RunOutcome.SUCCESS
+    assert page.visited == ["https://u2.dmhy.org/userdetails.php?id=7"]
+
+
+@pytest.mark.asyncio
 async def test_hhanclub_calendar_history_uses_claimed_days_and_rewards():
     class Body:
         async def inner_text(self):
@@ -656,9 +812,7 @@ def test_site_signin_history_normalization_rejects_invalid_entries():
         RunResult(RunOutcome.BLOCKED, "拖动滑块验证未通过"),
         "https://pt.0ff.cc/attendance.php",
     )
-    assert blocked_refresh is not None
-    assert blocked_refresh.outcome == RunOutcome.BLOCKED
-    assert blocked_refresh.message == "访问验证未通过，未刷新个人信息"
+    assert blocked_refresh is None
     assert classify_pt_page(
         "https://tracker.test/attendance.php", 200, "获得 [10]", {"success_patterns": ["获得 [10]"]}
     ) == RunOutcome.SUCCESS
@@ -706,6 +860,20 @@ def test_text_signin_history_supports_pttime_records():
         "https://www.pttime.org/attendance.php",
         "/userdetails.php?id=94806",
     ) == "https://www.pttime.org/attendance.php?type=sign&uid=94806"
+
+
+def test_text_signin_history_supports_plain_record_table_rows():
+    text = """
+    签到记录
+    签到时间 签到人 连续天数
+    2026-08-20 20:19:09 mapleren 0
+    2026-07-25 14:46:55 mapleren 0
+    """
+
+    assert extract_text_signin_history(text) == [
+        {"date": "2026-07-25", "reward": ""},
+        {"date": "2026-08-20", "reward": ""},
+    ]
 
 
 def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknown_sites():
@@ -1337,6 +1505,60 @@ async def test_opencd_adapter_routes_captcha_page_to_local_ocr(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_opencd_adapter_uses_today_record_when_home_entry_disappears():
+    today = datetime.now().date().isoformat()
+
+    class Locator:
+        first = None
+
+        def __init__(self, page, kind):
+            self.page = page
+            self.kind = kind
+            self.first = self
+
+        def filter(self, *, has_text):
+            return Locator(
+                self.page,
+                "history" if "記记" in has_text.pattern else "signin",
+            )
+
+        async def inner_text(self):
+            return self.page.body
+
+        async def is_visible(self):
+            return self.kind == "history"
+
+        async def get_attribute(self, name):
+            assert name == "href"
+            return "/attendance.php?type=record"
+
+    class Response:
+        status = 200
+
+    class Page:
+        url = "https://open.cd/"
+        body = "OpenCD 欢迎回来 查看签到记录"
+
+        def locator(self, selector):
+            return Locator(self, "body" if selector == "body" else "links")
+
+        async def goto(self, url, **kwargs):
+            assert url == "https://open.cd/attendance.php?type=record"
+            assert kwargs == {"wait_until": "domcontentloaded"}
+            self.url = url
+            self.body = f"签到记录 签到时间 签到人 连续天数\n{today} 20:19:09 mapleren 0"
+            return Response()
+
+    page = Page()
+    result = await OpenCdAdapter().sign_in(page, RunContext(
+        "test", {"url": page.url}, {"sid": "secret"},
+    ))
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    assert result.details["site_history"] == [{"date": today, "reward": ""}]
+
+
+@pytest.mark.asyncio
 async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch):
     monkeypatch.setattr(
         "autosurf.automations.pt_signin.recognize_nexusphp_captcha",
@@ -1673,6 +1895,37 @@ async def test_tjupt_broken_streak_opens_restart_captcha_without_spending_makeup
     assert result.details["clicked"] is True
     assert page.restarted is True
     assert page.url.endswith("action=cancel")
+
+
+@pytest.mark.asyncio
+async def test_tjupt_today_history_does_not_restart_or_open_captcha():
+    today = datetime.now().date().isoformat()
+
+    class Locator:
+        first = None
+
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def inner_text(self):
+            return f"签到记录 签到时间 签到人\n{today} 09:01:02 mapleren"
+
+        async def is_visible(self):
+            raise AssertionError("today's record must be checked before restart controls")
+
+    class Page:
+        url = "https://tjupt.org/attendance.php"
+
+        def locator(self, _selector):
+            return Locator(self)
+
+    result = await TjuptAdapter().sign_in(Page(), RunContext(
+        "test", {"url": Page.url}, {"sid": "secret"},
+    ))
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    assert result.details["site_history"] == [{"date": today, "reward": ""}]
 
 
 @pytest.mark.asyncio

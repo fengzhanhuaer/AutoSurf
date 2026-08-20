@@ -796,11 +796,34 @@ class OpenCdAdapter:
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
         body = (await page.locator("body").inner_text())[:1_000_000]
+        history = today_signin_history(body)
+        if history:
+            return _classified_result(
+                RunOutcome.ALREADY_DONE, page.url, None, site_history=history,
+            )
         outcome = classify_pt_page(page.url, None, body, context.config)
         if outcome:
             return await _classified_page_result(page, outcome, page.url, None, context=context)
         target = page.locator("a").filter(has_text=re.compile(r"^\s*簽到\s*$")).first
         if not await target.is_visible():
+            history_target = page.locator("a").filter(
+                has_text=re.compile(r"(?:查看)?[簽签]到[記记][錄录]"),
+            ).first
+            if await history_target.is_visible():
+                href = await history_target.get_attribute("href")
+                if href:
+                    response = await page.goto(
+                        urljoin(page.url, href), wait_until="domcontentloaded",
+                    )
+                    body = (await page.locator("body").inner_text())[:1_000_000]
+                    history = today_signin_history(body)
+                    if history:
+                        return _classified_result(
+                            RunOutcome.ALREADY_DONE,
+                            page.url,
+                            response.status if response else None,
+                            site_history=history,
+                        )
             return RunResult(RunOutcome.FAILED, "OpenCD 首页没有找到签到入口", {"url": page.url})
         async with page.expect_response(
             lambda response: response.url.endswith("/plugin_sign-in.php")
@@ -1014,6 +1037,11 @@ class TjuptAdapter:
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
         body = (await page.locator("body").inner_text())[:1_000_000]
+        history = today_signin_history(body)
+        if history:
+            return _classified_result(
+                RunOutcome.ALREADY_DONE, page.url, None, site_history=history,
+            )
         outcome = classify_pt_page(page.url, None, body, context.config)
         if outcome == RunOutcome.FAILED:
             restart = page.locator('a[href*="action=cancel"]').first
@@ -1026,6 +1054,15 @@ class TjuptAdapter:
             response = await navigation.value
             status_code = response.status if response else None
             body = (await page.locator("body").inner_text())[:1_000_000]
+            history = today_signin_history(body)
+            if history:
+                return _classified_result(
+                    RunOutcome.ALREADY_DONE,
+                    page.url,
+                    status_code,
+                    clicked=True,
+                    site_history=history,
+                )
             if "签到验证码" in body and "影视名称" in body:
                 return RunResult(
                     RunOutcome.BLOCKED,
@@ -1068,14 +1105,8 @@ def web_storage_init_script(url: str, values: dict[str, str]) -> str:
 
 
 def profile_refresh_skip_result(sign_in: RunResult | None, url: str) -> RunResult | None:
-    if sign_in is None or sign_in.outcome not in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
+    if sign_in is None or sign_in.outcome != RunOutcome.AUTH_EXPIRED:
         return None
-    if sign_in.outcome == RunOutcome.BLOCKED:
-        return RunResult(
-            RunOutcome.BLOCKED,
-            "访问验证未通过，未刷新个人信息",
-            {"url": url},
-        )
     return RunResult(
         RunOutcome.AUTH_EXPIRED,
         "登录已失效，未刷新个人信息",
@@ -1143,30 +1174,68 @@ class PtSignInHandler:
                 page.set_default_timeout(timeout_ms)
                 try:
                     origin = pt_home_url(url)
-                    home_response = await _goto_pt_page(page, origin, timeout_ms)
                     adapter = next((item for item in self.adapters if item.matches(url)), None)
+                    home_response = None
+                    home_error = None
+                    try:
+                        home_response = await _goto_pt_page(page, origin, timeout_ms)
+                    except PlaywrightTimeoutError as exc:
+                        await _save_screenshot(page, screenshot)
+                        home_error = RunResult(
+                            RunOutcome.BLOCKED,
+                            "PT 站点响应超时",
+                            {
+                                "url": page.url or url,
+                                "screenshot": str(screenshot),
+                                "error": str(exc)[:500],
+                            },
+                        )
+                    except PlaywrightError as exc:
+                        await _save_screenshot(page, screenshot)
+                        home_error = playwright_error_result(page.url or url, exc, screenshot)
                     sign_in_result = None
                     if sign_in_enabled:
-                        response = home_response
-                        if (parsed.path or "/") != "/" or parsed.query:
-                            sign_in_result = await _classify_pt_homepage(
-                                page, context, response.status if response else None,
-                            )
-                            if sign_in_result is not None:
-                                sign_in_result = await _enrich_0ff_calendar_history(
-                                    page, context, sign_in_result, timeout_ms,
-                                )
-                            if sign_in_result is None:
-                                response = await _open_pt_signin_page(page, url, timeout_ms)
-                                sign_in_result = await _resolve_0ff_slider(
-                                    page, url, response.status if response else None, screenshot,
-                                )
+                        sign_in_result = home_error
                         if sign_in_result is None:
-                            if adapter:
-                                sign_in_result = await adapter.sign_in(page, context)
-                            else:
-                                sign_in_result = await self._generic_sign_in(
-                                    page, context, response.status if response else None, screenshot
+                            try:
+                                response = home_response
+                                if (parsed.path or "/") != "/" or parsed.query:
+                                    sign_in_result = await _classify_pt_homepage(
+                                        page, context, response.status if response else None,
+                                    )
+                                    if sign_in_result is not None:
+                                        sign_in_result = await _enrich_0ff_calendar_history(
+                                            page, context, sign_in_result, timeout_ms,
+                                        )
+                                    if sign_in_result is None:
+                                        response = await _open_pt_signin_page(page, url, timeout_ms)
+                                        sign_in_result = await _resolve_0ff_slider(
+                                            page, url, response.status if response else None, screenshot,
+                                        )
+                                if sign_in_result is None:
+                                    if adapter:
+                                        sign_in_result = await adapter.sign_in(page, context)
+                                    else:
+                                        sign_in_result = await self._generic_sign_in(
+                                            page, context,
+                                            response.status if response else None,
+                                            screenshot,
+                                        )
+                            except PlaywrightTimeoutError as exc:
+                                await _save_screenshot(page, screenshot)
+                                sign_in_result = RunResult(
+                                    RunOutcome.BLOCKED,
+                                    "PT 站点响应超时",
+                                    {
+                                        "url": page.url or url,
+                                        "screenshot": str(screenshot),
+                                        "error": str(exc)[:500],
+                                    },
+                                )
+                            except PlaywrightError as exc:
+                                await _save_screenshot(page, screenshot)
+                                sign_in_result = playwright_error_result(
+                                    page.url or url, exc, screenshot,
                                 )
                         sign_in_result = await _attach_failure_screenshot(
                             page, sign_in_result, screenshot,
@@ -1177,13 +1246,22 @@ class PtSignInHandler:
                             sign_in_result, page.url or url,
                         )
                         if profile_result is None:
-                            adapter_refresh = getattr(adapter, "refresh_profile", None)
-                            if callable(adapter_refresh):
-                                profile_result = await adapter_refresh(page, context)
-                            else:
-                                profile_result = await refresh_pt_profile_page(
-                                    page, context, url, credential_domain, timeout_ms
+                            try:
+                                adapter_refresh = getattr(adapter, "refresh_profile", None)
+                                if callable(adapter_refresh):
+                                    profile_result = await adapter_refresh(page, context)
+                                else:
+                                    profile_result = await refresh_pt_profile_page(
+                                        page, context, url, credential_domain, timeout_ms
+                                    )
+                            except PlaywrightTimeoutError as exc:
+                                profile_result = RunResult(
+                                    RunOutcome.BLOCKED,
+                                    "PT 站个人信息页响应超时",
+                                    {"url": page.url or url, "error": str(exc)[:500]},
                                 )
+                            except PlaywrightError as exc:
+                                profile_result = playwright_error_result(page.url or url, exc)
                     return with_browser_details(
                         combine_pt_action_results(sign_in_result, profile_result), browser_session,
                     )
@@ -1501,7 +1579,7 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
                                   credential_domain: str, timeout_ms: int) -> RunResult:
     current_body = await page_body_text(page)
     current_outcome = classify_pt_page(page.url, None, current_body, context.config)
-    if current_outcome in {RunOutcome.AUTH_EXPIRED, RunOutcome.BLOCKED}:
+    if current_outcome == RunOutcome.AUTH_EXPIRED:
         return _classified_result(current_outcome, page.url, None)
 
     configured = str(context.config.get("profile_url") or "").strip()
@@ -2079,7 +2157,24 @@ def extract_text_signin_history(value: str) -> list[dict[str, str]]:
         day = _normalize_history_date(match.group(1))
         if day:
             result.setdefault(day, {"date": day, "reward": ""})
+    if (
+        re.search(r"[簽签]到[記记][錄录]", value, re.IGNORECASE)
+        and re.search(r"[簽签]到(?:日期|时间|時間)", value, re.IGNORECASE)
+    ):
+        for match in re.finditer(
+            r"(?<!\d)(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})"
+            r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?",
+            value,
+        ):
+            day = _normalize_history_date(match.group(1))
+            if day:
+                result.setdefault(day, {"date": day, "reward": ""})
     return [result[key] for key in sorted(result)[-62:]]
+
+
+def today_signin_history(value: str) -> list[dict[str, str]]:
+    history = extract_text_signin_history(value)
+    return history if any(item["date"] == date.today().isoformat() for item in history) else []
 
 
 def _normalize_history_date(value: str) -> str | None:

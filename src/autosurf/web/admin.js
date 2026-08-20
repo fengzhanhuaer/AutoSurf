@@ -21,6 +21,9 @@ const state = {
   activePeriodicTab: "tasks",
 };
 
+const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"]);
+let executionRefreshInFlight = false;
+
 const elements = {
   body: document.body,
   pageTitle: document.querySelector("#page-title"),
@@ -1463,6 +1466,43 @@ async function refresh({ quiet = false } = {}) {
   }
 }
 
+function hasActiveExecutions() {
+  return [
+    ...state.ptSites.map((item) => item.last_execution),
+    ...state.periodicSites.map((item) => item.last_execution),
+  ].some((execution) => ACTIVE_EXECUTION_STATUSES.has(execution?.status));
+}
+
+async function refreshExecutionStates() {
+  if (executionRefreshInFlight || document.hidden || !hasActiveExecutions()) return;
+  executionRefreshInFlight = true;
+  try {
+    const timezoneOffset = -new Date().getTimezoneOffset();
+    const [ptSites, ptHistory, ptStats, periodicSites, periodicExecutions] = await Promise.all([
+      api("/api/v1/pt-signin/sites"),
+      api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
+      api("/api/v1/pt-signin/stats"),
+      api("/api/v1/periodic-signin/sites"),
+      api("/api/v1/periodic-signin/executions?limit=100"),
+    ]);
+    state.ptSites = ptSites.items;
+    state.ptHistory = ptHistory;
+    state.ptStats = ptStats.items;
+    state.periodicSites = periodicSites.items;
+    state.periodicExecutions = periodicExecutions.items;
+    renderPtSummary();
+    renderPtSites();
+    renderPtHistory();
+    renderPtStats();
+    renderPeriodicSites();
+    renderPeriodicHistory();
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+  } finally {
+    executionRefreshInFlight = false;
+  }
+}
+
 elements.ptSelectAllButton.addEventListener("click", () => {
   const selectable = selectablePtCandidates();
   const allSelected = selectable.length > 0 && selectable.every((item) => state.ptSelection.has(item.credential.id));
@@ -1984,6 +2024,10 @@ periodicTabs.forEach((button, index) => {
   });
 });
 window.addEventListener("hashchange", () => setActiveView(location.hash.slice(1), { syncHash: false }));
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshExecutionStates();
+});
+window.setInterval(refreshExecutionStates, 15_000);
 
 setActiveSigninTab("tasks");
 setActivePeriodicTab("tasks");
