@@ -64,17 +64,39 @@ AUTH_EXPIRED_PATTERNS = (
     r"(?:两步|二步|兩步).{0,8}(?:验证码|驗證碼)",
     r"完成.{0,8}(?:两步|二步|兩步).{0,8}(?:验证|驗證).{0,16}成功登录",
 )
-CHALLENGE_PATTERNS = (
+CLOUDFLARE_CHALLENGE_PATTERNS = (
     r"cf-chl-",
     r"cloudflare\s+ray\s+id",
     r"just\s+a\s+moment",
     r"attention\s+required",
+)
+CLOUDFLARE_UPSTREAM_ERROR_PATTERNS = (
+    r"error\s+code\s+52[0-6]",
+    r"connection\s+timed\s+out",
+    r"cloudflare\s+working.{0,160}host\s+error",
+)
+SAFELINE_CHALLENGE_PATTERNS = (
+    r"雷池\s*WAF",
+    r"客户端异常.{0,24}合法用户",
+    r"sl-challenge-server",
+)
+HUMAN_CHALLENGE_PATTERNS = (
     r"验证您是真人",
     r"人机验证",
     r"人機驗證",
     r"(?:验证|驗證)通过后将自动完成签到",
-    r"雷池\s*WAF",
-    r"客户端异常.{0,24}合法用户",
+)
+CHALLENGE_PATTERNS = (
+    *CLOUDFLARE_CHALLENGE_PATTERNS,
+    *SAFELINE_CHALLENGE_PATTERNS,
+    *HUMAN_CHALLENGE_PATTERNS,
+)
+AUTOMATIC_CHALLENGE_PATTERNS = (
+    r"cf-chl-",
+    r"just\s+a\s+moment",
+    r"attention\s+required",
+    *SAFELINE_CHALLENGE_PATTERNS,
+    *HUMAN_CHALLENGE_PATTERNS,
 )
 COMMON_BUTTON_PATTERNS = (
     re.compile(r"^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$", re.IGNORECASE),
@@ -1361,7 +1383,10 @@ async def _classify_pt_homepage(page: Any, context: RunContext,
         return None
     # The homepage is also the safe fallback for sites whose attendance page is
     # protected by a WAF. Do not navigate away just to collect optional history.
-    return _classified_result(outcome, page.url, status_code)
+    return _classified_result(
+        outcome, page.url, status_code,
+        page_body=body if outcome in {RunOutcome.BLOCKED, RunOutcome.FAILED} else None,
+    )
 
 
 async def _enrich_0ff_calendar_history(
@@ -1477,11 +1502,66 @@ async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
     try:
-        return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        await confirm_safeline_challenge(page)
+        await wait_for_automatic_pt_challenge(page, min(timeout_ms, 12_000))
+        return response
     except PlaywrightTimeoutError:
         if await _usable_partial_pt_page(page, url):
             return None
         raise
+
+
+async def wait_for_automatic_pt_challenge(page: Any, timeout_ms: int = 12_000) -> bool:
+    """Wait briefly for browser-solvable WAF checks without interacting with a challenge."""
+    try:
+        body = await page_body_text(page)
+        if not _matches(body, AUTOMATIC_CHALLENGE_PATTERNS):
+            return True
+        remaining_ms = max(0, timeout_ms)
+        clear_reads = 0
+        while remaining_ms > 0:
+            interval_ms = min(500, remaining_ms)
+            await page.wait_for_timeout(interval_ms)
+            remaining_ms -= interval_ms
+            body = await page_body_text(page)
+            if body.strip() and not _matches(body, AUTOMATIC_CHALLENGE_PATTERNS):
+                clear_reads += 1
+                if clear_reads >= 2:
+                    return True
+            else:
+                clear_reads = 0
+    except Exception:
+        return False
+    return False
+
+
+async def confirm_safeline_challenge(page: Any) -> bool:
+    """Click one explicit SafeLine confirmation; never interact with CAPTCHA controls."""
+    try:
+        body = await page_body_text(page)
+        if not _matches(body, SAFELINE_CHALLENGE_PATTERNS):
+            return False
+        name = re.compile(r"^\s*(?:确认|確認)\s*$")
+        candidate_builders = (
+            lambda: page.get_by_role("button", name=name).first,
+            lambda: page.get_by_text(name).first,
+            lambda: page.locator(
+                'input[type="button"][value="确认"], input[type="submit"][value="确认"], '
+                'input[type="button"][value="確認"], input[type="submit"][value="確認"]'
+            ).first,
+        )
+        for build_candidate in candidate_builders:
+            try:
+                candidate = build_candidate()
+                if await candidate.is_visible():
+                    await candidate.click()
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+    return False
 
 
 async def _usable_partial_pt_page(page: Any, expected_url: str) -> bool:
@@ -1505,6 +1585,8 @@ def classify_pt_page(url: str, status_code: int | None, body: str,
     if status_code == 401:
         return RunOutcome.AUTH_EXPIRED
     lowered_url = url.lower()
+    if classify_cloudflare_upstream_error(status_code, body) is not None:
+        return RunOutcome.FAILED
     if _matches(body, CHALLENGE_PATTERNS):
         return RunOutcome.BLOCKED
     if status_code == 403 and (
@@ -1560,18 +1642,64 @@ def _domain_matches(credential_domain: str, hostname: str) -> bool:
 
 def _classified_result(outcome: RunOutcome, url: str, status_code: int | None,
                        clicked: bool = False,
-                       site_history: list[dict[str, str]] | None = None) -> RunResult:
+                       site_history: list[dict[str, str]] | None = None,
+                       page_body: str | None = None) -> RunResult:
     messages = {
         RunOutcome.SUCCESS: "PT 站签到成功",
         RunOutcome.ALREADY_DONE: "PT 站今日已经签到",
         RunOutcome.AUTH_EXPIRED: "Cookie 已失效或站点要求重新登录",
-        RunOutcome.BLOCKED: "站点启用了 Cloudflare 或人机验证",
+        RunOutcome.BLOCKED: "站点访问被安全验证拦截",
         RunOutcome.FAILED: "站点显示签到已中断，需要人工选择补签或重新开始",
     }
     details: dict[str, Any] = {"url": url, "status_code": status_code, "clicked": clicked}
+    if outcome == RunOutcome.BLOCKED:
+        blocker_type, blocker_message = classify_pt_challenge(page_body or "")
+        messages[RunOutcome.BLOCKED] = blocker_message
+        details["blocker_type"] = blocker_type
+    elif outcome == RunOutcome.FAILED:
+        cloudflare_error = classify_cloudflare_upstream_error(status_code, page_body or "")
+        if cloudflare_error is not None:
+            failure_type, failure_message = cloudflare_error
+            messages[RunOutcome.FAILED] = failure_message
+            details["failure_type"] = failure_type
     if site_history:
         details["site_history"] = site_history
     return RunResult(outcome, messages[outcome], details)
+
+
+def classify_pt_challenge(body: str) -> tuple[str, str]:
+    if _matches(body, SAFELINE_CHALLENGE_PATTERNS):
+        return "safeline", "站点被雷池 WAF 拦截"
+    if _matches(body, CLOUDFLARE_CHALLENGE_PATTERNS):
+        return "cloudflare", "站点被 Cloudflare 人机验证拦截"
+    if _matches(body, HUMAN_CHALLENGE_PATTERNS):
+        return "human_verification", "站点要求完成人机验证"
+    return "unknown", "站点访问被安全验证拦截"
+
+
+def classify_cloudflare_upstream_error(
+    status_code: int | None, body: str,
+) -> tuple[str, str] | None:
+    error_code = status_code if status_code in range(520, 527) else None
+    if error_code is None:
+        if "cloudflare" not in body.casefold():
+            return None
+        match = re.search(r"error\s+code\s+(52[0-6])", body, re.IGNORECASE)
+        error_code = int(match.group(1)) if match else None
+    if error_code is None and not _matches(body, CLOUDFLARE_UPSTREAM_ERROR_PATTERNS):
+        return None
+    messages = {
+        520: "Cloudflare 收到源站异常响应（520）",
+        521: "Cloudflare 无法连接站点源服务器（521）",
+        522: "Cloudflare 连接站点源服务器超时（522）",
+        523: "Cloudflare 无法访问站点源服务器（523）",
+        524: "Cloudflare 等待站点源服务器响应超时（524）",
+        525: "Cloudflare 与站点源服务器 TLS 握手失败（525）",
+        526: "Cloudflare 检测到站点源服务器证书无效（526）",
+    }
+    return "cloudflare_origin", messages.get(
+        error_code, "Cloudflare 无法正常访问站点源服务器",
+    )
 
 
 async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
@@ -1596,11 +1724,20 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
         return RunResult(RunOutcome.FAILED, "个人信息页不属于当前 PT 站点", {"url": profile_url})
 
     response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_ms)
+    await confirm_safeline_challenge(page)
+    await wait_for_automatic_pt_challenge(page, min(timeout_ms, 12_000))
     status_code = response.status if response else None
     body = (await page.locator("body").inner_text())[:1_000_000]
+    cloudflare_error = classify_cloudflare_upstream_error(status_code, body)
+    if cloudflare_error is not None:
+        failure_type, failure_message = cloudflare_error
+        return RunResult(RunOutcome.FAILED, f"个人信息页：{failure_message}", {
+            "url": page.url, "status_code": status_code, "failure_type": failure_type,
+        })
     if _matches(body, CHALLENGE_PATTERNS):
-        return RunResult(RunOutcome.BLOCKED, "个人信息页触发了人机验证", {
-            "url": page.url, "status_code": status_code,
+        blocker_type, blocker_message = classify_pt_challenge(body)
+        return RunResult(RunOutcome.BLOCKED, f"个人信息页{blocker_message[2:]}", {
+            "url": page.url, "status_code": status_code, "blocker_type": blocker_type,
         })
     if (
         status_code in {401, 403}
@@ -1989,7 +2126,15 @@ async def _classified_page_result(page: Any, outcome: RunOutcome, url: str,
             with suppress(Exception):
                 await page.goto(history_url, wait_until="domcontentloaded")
         site_history = await extract_site_signin_history(page)
-    return _classified_result(outcome, url, status_code, clicked, site_history)
+    page_body = (
+        await page_body_text(page)
+        if outcome in {RunOutcome.BLOCKED, RunOutcome.FAILED}
+        else None
+    )
+    return _classified_result(
+        outcome, url, status_code, clicked, site_history,
+        page_body=page_body,
+    )
 
 
 def pt_signin_history_url(site_url: str, cookies: dict[str, str]) -> str | None:

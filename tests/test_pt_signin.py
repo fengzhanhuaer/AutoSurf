@@ -24,9 +24,12 @@ from autosurf.automations.pt_signin import (
     _open_pt_signin_page,
     _resolve_0ff_slider,
     _submit_nexusphp_captcha,
+    classify_cloudflare_upstream_error,
+    classify_pt_challenge,
     classify_pt_page,
     combine_pt_action_results,
     complete_52pt_slider,
+    confirm_safeline_challenge,
     discover_pt_profile_url,
     extract_site_signin_history,
     extract_text_signin_history,
@@ -42,6 +45,7 @@ from autosurf.automations.pt_signin import (
     pttime_history_url_from_profile,
     refresh_pt_profile_page,
     rendered_signin_status_text,
+    wait_for_automatic_pt_challenge,
 )
 from autosurf.config import Settings
 from autosurf.application.services import reconcile_pt_site_aliases
@@ -62,6 +66,126 @@ def settings(tmp_path):
         worker_poll_seconds=0.01,
         scheduler_poll_seconds=0.01,
     )
+
+
+def test_pt_challenge_vendor_is_reported_separately():
+    assert classify_pt_challenge(
+        "安全检测能力由 雷池 WAF 驱动，客户端异常，请确认您是合法用户"
+    ) == ("safeline", "站点被雷池 WAF 拦截")
+    assert classify_pt_challenge(
+        "Just a moment... Cloudflare Ray ID: 123"
+    ) == ("cloudflare", "站点被 Cloudflare 人机验证拦截")
+    assert classify_pt_challenge(
+        "人机验证 验证通过后将自动完成签到"
+    ) == ("human_verification", "站点要求完成人机验证")
+
+
+def test_cloudflare_origin_error_is_not_reported_as_human_verification():
+    body = "Connection timed out Error code 522 Cloudflare Working Host Error"
+    assert classify_cloudflare_upstream_error(522, body) == (
+        "cloudflare_origin",
+        "Cloudflare 连接站点源服务器超时（522）",
+    )
+    assert classify_pt_page(
+        "https://www.okpt.net/", 522, body,
+    ) == RunOutcome.FAILED
+    assert classify_cloudflare_upstream_error(
+        None, "connection timed out",
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_automatic_pt_challenge_stops_after_browser_is_allowed():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Page:
+        body = "安全检测能力由 雷池 WAF 驱动"
+        waits = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        async def wait_for_timeout(self, timeout_ms):
+            assert timeout_ms == 500
+            self.waits += 1
+            if self.waits == 2:
+                self.body = "欢迎回来，今日尚未签到"
+
+    page = Page()
+    assert await wait_for_automatic_pt_challenge(page, 2_000) is True
+    assert page.waits == 3
+
+
+@pytest.mark.asyncio
+async def test_wait_for_automatic_pt_challenge_keeps_unsolved_challenge_blocked():
+    class Body:
+        async def inner_text(self):
+            return "Just a moment... Cloudflare"
+
+    class Page:
+        waits = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        async def wait_for_timeout(self, timeout_ms):
+            assert timeout_ms == 500
+            self.waits += 1
+
+    page = Page()
+    assert await wait_for_automatic_pt_challenge(page, 1_000) is False
+    assert page.waits == 2
+
+
+@pytest.mark.asyncio
+async def test_safeline_confirmation_is_clicked_once_when_explicit():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Button:
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.page.clicks += 1
+            self.page.body = "欢迎回来"
+
+    class Page:
+        body = "客户端异常，请确认您是合法用户。安全检测能力由 雷池 WAF 驱动"
+        clicks = 0
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body(self)
+            raise AssertionError("fallback locator should not be used")
+
+        def get_by_role(self, role, *, name):
+            assert role == "button"
+            assert name.search("确认")
+            return Button(self)
+
+        def get_by_text(self, _name):
+            raise AssertionError("fallback text lookup should not be used")
+
+    page = Page()
+    assert await confirm_safeline_challenge(page) is True
+    assert page.clicks == 1
+    assert page.body == "欢迎回来"
 
 
 def test_pt_page_classification_distinguishes_common_results():
