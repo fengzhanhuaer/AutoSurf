@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 import io
 import json
 import zipfile
@@ -12,13 +12,67 @@ from autosurf.domain.models import ExecutionStatus, RunOutcome, RunResult, utc_n
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
 from autosurf.main import create_app
-from autosurf.application.services import reconcile_periodic_signin_templates
+from autosurf.application.services import (
+    reconcile_periodic_signin_templates,
+    reconcile_signin_schedules,
+)
+from autosurf.domain.scheduling import next_signin_run_at
 
 
 @pytest.fixture
 def settings(tmp_path):
     return Settings(data_dir=tmp_path, secret_key="s" * 32, username="admin", password="password123",
                     worker_poll_seconds=0.01, scheduler_poll_seconds=0.01)
+
+
+def test_next_signin_run_uses_nine_am_taipei_anchor():
+    assert next_signin_run_at(datetime(2026, 8, 20, 0, 30)) == datetime(2026, 8, 20, 1)
+    assert next_signin_run_at(datetime(2026, 8, 20, 1)) == datetime(2026, 8, 21, 1)
+
+
+def test_reconcile_signin_schedules_preserves_execution_history(settings):
+    app = create_app(settings)
+    automation = app.state.automations.create(
+        "legacy", "http_signin", 12 * 3600, {"url": "https://example.test/checkin"},
+    )
+    execution = app.state.queue.enqueue_now(automation.id)
+
+    assert reconcile_signin_schedules(app.state.sessions) == 1
+
+    with app.state.sessions() as session:
+        refreshed = session.get(AutomationRecord, automation.id)
+        assert refreshed.interval_seconds == 24 * 3600
+        assert refreshed.next_run_at.hour == 1
+        assert json.loads(refreshed.config_json)["daily_start_time"] == "09:00"
+        assert session.get(ExecutionRecord, execution.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_web_api_aligns_all_signin_schedules_without_deleting_history(settings):
+    app = create_app(settings)
+    first = app.state.automations.create(
+        "pt", "pt_signin", 12 * 3600, {"url": "https://pt.test/attendance.php"},
+    )
+    second = app.state.automations.create(
+        "periodic", "http_signin", 6 * 3600, {"url": "https://example.test/checkin"},
+    )
+    execution = app.state.queue.enqueue_now(second.id)
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch("/api/v1/signin/schedule", auth=auth, json={})
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == 2
+    assert response.json()["daily_start_time"] == "09:00"
+    assert datetime.fromisoformat(response.json()["next_run_at"]).hour == 1
+    with app.state.sessions() as session:
+        for automation_id in (first.id, second.id):
+            record = session.get(AutomationRecord, automation_id)
+            assert record.interval_seconds == 24 * 3600
+            assert record.next_run_at.hour == 1
+        assert session.get(ExecutionRecord, execution.id) is not None
 
 
 @pytest.mark.asyncio
@@ -77,6 +131,8 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
             json={**payload, "url": "https://example.test/board"},
         )
         created = await client.post("/api/v1/periodic-signin/sites", auth=auth, json=payload)
+        assert created.json()["config"]["daily_start_time"] == "09:00"
+        assert datetime.fromisoformat(created.json()["next_run_at"]).hour == 1
         site_id = created.json()["id"]
         listed = await client.get("/api/v1/periodic-signin/sites", auth=auth)
         scheduled = await client.patch(
@@ -98,6 +154,8 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
     assert listed.json()["items"][0]["site_url"] == "https://www.nodeseek.com/board"
     assert listed.json()["items"][0]["config"]["method"] == "POST"
     assert scheduled.json()["interval_hours"] == 12
+    assert scheduled.json()["config"]["daily_start_time"] == "09:00"
+    assert datetime.fromisoformat(scheduled.json()["next_run_at"]).hour == 1
     assert disabled.json()["enabled"] is False
     assert queued.status_code == 202
     assert deleted.status_code == 204

@@ -26,6 +26,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
 from autosurf.domain.models import ExecutionStatus, RunOutcome, utc_now
+from autosurf.domain.scheduling import SIGNIN_START_TIME, next_signin_run_at
+from autosurf.application.services import align_all_signin_schedules
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
 from autosurf.automations.browser_session import persistent_browser_mode
 from autosurf.infrastructure.database import (
@@ -851,6 +853,17 @@ def debug_execution_artifact(execution_id: str, request: Request) -> Response:
     )
 
 
+@router.patch("/signin/schedule")
+def align_signin_schedule(request: Request) -> dict[str, Any]:
+    updated, next_run_at = align_all_signin_schedules(request.app.state.sessions)
+    return {
+        "updated": updated,
+        "interval_hours": 24,
+        "daily_start_time": SIGNIN_START_TIME,
+        "next_run_at": next_run_at,
+    }
+
+
 @router.post("/periodic-signin/sites", status_code=201)
 def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> dict[str, Any]:
     handler_type = data.handler_type.strip().lower()
@@ -893,11 +906,13 @@ def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> 
         "success_patterns": data.success_patterns,
         "already_patterns": data.already_patterns,
         "auth_expired_patterns": data.auth_expired_patterns,
+        "daily_start_time": SIGNIN_START_TIME,
     }
     handler_type, config = apply_periodic_template(config, handler_type)
     try:
         record = request.app.state.automations.create(
-            data.name, handler_type, data.interval_hours * 3600, config, data.credential_id
+            data.name, handler_type, data.interval_hours * 3600, config, data.credential_id,
+            next_run_at=next_signin_run_at(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -969,12 +984,13 @@ def collect_periodic_signin_sites(
             "random_delay_minutes": data.random_delay_minutes,
             "retry_interval_minutes": data.retry_interval_hours * 60,
             "max_retries": data.max_retries,
+            "daily_start_time": SIGNIN_START_TIME,
         }
         handler_type, config = apply_periodic_template(config, candidate["handler_type"])
         try:
             record = request.app.state.automations.create(
                 candidate["name"], handler_type, data.interval_hours * 3600, config,
-                candidate["credential"]["id"],
+                candidate["credential"]["id"], next_run_at=next_signin_run_at(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1006,8 +1022,10 @@ def set_periodic_signin_schedule(
             "random_delay_minutes": data.random_delay_minutes,
             "retry_interval_minutes": data.retry_interval_hours * 60,
             "max_retries": data.max_retries,
+            "daily_start_time": SIGNIN_START_TIME,
         })
         record.interval_seconds = data.interval_hours * 3600
+        record.next_run_at = next_signin_run_at()
         record.config_json = json.dumps(config, ensure_ascii=False)
         session.flush()
         return _periodic_signin_site_view(record, None)
@@ -1021,7 +1039,7 @@ def set_periodic_signin_site_enabled(
         record = _require_periodic_automation(session.get(AutomationRecord, automation_id))
         record.enabled = data.enabled
         if data.enabled:
-            record.next_run_at = utc_now()
+            record.next_run_at = next_signin_run_at()
         session.flush()
         return _periodic_signin_site_view(record, None)
 
@@ -1086,10 +1104,12 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
         "profile_refresh_supported": profile_refresh_supported,
         "discovery_strategy": discovery.strategy if discovery else None,
         "profile_url": discovery.profile_url if discovery else None,
+        "daily_start_time": SIGNIN_START_TIME,
     }
     try:
         record = request.app.state.automations.create(
-            data.name, "pt_signin", data.interval_hours * 3600, config, data.credential_id
+            data.name, "pt_signin", data.interval_hours * 3600, config, data.credential_id,
+            next_run_at=next_signin_run_at(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1168,11 +1188,12 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
             "profile_url": candidate["profile_url"],
             "discovered": True,
             "discovery_reason": candidate["reason"],
+            "daily_start_time": SIGNIN_START_TIME,
         }
         try:
             record = request.app.state.automations.create(
                 candidate["name"], "pt_signin", data.interval_hours * 3600, config,
-                candidate["credential"]["id"],
+                candidate["credential"]["id"], next_run_at=next_signin_run_at(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1203,8 +1224,10 @@ def set_pt_signin_schedule(automation_id: str, data: PtSignInScheduleInput,
             "random_delay_minutes": data.random_delay_minutes,
             "retry_interval_minutes": data.retry_interval_hours * 60,
             "max_retries": data.max_retries,
+            "daily_start_time": SIGNIN_START_TIME,
         })
         record.interval_seconds = data.interval_hours * 3600
+        record.next_run_at = next_signin_run_at()
         record.config_json = json.dumps(config, ensure_ascii=False)
         session.flush()
         return _pt_signin_site_view(record, None)
@@ -1218,7 +1241,7 @@ def set_pt_signin_site_enabled(automation_id: str, data: PtSignInEnabledInput,
         _require_pt_automation(record)
         record.enabled = data.enabled
         if data.enabled:
-            record.next_run_at = utc_now()
+            record.next_run_at = next_signin_run_at()
         session.flush()
         return _pt_signin_site_view(record, None)
 
@@ -1244,7 +1267,7 @@ def set_pt_site_actions(automation_id: str, data: PtSiteActionsInput,
         record.config_json = json.dumps(config, ensure_ascii=False)
         record.enabled = data.sign_in_enabled or data.profile_refresh_enabled
         if record.enabled and not was_enabled:
-            record.next_run_at = utc_now()
+            record.next_run_at = next_signin_run_at()
         session.flush()
         return _pt_signin_site_view(record, None)
 
@@ -1630,6 +1653,7 @@ def _periodic_signin_site_view(
             "success_patterns": config.get("success_patterns", []),
             "already_patterns": config.get("already_patterns", []),
             "auth_expired_patterns": config.get("auth_expired_patterns", []),
+            "daily_start_time": config.get("daily_start_time", SIGNIN_START_TIME),
         },
         "last_execution": execution_view(latest) if latest else None,
     }
@@ -1678,6 +1702,7 @@ def _pt_signin_site_view(record: AutomationRecord | None,
             ),
             "sign_in_supported": sign_in_supported,
             "profile_refresh_supported": profile_refresh_supported,
+            "daily_start_time": config.get("daily_start_time", SIGNIN_START_TIME),
         },
         "last_execution": execution_view(latest) if latest else None,
     }

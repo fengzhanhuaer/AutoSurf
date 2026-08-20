@@ -22,6 +22,7 @@ from autosurf.application.services import (
     QueueService,
     reconcile_periodic_signin_templates,
     reconcile_pt_site_aliases,
+    reconcile_signin_schedules,
 )
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     execution = ExecutionService(sessions, queue, credentials, registry)
     reconcile_pt_site_aliases(sessions, credentials)
     reconcile_periodic_signin_templates(sessions)
+    reconcile_signin_schedules(sessions)
 
     async def scheduler_loop() -> None:
         while True:

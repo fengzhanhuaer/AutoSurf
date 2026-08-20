@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from autosurf.application.registry import HandlerRegistry
 from autosurf.domain.models import ExecutionStatus, RunContext, RunOutcome, utc_now
+from autosurf.domain.scheduling import (
+    SIGNIN_INTERVAL_SECONDS,
+    SIGNIN_START_TIME,
+    next_signin_run_at,
+)
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
 from autosurf.pt_discovery import (
@@ -154,17 +159,50 @@ class AutomationService:
         self.registry = registry
 
     def create(self, name: str, handler_type: str, interval_seconds: int, config: dict,
-               credential_id: str | None = None) -> AutomationRecord:
+               credential_id: str | None = None,
+               next_run_at: datetime | None = None) -> AutomationRecord:
         self.registry.get(handler_type)
         now = utc_now()
         record = AutomationRecord(id=str(uuid4()), name=name, handler_type=handler_type, enabled=True,
-                                  interval_seconds=interval_seconds, next_run_at=now,
+                                  interval_seconds=interval_seconds, next_run_at=next_run_at or now,
                                   config_json=json.dumps(config), credential_id=credential_id)
         with self.sessions.begin() as session:
             if credential_id is not None and session.get(CredentialRecord, credential_id) is None:
                 raise ValueError("credential does not exist")
             session.add(record)
         return record
+
+
+def _align_signin_schedules(
+    sessions: sessionmaker[Session], *, only_missing: bool,
+) -> tuple[int, datetime]:
+    updated = 0
+    next_run_at = next_signin_run_at()
+    with sessions.begin() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type.in_(["pt_signin", "browser_signin", "http_signin"]),
+        )).all()
+        for record in records:
+            try:
+                config = json.loads(record.config_json)
+            except (TypeError, ValueError):
+                config = {}
+            if only_missing and config.get("daily_start_time") == SIGNIN_START_TIME:
+                continue
+            config["daily_start_time"] = SIGNIN_START_TIME
+            record.config_json = json.dumps(config, ensure_ascii=False)
+            record.interval_seconds = SIGNIN_INTERVAL_SECONDS
+            record.next_run_at = next_run_at
+            updated += 1
+    return updated, next_run_at
+
+
+def reconcile_signin_schedules(sessions: sessionmaker[Session]) -> int:
+    return _align_signin_schedules(sessions, only_missing=True)[0]
+
+
+def align_all_signin_schedules(sessions: sessionmaker[Session]) -> tuple[int, datetime]:
+    return _align_signin_schedules(sessions, only_missing=False)
 
 
 class QueueService:

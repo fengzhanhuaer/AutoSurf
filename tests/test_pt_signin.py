@@ -2308,6 +2308,8 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
         site_id = site["id"]
         assert site["credential"]["domain"] == "tracker.test"
         assert site["config"]["success_patterns"] == ["签到完成"]
+        assert site["config"]["daily_start_time"] == "09:00"
+        assert datetime.fromisoformat(site["next_run_at"]).hour == 1
 
         listed = await client.get("/api/v1/pt-signin/sites", auth=auth)
         scheduled = await client.patch(
@@ -2337,6 +2339,8 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     assert cross_domain.status_code == 422
     assert listed.json()["items"][0]["id"] == site_id
     assert scheduled.json()["interval_hours"] == 12
+    assert scheduled.json()["config"]["daily_start_time"] == "09:00"
+    assert datetime.fromisoformat(scheduled.json()["next_run_at"]).hour == 1
     assert scheduled.json()["config"]["random_delay_minutes"] == 30
     assert scheduled.json()["config"]["retry_interval_hours"] == 2
     assert scheduled.json()["config"]["max_retries"] == 5

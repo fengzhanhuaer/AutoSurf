@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from autosurf.application.services import CredentialService
 from autosurf.domain.models import utc_now
+from autosurf.domain.scheduling import next_signin_run_at
 from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import AutomationRecord, CredentialRecord
 from autosurf.pt_discovery import discover_pt_site
@@ -154,7 +155,7 @@ class WebCredentialStore:
                 record.name = discovery.name
                 if was_unsupported:
                     record.enabled = True
-                    record.next_run_at = utc_now()
+                    record.next_run_at = next_signin_run_at()
                 config.update({
                     "url": discovery.url,
                     "credential_domain": discovery.site_key,
