@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from autosurf.automations.pt_signin import (
     BtschoolAdapter,
+    ChdBitsAdapter,
     FiftyTwoPtAdapter,
     MTeamAdapter,
     OpenCdAdapter,
@@ -17,6 +18,7 @@ from autosurf.automations.pt_signin import (
     SunnyPtAdapter,
     TjuptAdapter,
     ZhuqueAdapter,
+    _click_common_signin_control,
     _classify_pt_homepage,
     _complete_0ff_slider,
     _enrich_0ff_calendar_history,
@@ -185,6 +187,56 @@ async def test_safeline_confirmation_is_clicked_once_when_explicit():
     page = Page()
     assert await confirm_safeline_challenge(page) is True
     assert page.clicks == 1
+    assert page.body == "欢迎回来"
+
+
+@pytest.mark.asyncio
+async def test_safeline_confirmation_reloads_once_when_challenge_persists():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Button:
+        first = None
+
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.page.clicks += 1
+
+    class Page:
+        body = "客户端异常，请确认您是合法用户。安全检测能力由 雷池 WAF 驱动"
+        clicks = 0
+        reloads = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        def get_by_role(self, _role, *, name):
+            assert name.search("确认")
+            return Button(self)
+
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
+
+        async def reload(self, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 10_000}
+            self.reloads += 1
+            self.body = "欢迎回来"
+
+    page = Page()
+    assert await confirm_safeline_challenge(page) is True
+    assert page.clicks == 1
+    assert page.reloads == 1
     assert page.body == "欢迎回来"
 
 
@@ -960,6 +1012,73 @@ async def test_pttime_opens_signin_endpoint_instead_of_history_link():
     assert response == "direct-response"
 
 
+@pytest.mark.asyncio
+async def test_pt_signin_opens_explicit_homepage_attendance_link():
+    class Response:
+        status = 200
+
+    class Pending:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return Response()
+
+            return resolve()
+
+    class Link:
+        def __init__(self, page):
+            self.page = page
+
+        async def is_visible(self):
+            return True
+
+        async def inner_text(self):
+            return "Attendance"
+
+        async def get_attribute(self, name):
+            assert name == "href"
+            return "/showup.php"
+
+        async def click(self):
+            self.page.url = "https://u2.dmhy.org/showup.php"
+
+    class Links:
+        def __init__(self, page):
+            self.link = Link(page)
+
+        async def count(self):
+            return 1
+
+        def nth(self, _index):
+            return self.link
+
+    class Page:
+        url = "https://u2.dmhy.org/"
+        frames = None
+
+        def locator(self, selector):
+            assert selector == "a[href]"
+            return Links(self)
+
+        def expect_navigation(self, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60_000}
+            return Pending()
+
+    page = Page()
+    response = await _open_pt_signin_page(
+        page, "https://u2.dmhy.org/attendance.php", 60_000,
+    )
+
+    assert response.status == 200
+    assert page.url == "https://u2.dmhy.org/showup.php"
+
+
 def test_text_signin_history_supports_pttime_records():
     text = """
     7天签到记录（补签卡剩余：29）
@@ -1448,6 +1567,226 @@ async def test_52pt_missing_home_entry_after_paused_page_is_already_done():
     ))
 
     assert result.outcome == RunOutcome.ALREADY_DONE
+
+
+@pytest.mark.asyncio
+async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
+    class Locator:
+        first = None
+
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        async def inner_text(self):
+            return "今日已签到" if self.page.clicked else "欢迎回来"
+
+        async def count(self):
+            return 0
+
+        async def is_visible(self):
+            return self.selector == 'a[href*="52bakatest0818.php"]'
+
+        async def get_attribute(self, name):
+            assert name == "href"
+            return "/52bakatest0818.php"
+
+        async def click(self):
+            self.page.clicked = True
+            self.page.url = "https://52pt.site/52bakatest0818.php"
+
+    class Page:
+        url = "https://52pt.site/52bakatest0818.php"
+        clicked = False
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+    page = Page()
+    result = await FiftyTwoPtAdapter().sign_in(page, RunContext(
+        "test", {"url": page.url}, {"sid": "secret"},
+    ))
+
+    assert page.clicked is True
+    assert result.outcome == RunOutcome.ALREADY_DONE
+
+
+@pytest.mark.asyncio
+async def test_chdbits_uses_safe_skip_answer_option():
+    class Response:
+        status = 200
+
+    class Pending:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return Response()
+
+            return resolve()
+
+    class Locator:
+        first = None
+
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        async def inner_text(self):
+            return "签到成功" if self.page.clicked else "每日签到 请选择答案"
+
+        async def is_visible(self):
+            return "不会" in self.selector
+
+        async def click(self):
+            self.page.clicked = True
+
+    class Page:
+        url = "https://ptchdbits.co/bakatest.php"
+        frames = None
+        clicked = False
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def expect_navigation(self, **_kwargs):
+            return Pending()
+
+    page = Page()
+    result = await ChdBitsAdapter().sign_in(page, RunContext(
+        "test", {"url": page.url}, {"sid": "secret"},
+    ))
+
+    assert page.clicked is True
+    assert result.outcome == RunOutcome.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_common_signin_control_searches_child_frames():
+    class Controls:
+        def __init__(self, found):
+            self.found = found
+            self.clicked = False
+
+        async def count(self):
+            return 1 if self.found else 0
+
+        def nth(self, _index):
+            return self
+
+        async def is_visible(self):
+            return True
+
+        async def is_enabled(self):
+            return True
+
+        async def inner_text(self):
+            return "Check in"
+
+        async def get_attribute(self, _name):
+            return None
+
+        async def click(self):
+            self.clicked = True
+
+    class Root:
+        def __init__(self, found):
+            self.controls = Controls(found)
+
+        def locator(self, _selector):
+            return self.controls
+
+    page = Root(False)
+    frame = Root(True)
+    page.frames = [page, frame]
+
+    assert await _click_common_signin_control(page) is True
+    assert frame.controls.clicked is True
+
+
+@pytest.mark.asyncio
+async def test_generic_signin_continues_with_captcha_after_click(monkeypatch, tmp_path):
+    class Body:
+        async def inner_text(self):
+            return "欢迎回来"
+
+    class Missing:
+        async def count(self):
+            return 0
+
+    class Control:
+        async def count(self):
+            return 1
+
+        def nth(self, _index):
+            return self
+
+        async def is_visible(self):
+            return True
+
+        async def is_enabled(self):
+            return True
+
+        async def inner_text(self):
+            return "签到"
+
+        async def get_attribute(self, _name):
+            return None
+
+        async def click(self):
+            return None
+
+    class Page:
+        url = "https://hdsky.me/"
+        frames = None
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            if selector.startswith("button, a"):
+                return Control()
+            return Missing()
+
+        async def evaluate(self, _script):
+            return ""
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+    async def submit_captcha(page, context, site_name):
+        assert page.url == "https://hdsky.me/"
+        assert context.execution_id == "test"
+        assert site_name == "PT 站"
+        return RunResult(RunOutcome.SUCCESS, "签到成功")
+
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin._submit_nexusphp_captcha",
+        submit_captcha,
+    )
+    result = await PtSignInHandler()._generic_sign_in(
+        Page(),
+        RunContext("test", {"url": "https://hdsky.me/"}, {"sid": "secret"}),
+        200,
+        tmp_path / "failed.png",
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
 
 
 @pytest.mark.asyncio
@@ -2648,6 +2987,7 @@ async def test_pt_signin_api_manages_sites_and_history(settings):
     app = create_app(settings)
     assert "pt_signin" in app.state.registry.types()
     handler = app.state.registry.get("pt_signin")
+    assert any(isinstance(adapter, ChdBitsAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, MTeamAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, OshenPtAdapter) for adapter in handler.adapters)
     assert any(isinstance(adapter, SoulVoiceAdapter) for adapter in handler.adapters)

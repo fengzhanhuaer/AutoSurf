@@ -23,6 +23,10 @@
           <span class="nav-icon" aria-hidden="true">C</span>
           <span>周期签到</span>
         </a>
+        <a class="nav-item" href="/app#browser-control" data-view="browser-control">
+          <span class="nav-icon" aria-hidden="true">B</span>
+          <span>浏览器控制</span>
+        </a>
         <a class="nav-item" href="/app#cookiecloud" data-view="cookiecloud">
           <span class="nav-icon" aria-hidden="true">S</span>
           <span>系统设置</span>
@@ -442,6 +446,58 @@
           <div class="dialog-actions"><button class="button secondary" id="periodic-schedule-dismiss" type="button">取消</button><button class="button primary" type="submit">保存</button></div>
         </form>
       </dialog>
+
+      <section class="settings-panel" id="browser-control-panel" hidden>
+        <section class="panel browser-control-panel" aria-labelledby="browser-control-title">
+          <div class="panel-heading browser-control-heading">
+            <div>
+              <h2 id="browser-control-title">Chrome 维护会话</h2>
+              <p id="browser-control-page-title">浏览器未启动</p>
+            </div>
+            <span class="status-badge" id="browser-control-state">未启动</span>
+          </div>
+
+          <div class="browser-toolbar" role="toolbar" aria-label="浏览器导航">
+            <button class="icon-button browser-nav-button" id="browser-back" type="button"
+                    title="后退" aria-label="后退" disabled><span aria-hidden="true">←</span></button>
+            <button class="icon-button browser-nav-button" id="browser-forward" type="button"
+                    title="前进" aria-label="前进" disabled><span aria-hidden="true">→</span></button>
+            <button class="icon-button browser-nav-button" id="browser-reload" type="button"
+                    title="重新加载" aria-label="重新加载" disabled><span aria-hidden="true">↻</span></button>
+            <form class="browser-address-form" id="browser-address-form">
+              <label class="visually-hidden" for="browser-address">网址</label>
+              <input id="browser-address" type="url" inputmode="url" autocomplete="url"
+                     placeholder="https://example.com" required>
+              <button class="button secondary browser-go-button" id="browser-go" type="submit">打开</button>
+            </form>
+            <button class="button primary" id="browser-start" type="button">启动 Chrome</button>
+            <button class="button secondary" id="browser-stop" type="button" disabled>结束会话</button>
+          </div>
+
+          <div class="browser-control-error" id="browser-control-error" role="alert" hidden></div>
+
+          <div class="browser-frame-shell" id="browser-frame-shell" tabindex="0"
+               aria-label="Chrome 页面画面，可点击、滚动并使用键盘操作">
+            <img class="browser-frame" id="browser-frame" alt="Chrome 当前页面" draggable="false" hidden>
+            <div class="browser-frame-placeholder" id="browser-frame-placeholder">
+              <strong>浏览器未启动</strong>
+            </div>
+          </div>
+
+          <div class="browser-input-bar">
+            <div class="browser-key-buttons" aria-label="常用按键">
+              <button class="button secondary" type="button" data-browser-key="Escape" disabled>Esc</button>
+              <button class="button secondary" type="button" data-browser-key="Tab" disabled>Tab</button>
+              <button class="button secondary" type="button" data-browser-key="Enter" disabled>Enter</button>
+            </div>
+            <form class="browser-text-form" id="browser-text-form">
+              <label class="visually-hidden" for="browser-text">发送文字</label>
+              <input id="browser-text" type="text" autocomplete="off" placeholder="输入要发送到页面的文字" disabled>
+              <button class="button secondary" id="browser-text-send" type="submit" disabled>发送文字</button>
+            </form>
+          </div>
+        </section>
+      </section>
 
       <section class="settings-panel" id="cookiecloud-settings-panel" role="tabpanel"
                aria-labelledby="settings-tab-cookiecloud" hidden>

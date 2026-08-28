@@ -24,10 +24,12 @@ from autosurf.application.services import (
     reconcile_pt_site_aliases,
     reconcile_signin_schedules,
 )
+from autosurf.browser_control import BrowserControlService
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.pt_signin import (
     BtschoolAdapter,
+    ChdBitsAdapter,
     FiftyTwoPtAdapter,
     MTeamAdapter,
     OpenCdAdapter,
@@ -60,8 +62,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
     registry.register(PtSignInHandler([
-        FiftyTwoPtAdapter(), BtschoolAdapter(), OpenCdAdapter(), OshenPtAdapter(),
-        SoulVoiceAdapter(),
+        FiftyTwoPtAdapter(), ChdBitsAdapter(), BtschoolAdapter(), OpenCdAdapter(),
+        OshenPtAdapter(), SoulVoiceAdapter(),
         TjuptAdapter(), RousiAdapter(),
         MTeamAdapter(), SunnyPtAdapter(), ZhuqueAdapter(),
     ]))
@@ -70,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     automations = AutomationService(sessions, registry)
     queue = QueueService(sessions, settings.execution_lease_seconds, credentials)
     execution = ExecutionService(sessions, queue, credentials, registry)
+    browser_control = BrowserControlService()
     reconcile_pt_site_aliases(sessions, credentials)
     reconcile_periodic_signin_templates(sessions)
     reconcile_signin_schedules(sessions)
@@ -89,6 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         tasks = [asyncio.create_task(scheduler_loop()), asyncio.create_task(worker_loop())]
         yield
+        await browser_control.shutdown()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -107,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.automations = automations
     app.state.queue = queue
     app.state.execution = execution
+    app.state.browser_control = browser_control
     app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
     app.state.web_credentials = WebCredentialStore(sessions, secrets, credentials)
     app.state.upgrade_guard = threading.Lock()

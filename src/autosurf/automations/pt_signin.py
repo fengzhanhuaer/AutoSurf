@@ -100,7 +100,10 @@ AUTOMATIC_CHALLENGE_PATTERNS = (
 )
 COMMON_BUTTON_PATTERNS = (
     re.compile(r"^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*(?:check\s*in|sign\s*in)\s*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$",
+        re.IGNORECASE,
+    ),
 )
 
 # Public metadata embedded in M-Team's Web client, not an account credential.
@@ -727,8 +730,8 @@ class FiftyTwoPtAdapter:
             parsed = validated_http_url(str(context.config["url"]))
             origin = f"{parsed.scheme}://{parsed.netloc}/"
             await page.goto(origin, wait_until="domcontentloaded")
-            signin_link = page.locator("#game").first
-            if not await signin_link.is_visible():
+            signin_link = await _find_52pt_signin_link(page)
+            if signin_link is None:
                 if sign_in_paused and await discover_pt_profile_url(page):
                     return _classified_result(
                         RunOutcome.ALREADY_DONE, page.url, None, clicked=False,
@@ -765,6 +768,26 @@ class FiftyTwoPtAdapter:
         })
 
 
+async def _find_52pt_signin_link(page: Any) -> Any | None:
+    selectors = (
+        "#game",
+        'a[href*="52bakatest0818.php"]',
+        'a[href*="bakatest.php"]',
+    )
+    for selector in selectors:
+        candidate = page.locator(selector).first
+        with suppress(Exception):
+            if await candidate.is_visible():
+                return candidate
+    with suppress(Exception):
+        candidate = page.get_by_text(
+            re.compile(r"^\s*(?:52PT)?\s*签到(?:得魔力)?\s*$", re.IGNORECASE),
+        ).first
+        if await candidate.is_visible():
+            return candidate
+    return None
+
+
 async def complete_52pt_slider(page: Any) -> bool:
     container = page.locator("#slider-container").first
     slider = page.locator("#slider-btn").first
@@ -788,6 +811,46 @@ async def complete_52pt_slider(page: Any) -> bool:
     await page.mouse.up()
     await page.wait_for_timeout(100)
     return bool(await captcha.input_value()) and not await submit.is_disabled()
+
+
+class ChdBitsAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "ptchdbits.co" or hostname.endswith(".ptchdbits.co")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        body = await page_body_text(page)
+        outcome = classify_pt_page(page.url, None, body, context.config)
+        if outcome:
+            return await _classified_page_result(
+                page, outcome, page.url, None, context=context,
+            )
+
+        skip = page.locator(
+            'button:has-text("不会"), input[type="button"][value="不会"], '
+            'input[type="submit"][value="不会"]'
+        ).first
+        if not await skip.is_visible():
+            return RunResult(
+                RunOutcome.FAILED,
+                "CHDBits 签到页没有找到安全的“不答题”选项",
+                {"url": page.url, "clicked": False},
+            )
+        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+            await skip.click()
+        response = await navigation.value
+        status_code = response.status if response else None
+        body = await page_body_text(page)
+        outcome = classify_pt_page(page.url, status_code, body, context.config)
+        if outcome:
+            return await _classified_page_result(
+                page, outcome, page.url, status_code, clicked=True, context=context,
+            )
+        return RunResult(
+            RunOutcome.FAILED,
+            "CHDBits 选择不答题后未识别到签到结果",
+            {"url": page.url, "status_code": status_code, "clicked": True},
+        )
 
 
 class BtschoolAdapter:
@@ -1336,6 +1399,9 @@ class PtSignInHandler:
                 return await _classified_page_result(
                     page, outcome, page.url, status_code, clicked=True, context=context
                 )
+            captcha_result = await _submit_nexusphp_captcha(page, context, "PT 站")
+            if captcha_result is not None:
+                return captcha_result
         else:
             # Some trackers render their user/status toolbar after DOMContentLoaded.
             # Recheck once before declaring that no sign-in state or control exists.
@@ -1477,12 +1543,10 @@ async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
     hostname = (expected.hostname or "").lower().rstrip(".")
     if hostname == "pttime.org" or hostname.endswith(".pttime.org"):
         return await _goto_pt_page(page, url, timeout_ms)
-    link = page.locator('a[href*="attendance"]').filter(
-        has_text=re.compile(r"签到|簽到", re.IGNORECASE),
-    ).first
+    link = await _find_actionable_signin_link(page)
     clicked = False
     with suppress(Exception):
-        if await link.is_visible():
+        if link is not None:
             href = str(await link.get_attribute("href") or "")
             target = urljoin(page.url, href)
             target_host = (urlparse(target).hostname or "").lower().rstrip(".")
@@ -1496,6 +1560,29 @@ async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
     if clicked and page.url != pt_home_url(url):
         return None
     return await _goto_pt_page(page, url, timeout_ms)
+
+
+async def _find_actionable_signin_link(page: Any) -> Any | None:
+    roots = [page]
+    roots.extend(
+        frame for frame in (getattr(page, "frames", None) or [])
+        if frame is not page
+    )
+    for root in roots:
+        try:
+            links = root.locator("a[href]")
+            count = min(await links.count(), 120)
+        except Exception:
+            continue
+        for index in range(count):
+            with suppress(Exception):
+                link = links.nth(index)
+                if not await link.is_visible():
+                    continue
+                text = await _signin_control_text(link)
+                if any(pattern.search(text) for pattern in COMMON_BUTTON_PATTERNS):
+                    return link
+    return None
 
 
 async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
@@ -1556,6 +1643,13 @@ async def confirm_safeline_challenge(page: Any) -> bool:
                 candidate = build_candidate()
                 if await candidate.is_visible():
                     await candidate.click()
+                    with suppress(Exception):
+                        await page.wait_for_timeout(500)
+                    if _matches(await page_body_text(page), SAFELINE_CHALLENGE_PATTERNS):
+                        with suppress(Exception):
+                            await page.reload(
+                                wait_until="domcontentloaded", timeout=10_000,
+                            )
                     return True
             except Exception:
                 continue
@@ -2367,16 +2461,47 @@ def normalize_site_signin_history(value: Any) -> list[dict[str, str]]:
 
 
 async def _click_common_signin_control(page: Any) -> bool:
-    controls = page.locator("button, a, input[type=button], input[type=submit]")
+    roots = [page]
+    roots.extend(
+        frame for frame in (getattr(page, "frames", None) or [])
+        if frame is not page
+    )
+    for root in roots:
+        if await _click_common_signin_control_in(root):
+            return True
+    return False
+
+
+async def _click_common_signin_control_in(root: Any) -> bool:
+    controls = root.locator(
+        "button, a, input[type=button], input[type=submit], input[type=image], "
+        "[role=button], [onclick]"
+    )
     for index in range(min(await controls.count(), 120)):
         control = controls.nth(index)
         if not await control.is_visible() or not await control.is_enabled():
             continue
-        text = ((await control.inner_text()) or await control.get_attribute("value") or "").strip()
+        text = await _signin_control_text(control)
         if any(pattern.search(text) for pattern in COMMON_BUTTON_PATTERNS):
             await control.click()
             return True
     return False
+
+
+async def _signin_control_text(control: Any) -> str:
+    text = (
+        (await control.inner_text())
+        or await control.get_attribute("value")
+        or await control.get_attribute("aria-label")
+        or await control.get_attribute("title")
+        or ""
+    ).strip()
+    if text:
+        return text
+    image = control.locator("img[alt]").first
+    with suppress(Exception):
+        return str(await image.get_attribute("alt") or "").strip()
+    return ""
 
 
 async def _save_screenshot(page: Any, path: Path) -> None:

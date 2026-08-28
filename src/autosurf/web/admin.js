@@ -19,10 +19,25 @@ const state = {
   activePtTab: "signin",
   activeSigninTab: "tasks",
   activePeriodicTab: "tasks",
+  browserControl: {
+    active: false,
+    starting: false,
+    url: "",
+    title: "",
+    error: null,
+    viewport: { width: 1365, height: 768 },
+  },
+  browserControlBusy: false,
 };
 
 const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"]);
 let executionRefreshInFlight = false;
+let browserStatusTimer = null;
+let browserFrameTimer = null;
+let browserFrameInFlight = false;
+let browserFrameAbortController = null;
+let browserFrameObjectUrl = "";
+let browserClickTimer = null;
 
 const elements = {
   body: document.body,
@@ -42,6 +57,25 @@ const elements = {
   periodicPanel: document.querySelector("#periodic-signin-panel"),
   periodicTasksPanel: document.querySelector("#periodic-tasks-panel"),
   periodicHistoryPanel: document.querySelector("#periodic-history-panel"),
+  browserControlPanel: document.querySelector("#browser-control-panel"),
+  browserControlState: document.querySelector("#browser-control-state"),
+  browserControlPageTitle: document.querySelector("#browser-control-page-title"),
+  browserControlError: document.querySelector("#browser-control-error"),
+  browserBack: document.querySelector("#browser-back"),
+  browserForward: document.querySelector("#browser-forward"),
+  browserReload: document.querySelector("#browser-reload"),
+  browserAddressForm: document.querySelector("#browser-address-form"),
+  browserAddress: document.querySelector("#browser-address"),
+  browserGo: document.querySelector("#browser-go"),
+  browserStart: document.querySelector("#browser-start"),
+  browserStop: document.querySelector("#browser-stop"),
+  browserFrameShell: document.querySelector("#browser-frame-shell"),
+  browserFrame: document.querySelector("#browser-frame"),
+  browserFramePlaceholder: document.querySelector("#browser-frame-placeholder"),
+  browserTextForm: document.querySelector("#browser-text-form"),
+  browserText: document.querySelector("#browser-text"),
+  browserTextSend: document.querySelector("#browser-text-send"),
+  browserKeyButtons: document.querySelectorAll("[data-browser-key]"),
   ptStatsRows: document.querySelector("#pt-stats-rows"),
   cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
   webCredentialsPanel: document.querySelector("#web-credentials-settings-panel"),
@@ -238,15 +272,17 @@ function goToLogin() {
 }
 
 async function setActiveView(value, { syncHash = true } = {}) {
-  const validViews = ["pt-signin", "periodic-signin", "cookiecloud", "web-credentials", "site-settings", "logs", "upgrade"];
+  const validViews = ["pt-signin", "periodic-signin", "browser-control", "cookiecloud", "web-credentials", "site-settings", "logs", "upgrade"];
   const activeView = validViews.includes(value) ? value : "pt-signin";
   state.activeView = activeView;
   const ptView = activeView === "pt-signin";
   const periodicView = activeView === "periodic-signin";
-  const systemView = !ptView && !periodicView;
+  const browserView = activeView === "browser-control";
+  const systemView = !ptView && !periodicView && !browserView;
   elements.ptPanel.hidden = !ptView || state.activePtTab !== "signin";
   elements.ptStatsPanel.hidden = !ptView || state.activePtTab !== "stats";
   elements.periodicPanel.hidden = !periodicView;
+  elements.browserControlPanel.hidden = !browserView;
   elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
   elements.webCredentialsPanel.hidden = activeView !== "web-credentials";
   elements.siteSettingsPanel.hidden = activeView !== "site-settings";
@@ -269,7 +305,10 @@ async function setActiveView(value, { syncHash = true } = {}) {
     button.tabIndex = active ? 0 : -1;
   }
 
-  if (periodicView) {
+  if (browserView) {
+    elements.pageTitle.textContent = "浏览器控制";
+    elements.pageDescription.textContent = "共享 Chrome 维护会话";
+  } else if (periodicView) {
     elements.pageTitle.textContent = "周期签到";
     elements.pageDescription.textContent = "普通站点周期任务";
   } else if (systemView) {
@@ -282,6 +321,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   const refreshLabels = {
     "pt-signin": "刷新签到任务",
     "periodic-signin": "刷新周期签到任务",
+    "browser-control": "刷新浏览器状态",
     cookiecloud: "刷新 CookieCloud 状态",
     "web-credentials": "刷新 Web 凭据同步状态",
     "site-settings": "刷新站点设置",
@@ -293,6 +333,8 @@ async function setActiveView(value, { syncHash = true } = {}) {
   if (syncHash && location.hash !== `#${activeView}`) {
     history.replaceState(null, "", `${location.pathname}${location.search}#${activeView}`);
   }
+  setBrowserControlPolling(browserView && !document.hidden);
+  if (browserView) await loadBrowserControlStatus({ quiet: true });
   if (activeView === "logs") await loadDebugLogs({ quiet: true });
   if (activeView === "upgrade") await loadUpgradeStatus();
 }
@@ -350,6 +392,157 @@ function setBusy(busy) {
   elements.siteRestoreButton.disabled = busy;
   for (const button of elements.periodicSiteRows.querySelectorAll("button, input")) button.disabled = busy;
   for (const button of elements.webCredentialRows.querySelectorAll("button")) button.disabled = busy;
+}
+
+function renderBrowserControl() {
+  const browser = state.browserControl;
+  const active = Boolean(browser.active);
+  const starting = Boolean(browser.starting || state.browserControlBusy);
+  elements.browserControlState.textContent = active ? "运行中" : (starting ? "启动中" : "未启动");
+  elements.browserControlState.className = `status-badge ${active ? "succeeded" : (starting ? "running" : "")}`;
+  elements.browserControlPageTitle.textContent = browser.title || browser.url || "浏览器未启动";
+  elements.browserControlError.textContent = browser.error || "";
+  elements.browserControlError.hidden = !browser.error;
+  if (document.activeElement !== elements.browserAddress && browser.url) {
+    elements.browserAddress.value = browser.url;
+  }
+  for (const button of [elements.browserBack, elements.browserForward, elements.browserReload]) {
+    button.disabled = !active || state.browserControlBusy;
+  }
+  elements.browserGo.disabled = state.browserControlBusy;
+  elements.browserStart.disabled = active || starting;
+  elements.browserStop.disabled = !active || state.browserControlBusy;
+  elements.browserText.disabled = !active || state.browserControlBusy;
+  elements.browserTextSend.disabled = !active || state.browserControlBusy;
+  for (const button of elements.browserKeyButtons) {
+    button.disabled = !active || state.browserControlBusy;
+  }
+  if (!active) {
+    elements.browserFrame.hidden = true;
+    elements.browserFramePlaceholder.hidden = false;
+  }
+}
+
+function setBrowserControlState(payload) {
+  state.browserControl = {
+    ...state.browserControl,
+    ...payload,
+    viewport: payload.viewport || state.browserControl.viewport,
+  };
+  renderBrowserControl();
+}
+
+async function loadBrowserControlStatus({ quiet = false } = {}) {
+  try {
+    setBrowserControlState(await api("/api/v1/browser-control", { cache: "no-store" }));
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+    else if (!quiet) showToast(error.message, true);
+  }
+}
+
+async function refreshBrowserFrame() {
+  if (state.activeView !== "browser-control" || !state.browserControl.active
+      || document.hidden || browserFrameInFlight) return;
+  browserFrameInFlight = true;
+  const controller = new AbortController();
+  browserFrameAbortController = controller;
+  try {
+    const response = await fetch(`/api/v1/browser-control/frame?t=${Date.now()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (response.status === 401) {
+      goToLogin();
+      return;
+    }
+    if (response.status === 409) {
+      await loadBrowserControlStatus({ quiet: true });
+      return;
+    }
+    if (!response.ok) throw new Error(`画面读取失败 (${response.status})`);
+    const nextUrl = URL.createObjectURL(await response.blob());
+    const previousUrl = browserFrameObjectUrl;
+    browserFrameObjectUrl = nextUrl;
+    elements.browserFrame.onload = () => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+    };
+    elements.browserFrame.src = nextUrl;
+    elements.browserFrame.hidden = false;
+    elements.browserFramePlaceholder.hidden = true;
+  } catch (error) {
+    if (error.name !== "AbortError") setBrowserControlState({ error: error.message });
+  } finally {
+    if (browserFrameAbortController === controller) browserFrameAbortController = null;
+    browserFrameInFlight = false;
+  }
+}
+
+function setBrowserControlPolling(enabled) {
+  window.clearInterval(browserStatusTimer);
+  window.clearInterval(browserFrameTimer);
+  browserStatusTimer = null;
+  browserFrameTimer = null;
+  if (!enabled) {
+    browserFrameAbortController?.abort();
+    return;
+  }
+  refreshBrowserFrame();
+  browserStatusTimer = window.setInterval(() => loadBrowserControlStatus({ quiet: true }), 2_000);
+  browserFrameTimer = window.setInterval(refreshBrowserFrame, 700);
+}
+
+async function runBrowserControl(operation) {
+  if (state.browserControlBusy) return;
+  state.browserControlBusy = true;
+  renderBrowserControl();
+  try {
+    const result = await operation();
+    if (result) setBrowserControlState(result);
+    await refreshBrowserFrame();
+  } catch (error) {
+    if (error.status === 401) goToLogin();
+    else {
+      setBrowserControlState({ error: error.message });
+      showToast(error.message, true);
+    }
+  } finally {
+    state.browserControlBusy = false;
+    renderBrowserControl();
+  }
+}
+
+function normalizedBrowserAddress() {
+  const value = elements.browserAddress.value.trim();
+  if (!value) throw new Error("请输入网址");
+  return /^https?:\/\//i.test(value) ? value : `https://${value}`;
+}
+
+async function sendBrowserInput(payload) {
+  await runBrowserControl(() => api("/api/v1/browser-control/input", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }));
+}
+
+function browserFrameCoordinates(event) {
+  const rect = elements.browserFrame.getBoundingClientRect();
+  const viewport = state.browserControl.viewport || { width: 1365, height: 768 };
+  return {
+    x: Math.max(0, Math.min(viewport.width, (event.clientX - rect.left) * viewport.width / rect.width)),
+    y: Math.max(0, Math.min(viewport.height, (event.clientY - rect.top) * viewport.height / rect.height)),
+  };
+}
+
+function playwrightKey(event) {
+  if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return "";
+  const key = event.key === " " ? "Space" : event.key;
+  const modifiers = [];
+  if (event.ctrlKey) modifiers.push("Control");
+  if (event.altKey) modifiers.push("Alt");
+  if (event.shiftKey && key.length > 1) modifiers.push("Shift");
+  if (event.metaKey) modifiers.push("Meta");
+  return [...modifiers, key].join("+");
 }
 
 function statusLabel(status) {
@@ -1759,9 +1952,91 @@ elements.importButton.addEventListener("click", async () => {
   }
 });
 
+elements.browserStart.addEventListener("click", () => runBrowserControl(() => api(
+  "/api/v1/browser-control/session",
+  { method: "POST", body: JSON.stringify({ url: normalizedBrowserAddress() }) },
+)));
+elements.browserStop.addEventListener("click", async () => {
+  setBrowserControlPolling(false);
+  await runBrowserControl(async () => {
+    const result = await api("/api/v1/browser-control/session", { method: "DELETE" });
+    if (browserFrameObjectUrl) URL.revokeObjectURL(browserFrameObjectUrl);
+    browserFrameObjectUrl = "";
+    elements.browserFrame.removeAttribute("src");
+    return result;
+  });
+  setBrowserControlPolling(state.activeView === "browser-control" && !document.hidden);
+});
+elements.browserAddressForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runBrowserControl(() => {
+    const url = normalizedBrowserAddress();
+    if (!state.browserControl.active) {
+      return api("/api/v1/browser-control/session", {
+        method: "POST", body: JSON.stringify({ url }),
+      });
+    }
+    return api("/api/v1/browser-control/navigate", {
+      method: "POST", body: JSON.stringify({ action: "goto", url }),
+    });
+  });
+});
+for (const [button, action] of [
+  [elements.browserBack, "back"],
+  [elements.browserForward, "forward"],
+  [elements.browserReload, "reload"],
+]) {
+  button.addEventListener("click", () => runBrowserControl(() => api(
+    "/api/v1/browser-control/navigate",
+    { method: "POST", body: JSON.stringify({ action }) },
+  )));
+}
+elements.browserFrame.addEventListener("click", (event) => {
+  if (!state.browserControl.active) return;
+  window.clearTimeout(browserClickTimer);
+  const coordinates = browserFrameCoordinates(event);
+  browserClickTimer = window.setTimeout(() => sendBrowserInput({ action: "click", ...coordinates }), 220);
+});
+elements.browserFrame.addEventListener("dblclick", (event) => {
+  if (!state.browserControl.active) return;
+  event.preventDefault();
+  window.clearTimeout(browserClickTimer);
+  sendBrowserInput({ action: "double_click", ...browserFrameCoordinates(event) });
+});
+elements.browserFrame.addEventListener("wheel", (event) => {
+  if (!state.browserControl.active) return;
+  event.preventDefault();
+  sendBrowserInput({
+    action: "wheel",
+    delta_x: Math.max(-1200, Math.min(1200, event.deltaX)),
+    delta_y: Math.max(-1200, Math.min(1200, event.deltaY)),
+  });
+}, { passive: false });
+elements.browserFrameShell.addEventListener("pointerdown", () => elements.browserFrameShell.focus());
+elements.browserFrameShell.addEventListener("keydown", (event) => {
+  if (!state.browserControl.active || event.repeat) return;
+  const key = playwrightKey(event);
+  if (!key) return;
+  event.preventDefault();
+  sendBrowserInput({ action: "key", key });
+});
+elements.browserTextForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = elements.browserText.value;
+  if (!text || !state.browserControl.active) return;
+  sendBrowserInput({ action: "text", text });
+  elements.browserText.value = "";
+});
+for (const button of elements.browserKeyButtons) {
+  button.addEventListener("click", () => sendBrowserInput({
+    action: "key", key: button.dataset.browserKey,
+  }));
+}
+
 elements.refreshButton.addEventListener("click", () => {
   if (state.activeView === "upgrade") loadUpgradeStatus();
   else if (state.activeView === "logs") loadDebugLogs();
+  else if (state.activeView === "browser-control") loadBrowserControlStatus();
   else refresh();
 });
 elements.copyButton.addEventListener("click", async () => {
@@ -2025,7 +2300,14 @@ periodicTabs.forEach((button, index) => {
 });
 window.addEventListener("hashchange", () => setActiveView(location.hash.slice(1), { syncHash: false }));
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshExecutionStates();
+  setBrowserControlPolling(state.activeView === "browser-control" && !document.hidden);
+  if (!document.hidden) {
+    refreshExecutionStates();
+    if (state.activeView === "browser-control") loadBrowserControlStatus({ quiet: true });
+  }
+});
+window.addEventListener("pagehide", () => {
+  if (browserFrameObjectUrl) URL.revokeObjectURL(browserFrameObjectUrl);
 });
 window.setInterval(refreshExecutionStates, 15_000);
 
