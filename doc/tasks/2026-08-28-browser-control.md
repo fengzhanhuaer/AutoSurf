@@ -202,6 +202,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | DEF-001 | 上一版只显示网页内容，无法看到标签栏和地址栏；进入页面还要冷启动 | 使用 `Page.screenshot()` 和 Playwright 页面输入，且维护会话由 UI 临时创建 | 改用 noVNC/x11vnc 捕获 Xvfb 根显示器；Chromium 随应用常驻 | REQ-005/006/007/008 | `修复中` |
 | DEF-002 | GitHub CI 和全新 Docker 在安装 Selkies 时失败 | 固定的 Selkies 开发提交依赖尚未发布的 `pixelflux~=2.1.0` | 移除不可解析的开发依赖，使用 Debian 稳定 noVNC/x11vnc/websockify 包 | REQ-006/007/008 | `已修复，待 CI 验证` |
 | DEF-003 | 远程桌面已 active 后状态仍返回 `starting=true` | supervisor 在 `_run_once()` 整个常驻生命周期结束前才清除 starting | Unix socket 就绪后立即清除 starting，并增加回归断言 | REQ-005/008 | `已修复` |
+| DEF-004 | noVNC 页面同源代理返回 500 | Unix socket HTTP 客户端使用 `aiohttp`，但从 Selkies 切换后未将它声明为直接项目依赖 | 在 `pyproject.toml` 显式加入 `aiohttp>=3.11,<4` 并增加依赖契约断言 | REQ-001/006/007 | `已修复，待 Docker 复验` |
 
 ## 九、回滚方案
 
