@@ -285,7 +285,6 @@ async def launch_standalone_browser(
             "--no-first-run",
             "--no-default-browser-check",
             "--password-store=basic",
-            "--no-sandbox",
             f"--lang={str(run_context.config.get('locale', 'zh-CN'))}",
         ]
         if mode == "persistent_headless":

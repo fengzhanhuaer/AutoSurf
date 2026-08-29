@@ -22,9 +22,9 @@ services:
       AUTOSURF_SECRET_KEY: "CHANGE-ME-random-encryption-key-at-least-32-characters"
       AUTOSURF_USERNAME: "admin"
       AUTOSURF_PASSWORD: "CHANGE-ME-strong-management-password"
+    # Chrome's sandboxed internal and extension pages require container privileges.
+    privileged: true
     read_only: true
-    security_opt:
-      - no-new-privileges:true
     stop_grace_period: 30s
     healthcheck:
       test:
