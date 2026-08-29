@@ -247,7 +247,9 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
 
     assert 'data-view="browser-control"' in html
     assert 'id="browser-control-panel"' in html
+    assert 'id="browser-control-surface"' in html
     assert 'id="browser-remote-frame"' in html
+    assert 'id="browser-fullscreen"' in html
     assert 'title="Chromium 远程桌面"' in html
     assert 'id="browser-remote-cover"' in html
     assert 'id="browser-address-form"' not in html
@@ -255,5 +257,8 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'id="browser-frame"' not in html
     assert 'api("/api/v1/browser-control"' in javascript
     assert '"/browser-control/remote/"' in javascript
+    assert "requestFullscreen" in javascript
+    assert 'document.addEventListener("fullscreenchange"' in javascript
     assert "/api/v1/browser-control/frame" not in javascript
     assert "aspect-ratio: 1365 / 768" in css
+    assert ".browser-control-panel:fullscreen" in css

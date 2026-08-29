@@ -54,9 +54,11 @@ const elements = {
   periodicTasksPanel: document.querySelector("#periodic-tasks-panel"),
   periodicHistoryPanel: document.querySelector("#periodic-history-panel"),
   browserControlPanel: document.querySelector("#browser-control-panel"),
+  browserControlSurface: document.querySelector("#browser-control-surface"),
   browserControlState: document.querySelector("#browser-control-state"),
   browserControlPageTitle: document.querySelector("#browser-control-page-title"),
   browserControlError: document.querySelector("#browser-control-error"),
+  browserFullscreen: document.querySelector("#browser-fullscreen"),
   browserRemoteFrame: document.querySelector("#browser-remote-frame"),
   browserRemotePlaceholder: document.querySelector("#browser-remote-placeholder"),
   browserRemoteCover: document.querySelector("#browser-remote-cover"),
@@ -426,6 +428,39 @@ function setBrowserControlPolling(enabled) {
   loadBrowserControlStatus({ quiet: true });
   browserStatusTimer = window.setInterval(() => loadBrowserControlStatus({ quiet: true }), 2_000);
 }
+
+function browserControlIsFullscreen() {
+  return (document.fullscreenElement || document.webkitFullscreenElement) === elements.browserControlSurface;
+}
+
+function renderBrowserFullscreenState() {
+  const active = browserControlIsFullscreen();
+  const label = active ? "退出全屏" : "全屏";
+  elements.browserFullscreen.title = label;
+  elements.browserFullscreen.setAttribute("aria-label", label);
+  elements.browserFullscreen.setAttribute("aria-pressed", String(active));
+}
+
+async function toggleBrowserFullscreen() {
+  try {
+    if (browserControlIsFullscreen()) {
+      const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
+      if (!exitFullscreen) throw new Error("当前浏览器不支持退出全屏");
+      await exitFullscreen.call(document);
+    } else {
+      const requestFullscreen = elements.browserControlSurface.requestFullscreen
+        || elements.browserControlSurface.webkitRequestFullscreen;
+      if (!requestFullscreen) throw new Error("当前浏览器不支持全屏");
+      await requestFullscreen.call(elements.browserControlSurface);
+    }
+  } catch (error) {
+    showToast(error.message || "无法切换全屏", true);
+  }
+}
+
+elements.browserFullscreen.addEventListener("click", toggleBrowserFullscreen);
+document.addEventListener("fullscreenchange", renderBrowserFullscreenState);
+document.addEventListener("webkitfullscreenchange", renderBrowserFullscreenState);
 
 function statusLabel(status) {
   return ({

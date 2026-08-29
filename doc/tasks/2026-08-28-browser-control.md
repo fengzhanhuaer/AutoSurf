@@ -3,9 +3,9 @@
 - 任务标识：`2026-08-28-browser-control`
 - 状态：`进行中`
 - 创建时间：`2026-08-28 16:46 +08:00`
-- 更新时间：`2026-08-29 00:00 +08:00`
+- 更新时间：`2026-08-29 00:45 +08:00`
 - 用户原始需求：在现有功能中添加一个专门显示并操作 Docker 内 Chrome 的界面。
-- 用户最新指令：展示并操作整个 Chromium 窗口，效果类似远程桌面；浏览器随 AutoSurf 常驻，不需要冷启动；不使用新端口。
+- 用户最新指令：展示并操作整个 Chromium 窗口，效果类似远程桌面；浏览器随 AutoSurf 常驻，不需要冷启动；不使用新端口；窗口支持全屏。
 - 启用方式：明确长任务条件（跨浏览器生命周期、后端接口、前端交互与渲染验证）。
 
 ## 一、需求定义
@@ -36,6 +36,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-006 | 显示完整 Chromium 窗口 | 返回 Xvfb 根窗口画面，能看到 Chromium 标签栏、地址栏、网页内容和浏览器弹层；画面不落盘 | P0 | `进行中` | 用户最新纠正 |
 | REQ-007 | 像远程桌面一样直接操作浏览器 | 鼠标移动、单/双击、滚轮、常用组合键及 ASCII 文字作用于 X11 Chromium 原生窗口，坐标按实际帧映射 | P0 | `进行中` | 用户最新纠正 |
 | REQ-008 | Chromium 始终打开且无冷启动 | AutoSurf 启动后自动准备浏览器；控制页无需启动按钮；异常退出自动恢复；签到结束不关闭进程 | P0 | `进行中` | 用户最新指令 |
+| REQ-009 | 远程浏览器窗口支持全屏 | 控制页可用明确按钮进入全屏；按钮状态随全屏进入、退出和 `Esc` 同步；不支持 Fullscreen API 时提示错误 | P1 | `已完成` | 用户最新指令“窗口应该支持全屏” |
 
 ## 二、总体架构
 
@@ -74,11 +75,11 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | 接口编号 | 接口名称 | 调用方 | 提供方 | 输入、输出与错误契约 | 实现位置 | 兼容要求 | 关联需求、任务与测试 | 状态与证据 |
 |---|---|---|---|---|---|---|---|---|
 | IF-001 | 浏览器会话状态 | 管理前端 | `GET /api/v1/browser-control` | JSON：active/starting/url/title/viewport/error；登录必需 | `api.py` / `browser_control.py` | 不影响现有 API | REQ-001/003；TASK-002；TEST-002 | `已实现，focused test 通过` |
-| IF-002 | 浏览器会话启停 | 管理前端 | `POST/DELETE /api/v1/browser-control/session` | POST `{url}`；DELETE 幂等；非法 URL 422，冲突 409 | 同上 | 同端口、共享 profile | REQ-001/002；TASK-002；TEST-002 | `已实现，focused test 通过` |
+| IF-002 | 浏览器会话启停 | 管理前端 | `POST/DELETE /api/v1/browser-control/session` | 旧版冷启动接口 | 已移除 | 常驻宿主不再需要启停 | REQ-002/008 | `已取消并移除` |
 | IF-003 | 旧页面截图帧 | 管理前端 | `GET /api/v1/browser-control/frame` | 页面 PNG | 旧实现 | 被完整桌面要求替代 | REQ-003 | `待移除兼容入口` |
 | IF-004 | 旧 Playwright 页面输入 | 管理前端 | `POST /navigate`、`POST /input` | 页面级动作 JSON | 旧实现 | 被 X11 原生输入替代 | REQ-004 | `待移除兼容入口` |
-| IF-005 | Selkies 同源 HTTP 代理 | iframe | `GET /browser-control/remote/{path}` | 保留路径与查询，转发到 Unix socket；继承登录和 LAN 限制；未就绪 503 | `main.py` / `browser_control.py` | 不新增端口 | REQ-001/005/006/008；TASK-006；TEST-007 | `待实现` |
-| IF-006 | Selkies 同源 WebSocket 代理 | iframe | `WS /browser-control/remote/api/websockets` | 校验会话 Cookie 后双向转发 text/binary/close 到 Unix socket | 同上 | 同源、同端口、无 Basic Auth 泄漏 | REQ-001/006/007；TASK-006；TEST-007 | `待实现` |
+| IF-005 | Selkies 同源 HTTP 代理 | iframe | `GET /browser-control/remote/{path}` | 保留路径与查询，转发到 Unix socket；继承登录和 LAN 限制；未就绪 503 | `main.py` / `browser_control.py` | 不新增端口 | REQ-001/005/006/008；TASK-006；TEST-007 | `已实现，focused test 通过` |
+| IF-006 | Selkies 同源 WebSocket 代理 | iframe | `WS /browser-control/remote/api/websockets` | 校验会话 Cookie 后双向转发 text/binary/close 到 Unix socket | 同上 | 同源、同端口、无 Basic Auth 泄漏 | REQ-001/006/007；TASK-006；TEST-007 | `已实现，focused test 通过` |
 
 ### 2.6 架构决策引用
 
@@ -115,11 +116,11 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 ### 4.1 当前交接
 
 - 当前阶段：Docker 真实验证
-- 当前计划步骤：在 HomePc 隔离构建并验证完整 Chromium 远程桌面
+- 当前计划步骤：实现全屏并在 HomePc 隔离构建、验证完整 Chromium 远程桌面
 - 当前门禁：修正版准备门禁通过；完成门禁重新打开
-- 最近完成检查点：常驻宿主、任务租约、同源 HTTP/WS 代理和 iframe 已实现；focused 116 项、full 178 项通过；桌面/移动预览无溢出和控制台错误。
-- 工作区状态：待提交推送；本机 Docker Desktop 未运行，HomePc 线上容器只读检查健康。
-- 下一步唯一动作：提交推送后在 HomePc 的隔离目录构建验证镜像。
+- 最近完成检查点：常驻宿主、任务租约、同源 HTTP/WS 代理、iframe 和全屏切换已实现；focused 5 项、full 178 项通过；桌面/移动全屏实测无溢出和控制台错误；上一提交的隔离 Docker 镜像构建成功。
+- 工作区状态：全屏增量待提交推送；本机 Docker Desktop 未运行，HomePc 线上容器只读检查健康。
+- 下一步唯一动作：提交推送全屏增量后，在 HomePc 的隔离目录重建最终镜像并验证运行时。
 - 恢复时先读取：本账本、`git status`、`browser_session.py`、`main.py`、`api.py`、`admin.html/js/css`。
 
 ### 4.2 任务计划
@@ -134,6 +135,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TASK-006 | 实现常驻共享 Chromium、Selkies Unix socket 与同源代理 | `已完成` | REQ-001/002/006/007/008 | browser_session、browser_control、main/api、依赖 | focused 后端测试通过 |
 | TASK-007 | 将管理页改为完整远程桌面 iframe | `已完成` | REQ-005/006/007/008 | admin.html/js/css | 无旧伪地址栏和启停流程；响应式预览通过 |
 | TASK-008 | Docker、完整回归与真实远程桌面 QA | `进行中` | 全部有效需求 | Dockerfile、tests、账本 | Docker 中完整 Chromium 可见可操作 |
+| TASK-009 | 增加远程桌面全屏切换并验证退出同步 | `已完成` | REQ-009 | admin.html/js/css、静态契约测试 | 桌面和移动端可进入/退出全屏，布局无溢出 |
 
 ### 4.3 变更记录
 
@@ -156,6 +158,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TEST-003 | 管理页静态资源与 hash 视图 | REQ-005 / TASK-003 | 现有静态资源测试 + 定向 pytest | 元素/脚本契约存在 | 7 passed | `通过` | 2026-08-28 运行 |
 | TEST-004 | 浏览器渲染与操作 | REQ-003/004/005 / TASK-004 | 常规 Playwright；桌面 1365×900、移动 390×844 | 非空、无控制台错误、启动/帧/点击状态可见 | 桌面点击并发送 `qa-user` 成功；移动图片 356px、无横向溢出、控制台零错误 | `通过` | Browser plugin not available，按 Skill 使用 regular Playwright |
 | TEST-005 | 完整回归 | 全部 / TASK-004 | `.venv\Scripts\python.exe -m pytest -q` | 全部通过 | 178 passed，1 个现有 SQLAlchemy/SQLite 弃用警告 | `通过` | 2026-08-28 17:32 +08:00 |
+| TEST-009 | 远程桌面全屏切换 | REQ-009 / TASK-009 | regular Playwright；1365×900、390×844 | 点击进入全屏，面板铺满视口；再次点击退出；状态同步；无溢出和控制台错误 | 两种视口均进入完整视口并可退出，零溢出、零控制台错误 | `通过` | 2026-08-29 运行 |
 
 ### 5.2 未执行测试
 
@@ -173,6 +176,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-006 | 完整 Chromium 窗口可见 | UNIT-001/003 | TASK-006/007/008 | IF-005/006、Selkies | TEST-006/007/008 | 待验证 | `进行中` |
 | REQ-007 | 原生鼠标键盘远程控制 | UNIT-001/003 | TASK-006/007/008 | IF-006、Selkies | TEST-006/007/008 | 待验证 | `进行中` |
 | REQ-008 | 应用启动即常驻且自恢复 | UNIT-001/002 | TASK-006/008 | BrowserControlService、lifespan | TEST-006/008 | 待验证 | `进行中` |
+| REQ-009 | 全屏进入、退出和状态同步 | UNIT-003 | TASK-009 | `admin.html/js/css`、Fullscreen API | TEST-009 | 桌面与移动视口均通过 | `已完成` |
 
 ## 七、决策与冲突记录
 

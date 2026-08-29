@@ -264,7 +264,12 @@ td:first-child { color: var(--text); font-weight: 600; }
 .debug-log-output pre { max-height: 340px; margin: 0; overflow: auto; padding: 14px; border-radius: 5px; background: #20272e; color: #f2f5f7; font: 12px/1.55 Consolas, "Courier New", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .browser-control-panel { width: 100%; overflow: hidden; }
+.browser-control-panel:fullscreen,
+.browser-control-panel:-webkit-full-screen { display: flex; width: 100vw; height: 100vh; flex-direction: column; border: 0; border-radius: 0; background: var(--surface); }
+.browser-control-panel:fullscreen .browser-remote-shell,
+.browser-control-panel:-webkit-full-screen .browser-remote-shell { min-height: 0; flex: 1; aspect-ratio: auto; }
 .browser-control-heading { min-height: 68px; }
+.browser-control-actions { display: flex; align-items: center; gap: 8px; }
 .browser-control-error { margin: 12px 14px 0; padding: 10px 12px; border: 1px solid #f1b7b2; border-radius: 5px; background: var(--danger-bg); color: var(--danger); overflow-wrap: anywhere; }
 .browser-remote-shell { position: relative; width: 100%; aspect-ratio: 1365 / 768; overflow: hidden; background: #161b20; }
 .browser-remote-shell iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #161b20; }
@@ -328,6 +333,7 @@ td:first-child { color: var(--text); font-weight: 600; }
   .debug-log-meta div:nth-child(3) { padding-left: 0; }
   .debug-log-detail { padding: 16px; }
   .browser-control-heading { flex-direction: row; align-items: center; }
+  .browser-control-actions .icon-button { width: 38px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
