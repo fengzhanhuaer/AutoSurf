@@ -37,6 +37,26 @@ if [ ! -x "$chrome_executable" ]; then
     exit 1
 fi
 
+audio_sink=${AUTOSURF_AUDIO_SINK:-autosurf}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/autosurf-runtime}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+pulseaudio --start --exit-idle-time=-1 --log-target=stderr
+for _ in 1 2 3 4 5; do
+    if pactl info >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
+done
+if ! pactl list short sinks | awk '{print $2}' | grep -Fxq "$audio_sink"; then
+    pactl load-module module-null-sink \
+        sink_name="$audio_sink" rate=48000 channels=2 \
+        sink_properties=device.description=AutoSurf >/dev/null
+fi
+pactl set-default-sink "$audio_sink"
+export PULSE_SINK="$audio_sink"
+export AUTOSURF_AUDIO_SOURCE=${AUTOSURF_AUDIO_SOURCE:-$audio_sink.monitor}
+
 terminate_child() {
     if [ -f "$pid_file" ]; then
         child_pid=$(cat "$pid_file")

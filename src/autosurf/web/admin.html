@@ -27,7 +27,7 @@
           <span class="nav-icon" aria-hidden="true">B</span>
           <span>浏览器控制</span>
         </a>
-        <a class="nav-item" href="/app#cookiecloud" data-view="cookiecloud">
+        <a class="nav-item" href="/app#site-settings" data-view="site-settings">
           <span class="nav-icon" aria-hidden="true">S</span>
           <span>系统设置</span>
         </a>
@@ -54,18 +54,9 @@
       </header>
 
       <div class="settings-tabs" id="settings-tabs" role="tablist" aria-label="系统设置" hidden>
-        <button class="settings-tab active" id="settings-tab-cookiecloud" type="button" role="tab"
-                aria-selected="true" aria-controls="cookiecloud-settings-panel" data-settings-tab="cookiecloud">
-          CookieCloud
-        </button>
-        <button class="settings-tab" id="settings-tab-web-credentials" type="button" role="tab"
-                aria-selected="false" aria-controls="web-credentials-settings-panel"
-                data-settings-tab="web-credentials" tabindex="-1">
-          Web 凭据
-        </button>
-        <button class="settings-tab" id="settings-tab-site-settings" type="button" role="tab"
-                aria-selected="false" aria-controls="site-settings-panel"
-                data-settings-tab="site-settings" tabindex="-1">
+        <button class="settings-tab active" id="settings-tab-site-settings" type="button" role="tab"
+                aria-selected="true" aria-controls="site-settings-panel"
+                data-settings-tab="site-settings">
           站点设置
         </button>
         <button class="settings-tab" id="settings-tab-logs" type="button" role="tab"
@@ -124,7 +115,7 @@
           <div class="panel-heading discovery-heading">
             <div>
               <h2 id="pt-discovery-title">发现的 PT 站点</h2>
-              <p>CookieCloud · 持久化 Chrome</p>
+              <p>内置站点目录 · 持久化 Chrome</p>
             </div>
             <div class="discovery-settings">
               <label>
@@ -165,7 +156,7 @@
           </div>
           <div class="table-wrap discovery-table-wrap">
             <table>
-              <thead><tr><th class="select-column"><span class="visually-hidden">选择</span></th><th>站点</th><th>凭据域名</th><th>识别依据</th><th>状态</th></tr></thead>
+              <thead><tr><th class="select-column"><span class="visually-hidden">选择</span></th><th>站点</th><th>站点域名</th><th>识别依据</th><th>状态</th></tr></thead>
               <tbody id="pt-candidate-rows"><tr><td class="empty" colspan="5">暂无识别到的 PT 站点</td></tr></tbody>
             </table>
           </div>
@@ -184,12 +175,6 @@
               <label class="field">
                 <span>任务名称</span>
                 <input id="pt-name" name="name" maxlength="128" autocomplete="off" required>
-              </label>
-              <label class="field">
-                <span>CookieCloud 凭据</span>
-                <select id="pt-credential" name="credential_id" required>
-                  <option value="">请选择凭据</option>
-                </select>
               </label>
               <label class="field">
                 <span>签到地址</span>
@@ -333,7 +318,7 @@
             <div class="panel-heading discovery-heading">
               <div>
                 <h2 id="periodic-discovery-title">发现的普通站点</h2>
-                <p>CookieCloud · 内置周期模板</p>
+              <p>内置周期模板 · 持久化 Chrome</p>
               </div>
               <div class="discovery-settings">
                 <label><span>周期</span><select id="periodic-collect-interval" aria-label="周期任务执行周期"><option value="12">12 小时</option><option value="24" selected>24 小时</option><option value="48">48 小时</option><option value="168">7 天</option></select></label>
@@ -349,7 +334,7 @@
             </div>
             <div class="table-wrap discovery-table-wrap">
               <table>
-                <thead><tr><th class="select-column"><span class="visually-hidden">选择</span></th><th>站点</th><th>凭据域名</th><th>识别依据</th><th>状态</th></tr></thead>
+                <thead><tr><th class="select-column"><span class="visually-hidden">选择</span></th><th>站点</th><th>站点域名</th><th>识别依据</th><th>状态</th></tr></thead>
                 <tbody id="periodic-candidate-rows"><tr><td class="empty" colspan="5">暂无识别到的普通站点</td></tr></tbody>
               </table>
             </div>
@@ -373,9 +358,6 @@
                 </select>
               </label>
               <label class="field"><span>任务名称</span><input id="periodic-name" maxlength="128" required></label>
-              <label class="field"><span>站点凭据</span>
-                <select id="periodic-credential"><option value="">无需凭据</option></select>
-              </label>
               <label class="field"><span>执行地址</span><input id="periodic-url" type="url" maxlength="2048" required></label>
               <div class="form-grid">
                 <label class="field"><span>执行周期（小时）</span><input id="periodic-interval" type="number" min="1" max="720" value="24" required></label>
@@ -412,7 +394,7 @@
           <section class="panel periodic-task-panel" aria-labelledby="periodic-task-title">
             <div class="panel-heading"><div><h2 id="periodic-task-title">周期任务</h2><p>普通站点与 PT 站点相互独立。</p></div></div>
             <div class="table-wrap periodic-table-wrap">
-              <table><thead><tr><th>站点</th><th>凭据</th><th>周期</th><th>下次执行</th><th>状态</th><th>启用</th><th>操作</th></tr></thead>
+              <table><thead><tr><th>站点</th><th>域名</th><th>周期</th><th>下次执行</th><th>状态</th><th>启用</th><th>操作</th></tr></thead>
                 <tbody id="periodic-site-rows"><tr><td class="empty" colspan="7">暂无普通站点任务</td></tr></tbody>
               </table>
             </div>
@@ -461,6 +443,10 @@
                 <option value="1600x900">1600 x 900</option>
                 <option value="1920x1080">1920 x 1080</option>
               </select>
+              <button class="icon-button" id="browser-audio" type="button" title="开启声音"
+                      aria-label="开启声音" aria-pressed="false" disabled>
+                <span aria-hidden="true">音</span>
+              </button>
               <span class="status-badge running" id="browser-control-state">连接中</span>
               <button class="icon-button" id="browser-fullscreen" type="button" title="全屏"
                       aria-label="全屏" aria-pressed="false">
@@ -482,156 +468,13 @@
         </section>
       </section>
 
-      <section class="settings-panel" id="cookiecloud-settings-panel" role="tabpanel"
-               aria-labelledby="settings-tab-cookiecloud" hidden>
-        <section class="summary-strip" aria-label="同步概况">
-        <div class="summary-item">
-          <span class="summary-label">配置源</span>
-          <strong id="source-count">0</strong>
-        </div>
-        <div class="summary-item">
-          <span class="summary-label">已导入凭据</span>
-          <strong id="credential-count">0</strong>
-        </div>
-        <div class="summary-item status-summary">
-          <span class="summary-label">同步状态</span>
-          <strong id="sync-state">等待配置</strong>
-        </div>
-        </section>
-
-        <div class="content-grid">
-        <section class="panel config-panel" aria-labelledby="config-title">
-          <div class="panel-heading">
-            <div>
-              <h2 id="config-title">连接配置</h2>
-              <p>密码加密保存，页面不会回显。</p>
-            </div>
-            <select id="source-selector" aria-label="选择已有配置">
-              <option value="">新建配置</option>
-            </select>
-          </div>
-
-          <form id="source-form">
-            <label class="field">
-              <span>UUID</span>
-              <span class="field-with-action">
-                <input id="uuid" name="uuid" maxlength="128" autocomplete="off" required>
-                <button class="icon-button small" id="copy-uuid-button" type="button"
-                        title="复制 UUID" aria-label="复制 UUID" disabled>⧉</button>
-              </span>
-            </label>
-            <label class="field">
-              <span>CookieCloud 密码</span>
-              <span class="field-with-action">
-                <input id="password" name="password" type="password" maxlength="1024" autocomplete="new-password">
-                <button class="icon-button small" id="copy-password-button" type="button"
-                        title="复制 CookieCloud 密码" aria-label="复制 CookieCloud 密码" disabled>⧉</button>
-              </span>
-              <small id="password-hint">新配置必须填写密码</small>
-            </label>
-            <label class="toggle-row">
-              <span>
-                <strong>自动导入</strong>
-                <small>浏览器上传后自动更新内部凭据</small>
-              </span>
-              <input id="auto-import" name="auto_import" type="checkbox" checked>
-              <span class="toggle" aria-hidden="true"></span>
-            </label>
-            <div class="form-actions">
-              <button class="button primary" id="save-button" type="submit">保存配置</button>
-              <button class="button secondary" id="import-button" type="button" disabled>立即导入</button>
-            </div>
-          </form>
-        </section>
-
-        <aside class="side-column">
-          <section class="panel endpoint-panel" aria-labelledby="endpoint-title">
-            <div class="panel-heading compact">
-              <h2 id="endpoint-title">浏览器连接地址</h2>
-            </div>
-            <div class="copy-field">
-              <code id="endpoint-url"></code>
-              <button class="icon-button small" id="copy-button" type="button" title="复制地址" aria-label="复制地址">⧉</button>
-            </div>
-          </section>
-
-          <section class="panel status-panel" aria-labelledby="status-title">
-            <div class="panel-heading compact">
-              <h2 id="status-title">当前状态</h2>
-            </div>
-            <dl class="status-list">
-              <div><dt>UUID</dt><dd id="status-uuid">未选择</dd></div>
-              <div><dt>最近上传</dt><dd id="last-upload">暂无</dd></div>
-              <div><dt>最近导入</dt><dd id="last-import">暂无</dd></div>
-              <div><dt>自动导入</dt><dd id="auto-import-state">未配置</dd></div>
-            </dl>
-            <div class="error-box" id="error-box" hidden></div>
-          </section>
-        </aside>
-        </div>
-
-        <section class="table-section" aria-labelledby="credentials-title">
-        <div class="section-heading">
-          <div>
-            <h2 id="credentials-title">已导入凭据</h2>
-            <p>Cookie 内容保持加密，仅显示域名和版本。</p>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>域名</th><th>来源</th><th>版本</th><th>更新时间</th></tr>
-            </thead>
-            <tbody id="credential-rows">
-              <tr><td class="empty" colspan="4">暂无已导入凭据</td></tr>
-            </tbody>
-          </table>
-        </div>
-        </section>
-      </section>
-
-      <section class="settings-panel" id="web-credentials-settings-panel" role="tabpanel"
-               aria-labelledby="settings-tab-web-credentials" hidden>
-        <section class="panel token-sync-panel" aria-labelledby="token-sync-title">
-          <div class="panel-heading">
-            <div>
-              <h2 id="token-sync-title">Web 凭据同步</h2>
-              <p>管理不使用 Cookie 登录的站点凭据；后续站点将在这里统一添加。</p>
-            </div>
-            <span class="status-badge" id="token-sync-state">未配置</span>
-          </div>
-          <div class="token-sync-content">
-            <label class="field">
-              <span>上送地址</span>
-              <input id="token-sync-base-url" type="url" maxlength="2048"
-                     placeholder="http://127.0.0.1:18980" autocomplete="url">
-              <small>填写运行油猴脚本的浏览器能够访问到的 AutoSurf 服务根地址。</small>
-            </label>
-            <div class="table-wrap token-sync-table-wrap">
-              <table class="token-sync-table">
-                <thead>
-                  <tr><th>站点</th><th>域名</th><th>脚本密钥</th><th>站点凭据</th><th>最近同步</th><th>操作</th></tr>
-                </thead>
-                <tbody id="web-credential-rows">
-                  <tr><td class="empty" colspan="6">正在读取 Web 凭据状态</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <div class="token-sync-actions">
-            <button class="button secondary" id="token-script-copy-button" type="button">复制脚本</button>
-            <button class="button primary" id="token-script-button" type="button">下载脚本</button>
-          </div>
-        </section>
-      </section>
-
       <section class="settings-panel" id="site-settings-panel" role="tabpanel"
                aria-labelledby="settings-tab-site-settings" hidden>
         <section class="panel site-settings-panel" aria-labelledby="site-settings-title">
-          <div class="panel-heading"><div><h2 id="site-settings-title">站点设置</h2><p>管理访问范围，并备份站点任务、凭据和 CookieCloud 配置。</p></div></div>
+          <div class="panel-heading"><div><h2 id="site-settings-title">站点设置</h2><p>管理访问范围，并备份站点任务配置。</p></div></div>
           <div class="site-settings-content">
             <div class="site-setting-row"><div><strong>仅限局域网访问</strong><p>默认开启，仅允许局域网、回环地址及 198.18.0.0/15 访问。</p></div><label class="site-setting-toggle" title="仅限局域网访问"><input id="lan-only-access" type="checkbox" checked aria-label="仅限局域网访问"><span class="toggle" aria-hidden="true"></span></label></div>
-            <div class="site-setting-row"><div><strong>一键备份与恢复</strong><p>ZIP 内含敏感 Cookie 和密码，请妥善保管。恢复会替换现有站点配置。</p></div><div class="site-setting-actions"><input id="site-restore-file" type="file" accept=".zip,application/zip" hidden><button class="button secondary" id="site-restore-button" type="button">一键恢复</button><button class="button primary" id="site-backup-button" type="button">一键备份</button></div></div>
+            <div class="site-setting-row"><div><strong>一键备份与恢复</strong><p>ZIP 仅包含任务配置，不包含 Chrome 登录数据。恢复会替换现有任务。</p></div><div class="site-setting-actions"><input id="site-restore-file" type="file" accept=".zip,application/zip" hidden><button class="button secondary" id="site-restore-button" type="button">一键恢复</button><button class="button primary" id="site-backup-button" type="button">一键备份</button></div></div>
           </div>
         </section>
       </section>
@@ -695,6 +538,7 @@
           </div>
         </section>
       </section>
+
     </main>
   </div>
 

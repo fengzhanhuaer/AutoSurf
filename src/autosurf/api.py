@@ -19,7 +19,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 import zipfile
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
@@ -33,50 +33,24 @@ from autosurf.automations.browser_session import persistent_browser_mode
 from autosurf.browser_control import BrowserControlBusy
 from autosurf.infrastructure.database import (
     AutomationRecord,
-    CookieCloudBlob,
-    CookieCloudSource,
-    CredentialRecord,
     ExecutionRecord,
 )
-from autosurf.pt_discovery import PT_COOKIE_MARKERS, discover_pt_site, is_ignored_pt_domain
-from autosurf.periodic_templates import apply_periodic_template, discover_periodic_template
-from autosurf.userscripts import (
-    WEB_CREDENTIAL_SCRIPT_SOURCES,
-    build_web_credential_userscript_bundle,
+from autosurf.pt_discovery import PT_SITE_CATALOG, discover_pt_site, is_ignored_pt_domain
+from autosurf.periodic_templates import (
+    PERIODIC_SITE_TEMPLATES,
+    apply_periodic_template,
 )
-
-
-class CredentialInput(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
-    domain: str = Field(min_length=1, max_length=255)
-    cookies: dict[str, str]
 
 
 class AutomationInput(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     handler_type: str
     interval_seconds: int = Field(ge=60, le=31_536_000)
-    credential_id: str | None = None
     config: dict[str, Any]
-
-
-class CookieCloudSourceInput(BaseModel):
-    uuid: str = Field(min_length=1, max_length=128)
-    password: str | None = Field(default=None, min_length=1, max_length=1024)
-    auto_import: bool = True
-
-
-class CookieCloudImportInput(BaseModel):
-    password: str | None = Field(default=None, min_length=1, max_length=1024)
-
-
-class CookieCloudSourceSettingsInput(BaseModel):
-    auto_import: bool
 
 
 class PtSignInInput(BaseModel):
     name: str = Field(min_length=1, max_length=128)
-    credential_id: str = Field(min_length=1, max_length=36)
     url: str = Field(min_length=8, max_length=2048)
     interval_hours: int = Field(default=24, ge=1, le=720)
     timeout_seconds: int = Field(default=60, ge=5, le=180)
@@ -100,7 +74,7 @@ class PtSiteActionsInput(BaseModel):
 
 
 class PtSignInCollectInput(BaseModel):
-    credential_ids: list[str] = Field(min_length=1, max_length=200)
+    site_keys: list[str] = Field(min_length=1, max_length=200)
     interval_hours: int = Field(default=24, ge=1, le=720)
     timeout_seconds: int = Field(default=60, ge=5, le=180)
     random_delay_minutes: int = Field(default=30, ge=0, le=1440)
@@ -121,7 +95,6 @@ class PtSignInScheduleInput(BaseModel):
 class PeriodicSignInInput(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     handler_type: str = "browser_signin"
-    credential_id: str | None = Field(default=None, max_length=36)
     template_key: str | None = Field(default=None, max_length=64)
     url: str = Field(min_length=8, max_length=2048)
     interval_hours: int = Field(default=24, ge=1, le=720)
@@ -150,7 +123,7 @@ class PeriodicSignInScheduleInput(BaseModel):
 
 
 class PeriodicSignInCollectInput(PeriodicSignInScheduleInput):
-    credential_ids: list[str] = Field(min_length=1, max_length=200)
+    site_keys: list[str] = Field(min_length=1, max_length=200)
 
 
 class LoginInput(BaseModel):
@@ -165,15 +138,6 @@ class SystemAccessSettingsInput(BaseModel):
 class BrowserResolutionInput(BaseModel):
     width: int
     height: int
-
-
-class WebCredentialScriptInput(BaseModel):
-    base_url: str = Field(min_length=8, max_length=2048)
-
-
-class WebCredentialUploadInput(BaseModel):
-    token: str | None = Field(default=None, min_length=1, max_length=8192)
-    values: dict[str, str] = Field(default_factory=dict)
 
 
 SESSION_COOKIE = "autosurf_session"
@@ -263,7 +227,6 @@ def logout(response: Response) -> None:
 
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_login)])
-web_credential_router = APIRouter(prefix="/api/web-credentials")
 
 
 @router.get("/browser-control")
@@ -525,6 +488,8 @@ def upgrade_status(request: Request) -> dict[str, Any]:
     return _upgrade_status(request)
 
 
+
+
 @router.get("/system/access")
 def system_access_settings(request: Request) -> dict[str, bool]:
     return {"lan_only": request.app.state.lan_access.lan_only}
@@ -564,31 +529,17 @@ def start_upgrade(request: Request) -> dict[str, Any]:
     return {**current, "running": True, "accepted": True}
 
 
+
+
 @router.get("/site-settings/backup")
 def backup_site_settings(request: Request) -> Response:
-    secrets_box = request.app.state.credentials.secrets
     with request.app.state.sessions() as session:
-        credentials = session.scalars(
-            select(CredentialRecord).order_by(CredentialRecord.name)
-        ).all()
         automations = session.scalars(
             select(AutomationRecord).order_by(AutomationRecord.name, AutomationRecord.id)
         ).all()
-        sources = session.scalars(
-            select(CookieCloudSource).order_by(CookieCloudSource.uuid)
-        ).all()
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "exported_at": utc_now().isoformat(),
-            "credentials": [{
-                "id": item.id,
-                "name": item.name,
-                "provider": item.provider,
-                "domain": item.domain,
-                "payload": secrets_box.decrypt_json(item.encrypted_payload),
-                "version": item.version,
-                "updated_at": item.updated_at.isoformat(),
-            } for item in credentials],
             "automations": [{
                 "id": item.id,
                 "name": item.name,
@@ -597,14 +548,7 @@ def backup_site_settings(request: Request) -> Response:
                 "interval_seconds": item.interval_seconds,
                 "next_run_at": item.next_run_at.isoformat(),
                 "config": json.loads(item.config_json),
-                "credential_id": item.credential_id,
             } for item in automations],
-            "cookiecloud_sources": [{
-                "uuid": item.uuid,
-                "password": request.app.state.cookiecloud.password_for(item.uuid)
-                if item.encrypted_password else None,
-                "auto_import": item.auto_import,
-            } for item in sources],
         }
 
     archive_buffer = io.BytesIO()
@@ -616,7 +560,7 @@ def backup_site_settings(request: Request) -> Response:
         archive.writestr(
             "README.txt",
             "AutoSurf site settings backup\n"
-            "Contains sensitive CookieCloud passwords, cookies and Web credentials.\n"
+            "Contains automation definitions but no browser profile or login data.\n"
             "Restore this ZIP only through AutoSurf's Site Settings page.\n",
         )
     filename = f"autosurf-site-settings-{utc_now():%Y%m%d-%H%M%S}.zip"
@@ -642,39 +586,13 @@ async def restore_site_settings(request: Request) -> dict[str, Any]:
             if archive.getinfo("site-settings.json").file_size > 20 * 1024 * 1024:
                 raise ValueError("站点设置文件过大")
             payload = json.loads(archive.read("site-settings.json"))
-        credentials, automations, sources = _validated_site_settings_backup(
-            payload, request.app.state.registry
-        )
+        automations = _validated_site_settings_backup(payload, request.app.state.registry)
     except (ValueError, KeyError, TypeError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
         raise HTTPException(status_code=422, detail=f"无法恢复站点设置：{exc}") from exc
 
-    secrets_box = request.app.state.credentials.secrets
     with request.app.state.sessions.begin() as session:
         session.execute(delete(ExecutionRecord))
         session.execute(delete(AutomationRecord))
-        session.execute(delete(CredentialRecord))
-        session.execute(delete(CookieCloudBlob))
-        session.execute(delete(CookieCloudSource))
-        for item in credentials:
-            session.add(CredentialRecord(
-                id=item["id"],
-                name=item["name"],
-                provider=item["provider"],
-                domain=item["domain"],
-                encrypted_payload=secrets_box.encrypt_json(item["payload"]),
-                version=item["version"],
-                updated_at=item["updated_at"],
-            ))
-        session.flush()
-        for item in sources:
-            session.add(CookieCloudSource(
-                uuid=item["uuid"],
-                encrypted_password=secrets_box.encrypt_json(item["password"])
-                if item["password"] is not None else "",
-                auto_import=item["auto_import"],
-                last_import_at=None,
-                last_error=None,
-            ))
         for item in automations:
             session.add(AutomationRecord(
                 id=item["id"],
@@ -684,52 +602,22 @@ async def restore_site_settings(request: Request) -> dict[str, Any]:
                 interval_seconds=item["interval_seconds"],
                 next_run_at=item["next_run_at"],
                 config_json=json.dumps(item["config"], ensure_ascii=False),
-                credential_id=item["credential_id"],
             ))
 
     return {
         "restored": True,
-        "credential_count": len(credentials),
         "automation_count": len(automations),
-        "cookiecloud_source_count": len(sources),
     }
 
 
 def _validated_site_settings_backup(
     payload: Any, registry: Any,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
         raise ValueError("不支持的备份版本")
-    credentials = payload.get("credentials")
     automations = payload.get("automations")
-    sources = payload.get("cookiecloud_sources")
-    if not all(isinstance(items, list) for items in (credentials, automations, sources)):
+    if not isinstance(automations, list):
         raise ValueError("备份数据结构不完整")
-
-    credential_ids: set[str] = set()
-    credential_names: set[str] = set()
-    checked_credentials = []
-    for raw_item in credentials:
-        if not isinstance(raw_item, dict):
-            raise ValueError("凭据数据无效")
-        item = {
-            "id": str(raw_item.get("id") or ""),
-            "name": str(raw_item.get("name") or ""),
-            "provider": str(raw_item.get("provider") or "manual"),
-            "domain": str(raw_item.get("domain") or "").lower().lstrip("."),
-            "payload": raw_item.get("payload"),
-            "version": int(raw_item.get("version") or 1),
-            "updated_at": _backup_datetime(raw_item.get("updated_at")),
-        }
-        if not item["id"] or len(item["id"]) > 36 or not item["name"] or len(item["name"]) > 128:
-            raise ValueError("凭据标识或名称无效")
-        if not item["domain"] or len(item["domain"]) > 255 or item["version"] < 1:
-            raise ValueError("凭据域名或版本无效")
-        if item["id"] in credential_ids or item["name"] in credential_names:
-            raise ValueError("备份中存在重复凭据")
-        credential_ids.add(item["id"])
-        credential_names.add(item["name"])
-        checked_credentials.append(item)
 
     automation_ids: set[str] = set()
     checked_automations = []
@@ -740,7 +628,6 @@ def _validated_site_settings_backup(
         registry.get(handler_type)
         interval_seconds = int(raw_item.get("interval_seconds") or 0)
         config = raw_item.get("config")
-        credential_id = raw_item.get("credential_id")
         item = {
             "id": str(raw_item.get("id") or ""),
             "name": str(raw_item.get("name") or ""),
@@ -749,7 +636,6 @@ def _validated_site_settings_backup(
             "interval_seconds": interval_seconds,
             "next_run_at": _backup_datetime(raw_item.get("next_run_at")),
             "config": config,
-            "credential_id": str(credential_id) if credential_id is not None else None,
         }
         if not item["id"] or len(item["id"]) > 36 or item["id"] in automation_ids:
             raise ValueError("周期任务标识无效或重复")
@@ -757,29 +643,9 @@ def _validated_site_settings_backup(
             raise ValueError("周期任务名称无效")
         if interval_seconds < 60 or interval_seconds > 31_536_000 or not isinstance(config, dict):
             raise ValueError("周期任务配置无效")
-        if item["credential_id"] and item["credential_id"] not in credential_ids:
-            raise ValueError("周期任务引用了不存在的凭据")
         automation_ids.add(item["id"])
         checked_automations.append(item)
-
-    source_ids: set[str] = set()
-    checked_sources = []
-    for raw_item in sources:
-        if not isinstance(raw_item, dict):
-            raise ValueError("CookieCloud 配置无效")
-        uuid = str(raw_item.get("uuid") or "")
-        password = raw_item.get("password")
-        if not uuid or len(uuid) > 128 or uuid in source_ids:
-            raise ValueError("CookieCloud UUID 无效或重复")
-        if password is not None and (not isinstance(password, str) or len(password) > 1024):
-            raise ValueError("CookieCloud 密码无效")
-        source_ids.add(uuid)
-        checked_sources.append({
-            "uuid": uuid,
-            "password": password,
-            "auto_import": bool(raw_item.get("auto_import", True)),
-        })
-    return checked_credentials, checked_automations, checked_sources
+    return checked_automations
 
 
 def _backup_datetime(value: Any) -> datetime:
@@ -796,24 +662,11 @@ def handlers(request: Request) -> dict[str, list[str]]:
     return {"items": request.app.state.registry.types()}
 
 
-@router.post("/credentials", status_code=201)
-def upsert_credential(data: CredentialInput, request: Request) -> dict[str, Any]:
-    record = request.app.state.credentials.upsert(data.name, data.domain, data.cookies)
-    return credential_view(record)
-
-
-@router.get("/credentials")
-def list_credentials(request: Request) -> dict[str, Any]:
-    with request.app.state.sessions() as session:
-        records = session.scalars(select(CredentialRecord).order_by(CredentialRecord.name)).all()
-        return {"items": [credential_view(item) for item in records]}
-
-
 @router.post("/automations", status_code=201)
 def create_automation(data: AutomationInput, request: Request) -> dict[str, Any]:
     try:
         record = request.app.state.automations.create(data.name, data.handler_type, data.interval_seconds,
-                                                      data.config, data.credential_id)
+                                                      data.config)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return automation_view(record)
@@ -923,19 +776,11 @@ def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> 
     method = data.method.strip().upper()
     if method not in {"GET", "POST"}:
         raise HTTPException(status_code=422, detail="HTTP 方法仅支持 GET 或 POST")
-    credential = None
-    with request.app.state.sessions() as session:
-        if data.credential_id:
-            credential = session.get(CredentialRecord, data.credential_id)
-            if credential is None:
-                raise HTTPException(status_code=422, detail="所选站点凭据不存在")
-            _validate_site_url(data.url, credential.domain)
-        else:
-            _validate_site_url(data.url)
+    _validate_site_url(data.url)
     if data.template_key == "nodeseek" and (
-        credential is None or credential.provider != "cookiecloud"
+        (urlparse(data.url).hostname or "").lower() not in {"nodeseek.com", "www.nodeseek.com"}
     ):
-        raise HTTPException(status_code=422, detail="NodeSeek 周期签到需要选择 CookieCloud 凭据")
+        raise HTTPException(status_code=422, detail="NodeSeek 模板必须使用 NodeSeek 站点地址")
     if bool(data.click_role) != bool(data.click_name):
         raise HTTPException(status_code=422, detail="按按钮文字点击时必须同时填写角色和名称")
 
@@ -962,7 +807,7 @@ def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> 
     handler_type, config = apply_periodic_template(config, handler_type)
     try:
         record = request.app.state.automations.create(
-            data.name, handler_type, data.interval_hours * 3600, config, data.credential_id,
+            data.name, handler_type, data.interval_hours * 3600, config,
             next_run_at=next_signin_run_at(),
         )
     except ValueError as exc:
@@ -1001,16 +846,12 @@ def list_periodic_signin_candidates(request: Request) -> dict[str, Any]:
 def collect_periodic_signin_sites(
     data: PeriodicSignInCollectInput, request: Request,
 ) -> dict[str, Any]:
-    credential_ids = list(dict.fromkeys(data.credential_ids))
+    site_keys = list(dict.fromkeys(data.site_keys))
     candidate_items = _periodic_signin_candidates(request)
-    candidates = {
-        credential_id: item
-        for item in candidate_items
-        for credential_id in item["credential_ids"]
-    }
-    selected = [candidates.get(credential_id) for credential_id in credential_ids]
+    candidates = {item["site_key"]: item for item in candidate_items}
+    selected = [candidates.get(site_key) for site_key in site_keys]
     if any(item is None for item in selected):
-        raise HTTPException(status_code=422, detail="所选凭据中包含未识别的周期站点")
+        raise HTTPException(status_code=422, detail="所选项目中包含未知周期站点")
 
     requested: list[dict[str, Any]] = []
     selected_keys: set[str] = set()
@@ -1041,7 +882,7 @@ def collect_periodic_signin_sites(
         try:
             record = request.app.state.automations.create(
                 candidate["name"], handler_type, data.interval_hours * 3600, config,
-                candidate["credential"]["id"], next_run_at=next_signin_run_at(),
+                next_run_at=next_signin_run_at(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1054,7 +895,7 @@ def collect_periodic_signin_sites(
         return {
             "created": [_periodic_signin_site_view(record, None) for record in records],
             "skipped": [{
-                "credential_id": item["credential"]["id"],
+                "site_key": item["site_key"],
                 "automation_id": item["automation_id"],
                 "reason": "already_configured",
             } for item in skipped],
@@ -1123,22 +964,14 @@ def list_periodic_signin_executions(request: Request, limit: int = 50) -> dict[s
 
 @router.post("/pt-signin/sites", status_code=201)
 def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, Any]:
-    with request.app.state.sessions() as session:
-        credential = session.get(CredentialRecord, data.credential_id)
-        if credential is None or credential.provider not in {"cookiecloud", "web_storage"}:
-            raise HTTPException(status_code=422, detail="请选择受支持的站点凭据")
-        _validate_pt_url(data.url, credential.domain)
-        credential_domain = credential.domain
-        try:
-            cookie_names = set(request.app.state.credentials.cookies_for(credential))
-        except ValueError:
-            cookie_names = set()
-        discovery = discover_pt_site(credential.domain, cookie_names)
-        sign_in_supported = discovery.sign_in_supported if discovery else True
-        profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
+    _validate_pt_url(data.url)
+    hostname = (urlparse(data.url).hostname or "").lower()
+    discovery = discover_pt_site(hostname, set())
+    sign_in_supported = discovery.sign_in_supported if discovery else True
+    profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
     config = {
         "url": data.url,
-        "credential_domain": credential_domain,
+        "site_domain": discovery.site_key if discovery else hostname,
         "timeout_seconds": data.timeout_seconds,
         "random_delay_minutes": data.random_delay_minutes,
         "retry_interval_minutes": data.retry_interval_hours * 60,
@@ -1159,7 +992,7 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
     }
     try:
         record = request.app.state.automations.create(
-            data.name, "pt_signin", data.interval_hours * 3600, config, data.credential_id,
+            data.name, "pt_signin", data.interval_hours * 3600, config,
             next_run_at=next_signin_run_at(),
         )
     except ValueError as exc:
@@ -1192,16 +1025,12 @@ def list_pt_signin_candidates(request: Request, include_unknown: bool = True) ->
 
 @router.post("/pt-signin/sites/collect", status_code=201)
 def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dict[str, Any]:
-    credential_ids = list(dict.fromkeys(data.credential_ids))
+    site_keys = list(dict.fromkeys(data.site_keys))
     candidate_items = _pt_signin_candidates(request, True)
-    candidates = {
-        credential_id: item
-        for item in candidate_items
-        for credential_id in item.get("credential_ids", [item["credential"]["id"]])
-    }
-    selected = [candidates.get(credential_id) for credential_id in credential_ids]
+    candidates = {item["site_key"]: item for item in candidate_items}
+    selected = [candidates.get(site_key) for site_key in site_keys]
     if any(item is None or not item["recognized"] for item in selected):
-        raise HTTPException(status_code=422, detail="所选凭据中包含未识别的 PT 站点")
+        raise HTTPException(status_code=422, detail="所选项目中包含未识别的 PT 站点")
     requested = []
     selected_site_keys: set[str] = set()
     for item in selected:
@@ -1221,7 +1050,7 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
             continue
         config = {
             "url": candidate["url"],
-            "credential_domain": candidate["credential"]["domain"],
+            "site_domain": candidate["site_key"],
             "timeout_seconds": data.timeout_seconds,
             "random_delay_minutes": data.random_delay_minutes,
             "retry_interval_minutes": data.retry_interval_hours * 60,
@@ -1244,7 +1073,7 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
         try:
             record = request.app.state.automations.create(
                 candidate["name"], "pt_signin", data.interval_hours * 3600, config,
-                candidate["credential"]["id"], next_run_at=next_signin_run_at(),
+                next_run_at=next_signin_run_at(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1257,7 +1086,7 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
         return {
             "created": [_pt_signin_site_view(record, None) for record in records],
             "skipped": [{
-                "credential_id": item["credential"]["id"],
+                "site_key": item["site_key"],
                 "automation_id": item["automation_id"],
                 "reason": "already_configured",
             } for item in skipped],
@@ -1388,7 +1217,7 @@ def list_pt_site_stats(request: Request) -> dict[str, Any]:
             items.append({
                 "automation_id": site.id,
                 "name": site.name,
-                "domain": site.credential.domain if site.credential else None,
+                "domain": str(config.get("site_domain") or "") or None,
                 "profile_refresh_enabled": bool(config.get("profile_refresh_enabled", False)),
                 "updated_at": updated_at,
                 "stats": stats,
@@ -1487,7 +1316,7 @@ def pt_signin_history(
             "items": [{
                 "automation_id": site.id,
                 "name": site.name,
-                "domain": site.credential.domain if site.credential else None,
+                "domain": str(json.loads(site.config_json).get("site_domain") or "") or None,
                 "url": json.loads(site.config_json).get("url"),
                 "enabled": site.enabled,
                 "history_action": history_actions[site.id],
@@ -1499,27 +1328,18 @@ def pt_signin_history(
         }
 
 
-def _validate_site_url(url: str, credential_domain: str | None = None) -> None:
+def _validate_site_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise HTTPException(status_code=422, detail="签到地址必须是有效的 HTTP(S) URL")
-    if credential_domain is None:
-        return
-    hostname = parsed.hostname.lower().rstrip(".")
-    domain = credential_domain.lower().lstrip(".").rstrip(".")
-    if hostname != domain and not hostname.endswith(f".{domain}"):
-        raise HTTPException(status_code=422, detail="签到地址必须属于所选凭据域名")
 
 
-def _validate_pt_url(url: str, credential_domain: str) -> None:
-    _validate_site_url(url, credential_domain)
+def _validate_pt_url(url: str) -> None:
+    _validate_site_url(url)
 
 
 def _periodic_signin_candidates(request: Request) -> list[dict[str, Any]]:
     with request.app.state.sessions() as session:
-        credentials = session.scalars(select(CredentialRecord).where(
-            CredentialRecord.provider == "cookiecloud"
-        ).order_by(CredentialRecord.domain, CredentialRecord.name)).all()
         automations = session.scalars(select(AutomationRecord).where(
             AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
         )).all()
@@ -1530,133 +1350,67 @@ def _periodic_signin_candidates(request: Request) -> list[dict[str, Any]]:
                 if template_key:
                     configured.setdefault(template_key, automation.id)
 
-        grouped: dict[str, dict[str, Any]] = {}
-        for credential in credentials:
-            template = discover_periodic_template(credential.domain)
-            if template is None:
-                continue
+        items: list[dict[str, Any]] = []
+        for template in PERIODIC_SITE_TEMPLATES:
             handler_type, config = apply_periodic_template({"template_key": template.key})
-            item = {
-                "credential": credential_view(credential),
-                "credential_ids": [credential.id],
+            items.append({
                 "template_key": template.key,
                 "site_key": template.key,
                 "name": template.name,
                 "url": config["url"],
-                "site_url": config.get("site_url") or config["url"],
+                "site_url": config["url"],
                 "handler_type": handler_type,
                 "reason": "site_template",
                 "supported": True,
                 "configured": template.key in configured,
                 "automation_id": configured.get(template.key),
-                "_score": (
-                    credential.domain.lower().startswith("www."), credential.updated_at,
-                ),
-            }
-            existing = grouped.get(template.key)
-            if existing is None:
-                grouped[template.key] = item
-            elif item["_score"] > existing["_score"]:
-                item["credential_ids"] = [credential.id, *existing["credential_ids"]]
-                grouped[template.key] = item
-            else:
-                existing["credential_ids"].append(credential.id)
-
-    items = list(grouped.values())
-    for item in items:
-        item.pop("_score", None)
+            })
     return sorted(items, key=lambda item: item["name"].casefold())
 
 
 def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[str, Any]]:
+    del include_unknown
     with request.app.state.sessions() as session:
-        credentials = session.scalars(select(CredentialRecord).where(
-            CredentialRecord.provider.in_(["cookiecloud", "web_storage"])
-        ).order_by(CredentialRecord.domain, CredentialRecord.name)).all()
         automations = session.scalars(select(AutomationRecord).where(
             AutomationRecord.handler_type == "pt_signin"
         ).order_by(AutomationRecord.name)).all()
-        configured = {
-            record.credential_id: record.id for record in automations if record.credential_id
-        }
-        grouped: dict[str, dict[str, Any]] = {}
-        unknown_items: list[dict[str, Any]] = []
-        for credential in credentials:
-            if is_ignored_pt_domain(credential.domain):
+        configured: dict[str, str] = {}
+        for record in automations:
+            with suppress(TypeError, ValueError):
+                config = json.loads(record.config_json)
+                site_key = str(config.get("site_domain") or "").lower()
+                if not site_key:
+                    site_key = (urlparse(str(config.get("url") or "")).hostname or "").lower()
+                if site_key:
+                    configured.setdefault(site_key, record.id)
+
+        items: list[dict[str, Any]] = []
+        for definition in PT_SITE_CATALOG:
+            if is_ignored_pt_domain(definition.domain):
                 continue
-            try:
-                cookie_names = set(request.app.state.credentials.cookies_for(credential))
-            except ValueError:
-                cookie_names = set()
-            discovery = discover_pt_site(credential.domain, cookie_names)
-            if discovery is None and not include_unknown:
+            discovery = discover_pt_site(definition.domain, set())
+            if discovery is None:
                 continue
-            automation_id = configured.get(credential.id)
-            item = {
-                "credential": {
-                    "id": credential.id,
-                    "name": credential.name,
-                    "domain": credential.domain,
-                    "provider": credential.provider,
-                    "version": credential.version,
-                    "updated_at": credential.updated_at,
-                },
-                "credential_ids": [credential.id],
-                "site_key": discovery.site_key if discovery else credential.domain,
-                "name": discovery.name if discovery else credential.domain,
-                "url": discovery.url if discovery else f"https://{credential.domain}/attendance.php",
-                "recognized": discovery is not None,
-                "reason": discovery.reason if discovery else "unknown",
-                "strategy": discovery.strategy if discovery else None,
-                "profile_url": discovery.profile_url if discovery else None,
-                "supported": discovery.supported if discovery else False,
-                "sign_in_supported": discovery.sign_in_supported if discovery else False,
-                "profile_refresh_supported": discovery.profile_refresh_supported if discovery else False,
-                "default_sign_in_enabled": discovery.default_sign_in_enabled if discovery else False,
-                "default_profile_refresh_enabled": (
-                    discovery.default_profile_refresh_enabled if discovery else False
-                ),
+            automation_id = configured.get(discovery.site_key)
+            items.append({
+                "site_key": discovery.site_key,
+                "domain": discovery.site_key,
+                "name": discovery.name,
+                "url": discovery.url,
+                "recognized": True,
+                "reason": discovery.reason,
+                "strategy": discovery.strategy,
+                "profile_url": discovery.profile_url,
+                "supported": discovery.supported,
+                "sign_in_supported": discovery.sign_in_supported,
+                "profile_refresh_supported": discovery.profile_refresh_supported,
+                "default_sign_in_enabled": discovery.default_sign_in_enabled,
+                "default_profile_refresh_enabled": discovery.default_profile_refresh_enabled,
                 "configured": automation_id is not None,
                 "automation_id": automation_id,
-                "_score": (
-                    discovery is not None
-                    and discovery.strategy in {
-                        "web_storage_browser", "web_storage_profile_refresh_only",
-                    }
-                    and credential.provider == "web_storage",
-                    len({name.lower() for name in cookie_names}.intersection(PT_COOKIE_MARKERS)),
-                    len(cookie_names),
-                    credential.domain.startswith("www."),
-                    credential.updated_at,
-                ),
-            }
-            if discovery is None:
-                unknown_items.append(item)
-                continue
-
-            existing = grouped.get(discovery.site_key)
-            if existing is None:
-                grouped[discovery.site_key] = item
-                continue
-            configured_id = existing["automation_id"] or automation_id
-            if item["_score"] > existing["_score"]:
-                item["credential_ids"] = list(dict.fromkeys(
-                    [item["credential"]["id"], *existing["credential_ids"]]
-                ))
-                item["configured"] = configured_id is not None
-                item["automation_id"] = configured_id
-                grouped[discovery.site_key] = item
-            else:
-                existing["credential_ids"].append(credential.id)
-                existing["configured"] = configured_id is not None
-                existing["automation_id"] = configured_id
-
-        items = [*grouped.values(), *unknown_items]
-        for item in items:
-            item.pop("_score", None)
+            })
     return sorted(items, key=lambda item: (
-        not item["recognized"], not item["supported"], item["name"].casefold(),
-        item["credential"]["domain"],
+        not item["supported"], item["name"].casefold(), item["domain"],
     ))
 
 
@@ -1677,7 +1431,6 @@ def _periodic_signin_site_view(
 ) -> dict[str, Any]:
     record = _require_periodic_automation(record)
     config = json.loads(record.config_json)
-    credential = record.credential
     return {
         "id": record.id,
         "name": record.name,
@@ -1688,13 +1441,14 @@ def _periodic_signin_site_view(
         "url": config.get("url"),
         "site_url": config.get("site_url") or config.get("url"),
         "template_key": config.get("template_key"),
-        "credential": credential_view(credential) if credential else None,
+        "domain": (urlparse(str(config.get("url") or "")).hostname or "").lower() or None,
         "config": {
             "timeout_seconds": config.get("timeout_seconds", 60),
             "random_delay_minutes": config.get("random_delay_minutes", 30),
             "retry_interval_hours": max(int(config.get("retry_interval_minutes", 120)) // 60, 1),
             "max_retries": config.get("max_retries", 5),
-            "method": config.get("method", "GET"),
+            "method": (config.get("browser_request") or {}).get("method") or config.get("method", "GET"),
+            "browser_request": config.get("browser_request"),
             "wait_for_selector": config.get("wait_for_selector"),
             "click_selector": config.get("click_selector"),
             "click_role": config.get("click_role"),
@@ -1715,8 +1469,7 @@ def _pt_signin_site_view(record: AutomationRecord | None,
     record = _require_pt_automation(record)
     config = json.loads(record.config_json)
     sign_in_supported, profile_refresh_supported = _pt_site_capabilities(record, config)
-    credential = record.credential
-    discovery = _pt_discovery_for_credential(credential)
+    discovery = _pt_discovery_for_config(config)
     legacy_profile_refresh_default = bool(
         discovery
         and discovery.default_profile_refresh_enabled
@@ -1729,12 +1482,7 @@ def _pt_signin_site_view(record: AutomationRecord | None,
         "interval_hours": record.interval_seconds // 3600,
         "next_run_at": record.next_run_at,
         "url": config.get("url"),
-        "credential": {
-            "id": credential.id,
-            "name": credential.name,
-            "domain": credential.domain,
-            "version": credential.version,
-        } if credential else None,
+        "domain": str(config.get("site_domain") or "") or None,
         "config": {
             "timeout_seconds": config.get("timeout_seconds", 60),
             "random_delay_minutes": config.get("random_delay_minutes", 30),
@@ -1760,8 +1508,8 @@ def _pt_signin_site_view(record: AutomationRecord | None,
 
 
 def _pt_site_capabilities(record: AutomationRecord, config: dict[str, Any]) -> tuple[bool, bool]:
-    credential = record.credential
-    discovery = _pt_discovery_for_credential(credential)
+    del record
+    discovery = _pt_discovery_for_config(config)
     catalog_sign_in_supported = discovery.sign_in_supported if discovery else True
     catalog_profile_refresh_supported = discovery.profile_refresh_supported if discovery else True
     return (
@@ -1774,18 +1522,18 @@ def _pt_site_capabilities(record: AutomationRecord, config: dict[str, Any]) -> t
     )
 
 
-def _pt_discovery_for_credential(credential: CredentialRecord | None):
-    if credential is None:
-        return None
-    markers = {"auth", "token"} if credential.provider == "web_storage" else set()
-    return discover_pt_site(credential.domain, markers)
+def _pt_discovery_for_config(config: dict[str, Any]):
+    domain = str(config.get("site_domain") or "").lower()
+    if not domain:
+        domain = (urlparse(str(config.get("url") or "")).hostname or "").lower()
+    return discover_pt_site(domain, set()) if domain else None
 
 
 def _pt_execution_view(record: ExecutionRecord) -> dict[str, Any]:
     result = execution_view(record)
     result.update({
         "automation_name": record.automation.name,
-        "domain": record.automation.credential.domain if record.automation.credential else None,
+        "domain": str(json.loads(record.automation.config_json).get("site_domain") or "") or None,
     })
     return result
 
@@ -1796,7 +1544,7 @@ def _periodic_execution_view(record: ExecutionRecord) -> dict[str, Any]:
     result.update({
         "automation_name": record.automation.name,
         "url": config.get("site_url") or config.get("url"),
-        "domain": record.automation.credential.domain if record.automation.credential else None,
+        "domain": (urlparse(str(config.get("url") or "")).hostname or "").lower() or None,
     })
     return result
 
@@ -1862,91 +1610,10 @@ def _profile_refresh_status_from_result(
     return None
 
 
-@router.put("/cookiecloud/sources/{uuid}")
-def configure_cookiecloud(uuid: str, data: CookieCloudSourceInput, request: Request) -> dict[str, Any]:
-    if uuid != data.uuid:
-        raise HTTPException(status_code=422, detail="path UUID and body UUID must match")
-    try:
-        source = request.app.state.cookiecloud.configure(uuid, data.password, data.auto_import)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _cookiecloud_source_view(request, source.uuid)
-
-
-@router.get("/cookiecloud/sources")
-def list_cookiecloud_sources(request: Request) -> dict[str, Any]:
-    with request.app.state.sessions() as session:
-        sources = {item.uuid: item for item in session.scalars(
-            select(CookieCloudSource).order_by(CookieCloudSource.uuid)
-        ).all()}
-        blobs = {item.uuid: item for item in session.scalars(
-            select(CookieCloudBlob).order_by(CookieCloudBlob.uuid)
-        ).all()}
-        credentials = session.scalars(
-            select(CredentialRecord).where(CredentialRecord.provider == "cookiecloud")
-        ).all()
-
-        items = []
-        for uuid in sorted(sources.keys() | blobs.keys()):
-            source = sources.get(uuid)
-            blob = blobs.get(uuid)
-            prefix = f"cookiecloud:{uuid}:"
-            items.append({
-                "uuid": uuid,
-                "configured": source is not None,
-                "password_configured": bool(source and source.encrypted_password),
-                "auto_import": bool(source and source.auto_import),
-                "last_import_at": source.last_import_at if source else None,
-                "last_error": source.last_error if source else None,
-                "blob_updated_at": blob.updated_at if blob else None,
-                "credential_count": sum(item.name.startswith(prefix) for item in credentials),
-            })
-        return {"items": items}
-
-
-@router.patch("/cookiecloud/sources/{uuid}/settings")
-def update_cookiecloud_source_settings(uuid: str, data: CookieCloudSourceSettingsInput,
-                                       request: Request) -> dict[str, Any]:
-    try:
-        request.app.state.cookiecloud.set_auto_import(uuid, data.auto_import)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _cookiecloud_source_view(request, uuid)
-
-
-@router.post("/cookiecloud/sources/{uuid}/password/reveal")
-def reveal_cookiecloud_password(uuid: str, request: Request, response: Response) -> dict[str, str]:
-    try:
-        password = request.app.state.cookiecloud.password_for(uuid)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    return {"password": password}
-
-
-@router.post("/cookiecloud/sources/{uuid}/import")
-def import_cookiecloud(uuid: str, data: CookieCloudImportInput, request: Request) -> dict[str, Any]:
-    try:
-        return request.app.state.cookiecloud.import_credentials(uuid, data.password)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-def _cookiecloud_source_view(request: Request, uuid: str) -> dict[str, Any]:
-    items = list_cookiecloud_sources(request)["items"]
-    return next(item for item in items if item["uuid"] == uuid)
-
-
-def credential_view(record: CredentialRecord) -> dict[str, Any]:
-    return {"id": record.id, "name": record.name, "domain": record.domain, "provider": record.provider,
-            "version": record.version, "updated_at": record.updated_at}
-
-
 def automation_view(record: AutomationRecord) -> dict[str, Any]:
     return {"id": record.id, "name": record.name, "handler_type": record.handler_type,
             "enabled": record.enabled, "interval_seconds": record.interval_seconds,
-            "next_run_at": record.next_run_at, "credential_id": record.credential_id,
+            "next_run_at": record.next_run_at,
             "config": json.loads(record.config_json)}
 
 
@@ -2028,158 +1695,3 @@ def _sanitize_debug_text(value: Any, limit: int = 8000) -> str:
         lambda match: f"{match.group(1)}{match.group(2)}[已脱敏]", str(value),
     )
     return text if len(text) <= limit else f"{text[:limit]}\n...[内容已截断]"
-
-
-@router.get("/web-credentials/rousi")
-def rousi_web_credential_status(request: Request) -> dict[str, Any]:
-    return request.app.state.web_credentials.status("rousi")
-
-
-@router.get("/web-credentials")
-def web_credential_statuses(request: Request) -> dict[str, Any]:
-    return request.app.state.web_credentials.statuses()
-
-
-@router.post("/web-credentials/rousi/userscript")
-def create_rousi_userscript(data: WebCredentialScriptInput, request: Request) -> Response:
-    base_url = _web_credential_base_url(data.base_url)
-    configurations: dict[str, tuple[str, str]] = {}
-    for source_key in WEB_CREDENTIAL_SCRIPT_SOURCES:
-        upload_key = secrets.token_urlsafe(32)
-        request.app.state.web_credentials.rotate_upload_key(source_key, upload_key)
-        configurations[source_key] = (
-            f"{base_url}/api/web-credentials/{source_key}/values", upload_key,
-        )
-    script = build_web_credential_userscript_bundle(configurations)
-    return Response(
-        script,
-        media_type="text/javascript; charset=utf-8",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": 'attachment; filename="autosurf-web-credential-sync.user.js"',
-        },
-    )
-
-
-@router.post("/web-credentials/userscript")
-def create_web_credential_userscript(data: WebCredentialScriptInput, request: Request) -> Response:
-    base_url = _web_credential_base_url(data.base_url)
-    configurations: dict[str, tuple[str, str]] = {}
-    for source_key in WEB_CREDENTIAL_SCRIPT_SOURCES:
-        upload_key = secrets.token_urlsafe(32)
-        request.app.state.web_credentials.rotate_upload_key(source_key, upload_key)
-        configurations[source_key] = (
-            f"{base_url}/api/web-credentials/{source_key}/values", upload_key,
-        )
-    script = build_web_credential_userscript_bundle(configurations)
-    return Response(
-        script,
-        media_type="text/javascript; charset=utf-8",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": 'attachment; filename="autosurf-web-credential-sync.user.js"',
-        },
-    )
-
-
-@router.delete("/web-credentials/rousi/token", status_code=204)
-def clear_rousi_web_credential(request: Request) -> None:
-    request.app.state.web_credentials.clear_token()
-
-
-@router.delete("/web-credentials/{source_key}/values", status_code=204)
-def clear_web_credential(source_key: str, request: Request) -> None:
-    try:
-        request.app.state.web_credentials.clear_values(source_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="unknown web credential source") from exc
-
-
-@web_credential_router.post("/rousi/token")
-def upload_rousi_web_credential(
-    data: WebCredentialUploadInput,
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    if data.token is None:
-        raise HTTPException(status_code=422, detail="token is required")
-    prefix = "Bearer "
-    if not authorization or not authorization.startswith(prefix):
-        raise HTTPException(status_code=401, detail="invalid upload key")
-    try:
-        record, changed = request.app.state.web_credentials.update_token(
-            authorization[len(prefix):], data.token,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=401, detail="invalid upload key") from exc
-    return {"status": "ok", "changed": changed, "updated_at": record.updated_at}
-
-
-@web_credential_router.post("/{source_key}/values")
-def upload_web_credential(
-    source_key: str,
-    data: WebCredentialUploadInput,
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    prefix = "Bearer "
-    if not authorization or not authorization.startswith(prefix):
-        raise HTTPException(status_code=401, detail="invalid upload key")
-    try:
-        record, changed = request.app.state.web_credentials.update_values(
-            source_key, authorization[len(prefix):], data.values,
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=401, detail="invalid upload key") from exc
-    except ValueError as exc:
-        detail = str(exc)
-        status_code = 404 if detail == "unknown web credential source" else 422
-        raise HTTPException(status_code=status_code, detail=detail) from exc
-    return {"status": "ok", "changed": changed, "updated_at": record.updated_at}
-
-
-def _web_credential_base_url(value: str) -> str:
-    parsed = urlparse(value.strip())
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise HTTPException(status_code=422, detail="上送地址必须是 HTTP(S) 服务根地址")
-    return f"{parsed.scheme}://{parsed.netloc}"
-
-
-cookiecloud_router = APIRouter(prefix="/cookiecloud")
-
-
-@cookiecloud_router.get("/")
-def cookiecloud_root() -> dict[str, str]:
-    return {"message": "CookieCloud endpoint is ready"}
-
-
-@cookiecloud_router.post("/")
-@cookiecloud_router.post("/update")
-def cookiecloud_update(payload: dict[str, Any], request: Request) -> dict[str, Any]:
-    try:
-        uuid = request.app.state.cookiecloud.put(payload, request.headers.get("user-agent"))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    imported = None
-    try:
-        imported = request.app.state.cookiecloud.auto_import_if_configured(uuid)
-    except ValueError:
-        pass
-    return {"action": "done", "uuid": uuid, "imported": len(imported["credentials"]) if imported else 0}
-
-
-@cookiecloud_router.get("/get/{uuid}")
-@cookiecloud_router.post("/get/{uuid}")
-def cookiecloud_get(uuid: str, request: Request) -> dict[str, Any]:
-    payload = request.app.state.cookiecloud.get(uuid)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="CookieCloud key not found")
-    return payload

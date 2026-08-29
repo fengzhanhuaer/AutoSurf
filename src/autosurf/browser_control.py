@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import threading
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -14,8 +15,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from autosurf.automations.browser_session import (
     PersistentBrowserRuntime,
     PersistentBrowserSession,
-    browser_environment_bootstrap_required,
-    bootstrap_browser_environment,
     close_persistent_browser,
     connect_standalone_browser,
     launch_standalone_browser,
@@ -32,6 +31,9 @@ from autosurf.infrastructure.database import SystemSettingRecord
 REMOTE_DESKTOP_PREFIX = "/browser-control/remote"
 DEFAULT_SOCKET_PATH = Path("/tmp/autosurf-novnc.sock")
 VNC_LOOPBACK_PORT = 5900
+AUDIO_SAMPLE_RATE = 48_000
+AUDIO_CHANNELS = 2
+AUDIO_CHUNK_BYTES = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * 2 // 10
 RESTART_DELAY_SECONDS = 3
 STARTUP_TIMEOUT_SECONDS = 30
 BROWSER_RESOLUTION_SETTING_KEY = "browser.display_resolution"
@@ -113,7 +115,6 @@ class BrowserControlService:
         browser_closer: Callable[..., Any] = close_persistent_browser,
         process_factory: Callable[..., Any] = asyncio.create_subprocess_exec,
         socket_path: Path = DEFAULT_SOCKET_PATH,
-        credential_bootstrap: Callable[[], list[tuple[str, RunContext]]] | None = None,
         display_settings: BrowserDisplaySettings | None = None,
     ) -> None:
         self._playwright_factory = playwright_factory
@@ -122,7 +123,6 @@ class BrowserControlService:
         self._browser_closer = browser_closer
         self._process_factory = process_factory
         self._socket_path = socket_path
-        self._credential_bootstrap = credential_bootstrap or (lambda: [])
         self._display_settings = display_settings
         self._resolution = (
             display_settings.resolution
@@ -270,6 +270,12 @@ class BrowserControlService:
             ),
             "restart_count": self._restart_count,
             "stream_log": self._stream_log,
+            "audio_supported": shutil.which("parec") is not None,
+            "audio_format": {
+                "sample_rate": AUDIO_SAMPLE_RATE,
+                "channels": AUDIO_CHANNELS,
+                "sample_format": "s16le",
+            },
         }
 
     @asynccontextmanager
@@ -394,6 +400,45 @@ class BrowserControlService:
             with suppress(Exception):
                 await websocket.close()
 
+    async def stream_audio(self, websocket: Any) -> None:
+        parec = shutil.which("parec")
+        if parec is None:
+            await websocket.close(code=1013, reason="audio capture is unavailable")
+            return
+        source = os.environ.get("AUTOSURF_AUDIO_SOURCE", "autosurf.monitor")
+        await websocket.accept()
+        process = None
+        try:
+            process = await self._process_factory(
+                parec,
+                f"--device={source}",
+                "--format=s16le",
+                f"--rate={AUDIO_SAMPLE_RATE}",
+                f"--channels={AUDIO_CHANNELS}",
+                "--latency-msec=100",
+                "--raw",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            if process.stdout is None:
+                raise BrowserControlError("音频采集进程没有输出流")
+            while True:
+                chunk = await process.stdout.read(AUDIO_CHUNK_BYTES)
+                if not chunk:
+                    code = await process.wait()
+                    raise BrowserControlError(f"音频采集意外退出，状态码 {code}")
+                await websocket.send_bytes(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._record_error(exc)
+        finally:
+            if process is not None:
+                await _terminate_process(process)
+            with suppress(Exception):
+                await websocket.close()
+
     async def _supervise(self) -> None:
         initial_ready = self._initial_ready
         stop_event = self._stop_event
@@ -438,10 +483,6 @@ class BrowserControlService:
                 display_size=self._resolution,
                 process_factory=self._process_factory,
             )
-            sources = self._credential_bootstrap()
-            if browser_environment_bootstrap_required(runtime, sources):
-                async with self._connected_runtime(runtime) as connected:
-                    await bootstrap_browser_environment(connected, sources)
             if runtime.display is None:
                 raise BrowserControlError("完整浏览器控制需要 Docker 中的 Xvfb")
             self._runtime = runtime

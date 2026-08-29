@@ -6,7 +6,7 @@ from autosurf.domain.models import RunContext, RunOutcome
 
 
 @pytest.mark.asyncio
-async def test_http_signin_uses_cookiecloud_browser_user_agent(monkeypatch):
+async def test_http_signin_uses_configured_user_agent(monkeypatch):
     captured = {}
 
     class FakeClient:
@@ -37,12 +37,12 @@ async def test_http_signin_uses_cookiecloud_browser_user_agent(monkeypatch):
             "referer": "https://www.nodeseek.com/board",
             "json": {"random": False},
             "success_patterns": [r'"success"\s*:\s*true'],
+            "user_agent": "Configured-Chrome/151",
         },
-        cookies={"session": "secret"},
-        user_agent="Chrome-from-cookiecloud/151",
+        cookies={},
     ))
 
-    assert captured["headers"]["User-Agent"] == "Chrome-from-cookiecloud/151"
+    assert captured["headers"]["User-Agent"] == "Configured-Chrome/151"
     assert captured["headers"]["Origin"] == "https://www.nodeseek.com"
     assert captured["headers"]["Referer"] == "https://www.nodeseek.com/board"
     assert captured["method"] == "POST"

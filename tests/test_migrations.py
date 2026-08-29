@@ -37,15 +37,21 @@ def test_empty_database_upgrades_to_head(tmp_path):
     engine = create_engine(url)
     try:
         inspector = inspect(engine)
-        assert "cookiecloud_sources" in inspector.get_table_names()
-        assert "system_settings" in inspector.get_table_names()
-        assert "credential_payload" in {column["name"] for column in inspector.get_columns("executions")}
+        tables = set(inspector.get_table_names())
+        assert {"automations", "executions", "system_settings"}.issubset(tables)
+        assert not {"credentials", "cookiecloud_sources", "cookiecloud_blobs"} & tables
+        assert "credential_id" not in {
+            column["name"] for column in inspector.get_columns("automations")
+        }
+        execution_columns = {column["name"] for column in inspector.get_columns("executions")}
+        assert "credential_payload" not in execution_columns
+        assert "credential_version" not in execution_columns
         assert revision(url) == HEAD_REVISION
     finally:
         engine.dispose()
 
 
-def test_versioned_old_database_preserves_data(tmp_path):
+def test_versioned_old_database_removes_legacy_credentials(tmp_path):
     url = f"sqlite:///{(tmp_path / 'old.db').as_posix()}"
     config = migration_config(url)
     command.upgrade(config, INITIAL_REVISION)
@@ -61,8 +67,10 @@ def test_versioned_old_database_preserves_data(tmp_path):
 
     engine = create_engine(url)
     try:
-        with engine.connect() as connection:
-            assert connection.execute(text("SELECT name FROM credentials WHERE id='id-1'")).scalar_one() == "kept"
+        tables = set(inspect(engine).get_table_names())
+        assert "credentials" not in tables
+        assert "automations" in tables
+        assert "executions" in tables
         assert revision(url) == HEAD_REVISION
     finally:
         engine.dispose()
@@ -94,7 +102,9 @@ def test_unversioned_cookiecloud_database_upgrades_to_head(tmp_path):
 
     engine = create_engine(url)
     try:
-        assert "system_settings" in inspect(engine).get_table_names()
+        tables = set(inspect(engine).get_table_names())
+        assert "system_settings" in tables
+        assert not {"credentials", "cookiecloud_sources", "cookiecloud_blobs"} & tables
         assert revision(url) == HEAD_REVISION
     finally:
         engine.dispose()

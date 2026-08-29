@@ -18,12 +18,12 @@ PERIODIC_SITE_TEMPLATES = (
 
 NODESEEK_TEMPLATE_CONFIG: dict[str, Any] = {
     "template_key": "nodeseek",
-    "site_url": "https://www.nodeseek.com/board",
-    "url": "https://www.nodeseek.com/api/attendance?random=false",
-    "method": "POST",
-    "origin": "https://www.nodeseek.com",
-    "referer": "https://www.nodeseek.com/board",
-    "json": {"random": False},
+    "url": "https://www.nodeseek.com/board",
+    "browser_request": {
+        "url": "https://www.nodeseek.com/api/attendance?random=false",
+        "method": "POST",
+        "json": {"random": False},
+    },
     "wait_for_selector": None,
     "click_selector": None,
     "click_role": None,
@@ -48,4 +48,4 @@ def apply_periodic_template(
         return str(handler_type or config.get("handler_type") or "browser_signin"), config
     updated = dict(config)
     updated.update(NODESEEK_TEMPLATE_CONFIG)
-    return "http_signin", updated
+    return "browser_signin", updated

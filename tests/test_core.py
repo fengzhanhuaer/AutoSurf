@@ -9,8 +9,7 @@ from sqlalchemy import select
 
 from autosurf.config import Settings
 from autosurf.domain.models import ExecutionStatus, RunOutcome, RunResult, utc_now
-from autosurf.infrastructure.crypto import SecretBox
-from autosurf.infrastructure.database import AutomationRecord, CredentialRecord, ExecutionRecord
+from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
 from autosurf.main import create_app
 from autosurf.application.services import (
     reconcile_periodic_signin_templates,
@@ -28,29 +27,6 @@ def settings(tmp_path):
 def test_next_signin_run_uses_nine_am_taipei_anchor():
     assert next_signin_run_at(datetime(2026, 8, 20, 0, 30)) == datetime(2026, 8, 20, 1)
     assert next_signin_run_at(datetime(2026, 8, 20, 1)) == datetime(2026, 8, 21, 1)
-
-
-def test_browser_bootstrap_includes_cookie_and_web_storage_credentials(settings):
-    app = create_app(settings)
-    app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:tracker.example",
-        "tracker.example",
-        [{"name": "session", "value": "cookie-value", "domain": "tracker.example"}],
-    )
-    app.state.credentials.upsert_web_storage(
-        "web:kp.m-team.cc",
-        "kp.m-team.cc",
-        {"format": "web_storage_v1", "values": {"auth": "storage-value"}},
-    )
-
-    contexts = {
-        url: context for url, context in app.state.credentials.browser_bootstrap_contexts()
-    }
-
-    assert contexts["https://tracker.example/"].cookies == {"session": "cookie-value"}
-    assert contexts["https://tracker.example/"].browser_cookies is not None
-    assert contexts["https://kp.m-team.cc/"].cookies == {"auth": "storage-value"}
-    assert contexts["https://kp.m-team.cc/"].browser_cookies == []
 
 
 def test_browser_runtime_reports_configured_google_chrome(tmp_path, monkeypatch):
@@ -71,6 +47,7 @@ def test_browser_runtime_reports_configured_google_chrome(tmp_path, monkeypatch)
     assert runtime["installed"] is True
     assert runtime["browser_name"] == "Google Chrome"
     assert runtime["browser_version"] == "150.0.1.2"
+
 
 
 def test_reconcile_signin_schedules_preserves_execution_history(settings):
@@ -124,14 +101,8 @@ async def test_api_creates_and_runs_automation(settings):
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        assert (await client.get("/api/v1/credentials")).status_code == 401
-        credential = await client.post("/api/v1/credentials", auth=auth, json={
-            "name": "example", "domain": "example.test", "cookies": {"sid": "secret"}
-        })
-        assert credential.status_code == 201
         automation = await client.post("/api/v1/automations", auth=auth, json={
             "name": "test", "handler_type": "http_signin", "interval_seconds": 3600,
-            "credential_id": credential.json()["id"],
             "config": {"url": "https://example.test/checkin"},
         })
         assert automation.status_code == 201
@@ -142,16 +113,11 @@ async def test_api_creates_and_runs_automation(settings):
 @pytest.mark.asyncio
 async def test_periodic_signin_api_manages_nodeseek_task(settings):
     app = create_app(settings)
-    credential = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
-        [{"name": "session", "value": "secret", "domain": "www.nodeseek.com", "path": "/"}],
-    )
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
     payload = {
         "name": "NodeSeek",
         "handler_type": "browser_signin",
-        "credential_id": credential.id,
         "template_key": "nodeseek",
         "url": "https://www.nodeseek.com/board",
         "interval_hours": 24,
@@ -192,10 +158,10 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
     assert rejected.status_code == 422
     assert created.status_code == 201
     assert listed.json()["items"][0]["template_key"] == "nodeseek"
-    assert listed.json()["items"][0]["handler_type"] == "http_signin"
-    assert listed.json()["items"][0]["url"] == "https://www.nodeseek.com/api/attendance?random=false"
+    assert listed.json()["items"][0]["handler_type"] == "browser_signin"
+    assert listed.json()["items"][0]["url"] == "https://www.nodeseek.com/board"
     assert listed.json()["items"][0]["site_url"] == "https://www.nodeseek.com/board"
-    assert listed.json()["items"][0]["config"]["method"] == "POST"
+    assert listed.json()["items"][0]["config"]["browser_request"]["method"] == "POST"
     assert scheduled.json()["interval_hours"] == 12
     assert scheduled.json()["config"]["daily_start_time"] == "09:00"
     assert datetime.fromisoformat(scheduled.json()["next_run_at"]).hour == 1
@@ -207,27 +173,15 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
 @pytest.mark.asyncio
 async def test_periodic_candidates_collect_templates_and_expose_execution_history(settings):
     app = create_app(settings)
-    root = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:nodeseek.com", "nodeseek.com",
-        [{"name": "cf_clearance", "value": "cf", "domain": ".nodeseek.com", "path": "/"}],
-    )
-    www = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
-        [{"name": "session", "value": "secret", "domain": "www.nodeseek.com", "path": "/"}],
-    )
-    unknown = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:example.test", "example.test",
-        [{"name": "session", "value": "secret", "domain": "example.test", "path": "/"}],
-    )
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         candidates = await client.get("/api/v1/periodic-signin/candidates", auth=auth)
         rejected = await client.post("/api/v1/periodic-signin/sites/collect", auth=auth, json={
-            "credential_ids": [unknown.id],
+            "site_keys": ["unknown"],
         })
         collected = await client.post("/api/v1/periodic-signin/sites/collect", auth=auth, json={
-            "credential_ids": [root.id],
+            "site_keys": ["nodeseek"],
             "interval_hours": 12,
             "timeout_seconds": 45,
             "random_delay_minutes": 10,
@@ -245,44 +199,16 @@ async def test_periodic_candidates_collect_templates_and_expose_execution_histor
     assert candidates.status_code == 200
     assert len(candidates.json()["items"]) == 1
     assert candidate["template_key"] == "nodeseek"
-    assert candidate["credential"]["id"] == www.id
-    assert set(candidate["credential_ids"]) == {root.id, www.id}
+    assert candidate["site_key"] == "nodeseek"
     assert candidate["configured"] is False
     assert rejected.status_code == 422
     assert collected.status_code == 201
-    assert site["handler_type"] == "http_signin"
+    assert site["handler_type"] == "browser_signin"
     assert site["interval_hours"] == 12
     assert queued.status_code == 202
     assert history.json()["items"][0]["automation_name"] == "NodeSeek"
     assert history.json()["items"][0]["domain"] == "www.nodeseek.com"
     assert configured.json()["items"][0]["configured"] is True
-
-
-def test_periodic_cookiecloud_snapshot_merges_root_and_www(settings):
-    app = create_app(settings)
-    app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:nodeseek.com", "nodeseek.com",
-        [{"name": "cf_clearance", "value": "cf", "domain": ".nodeseek.com", "path": "/"}],
-    )
-    login = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:www.nodeseek.com", "www.nodeseek.com",
-        [{"name": "session", "value": "login", "domain": "www.nodeseek.com", "path": "/"}],
-        user_agent="Chrome-from-cookiecloud/151",
-    )
-    automation = app.state.automations.create(
-        "NodeSeek", "browser_signin", 86400,
-        {"url": "https://www.nodeseek.com/board", "random_delay_minutes": 30}, login.id,
-    )
-
-    execution = app.state.queue.enqueue_now(automation.id)
-
-    with app.state.sessions() as session:
-        record = session.get(ExecutionRecord, execution.id)
-        cookies = app.state.credentials.cookies_from_payload(record.credential_payload)
-    assert cookies == {"cf_clearance": "cf", "session": "login"}
-    assert app.state.credentials.browser_user_agent_from_payload(
-        record.credential_payload
-    ) == "Chrome-from-cookiecloud/151"
 
 
 def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
@@ -301,9 +227,9 @@ def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
         migrated = session.get(AutomationRecord, nodeseek.id)
         untouched = session.get(AutomationRecord, custom.id)
         migrated_config = json.loads(migrated.config_json)
-        assert migrated.handler_type == "http_signin"
-        assert migrated_config["url"] == "https://www.nodeseek.com/api/attendance?random=false"
-        assert migrated_config["method"] == "POST"
+        assert migrated.handler_type == "browser_signin"
+        assert migrated_config["url"] == "https://www.nodeseek.com/board"
+        assert migrated_config["browser_request"]["method"] == "POST"
         assert untouched.handler_type == "http_signin"
         assert json.loads(untouched.config_json) == {"url": "https://example.test/checkin"}
 
@@ -311,17 +237,17 @@ def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
 @pytest.mark.asyncio
 async def test_site_settings_backup_and_restore_round_trip(settings):
     app = create_app(settings)
-    app.state.cookiecloud.configure("browser", "cloud-secret", True)
-    credential = app.state.credentials.upsert("saved", "example.test", {"sid": "secret"})
     automation = app.state.automations.create(
-        "saved-task", "http_signin", 3600, {"url": "https://example.test/checkin"}, credential.id,
+        "saved-task", "http_signin", 3600, {"url": "https://example.test/checkin"},
     )
     app.state.queue.enqueue_now(automation.id)
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         backup = await client.get("/api/v1/site-settings/backup", auth=auth)
-        app.state.credentials.upsert("extra", "extra.test", {"sid": "extra"})
+        app.state.automations.create(
+            "extra", "http_signin", 3600, {"url": "https://extra.test/checkin"},
+        )
         restored = await client.post(
             "/api/v1/site-settings/restore", auth=auth,
             content=backup.content, headers={"Content-Type": "application/zip"},
@@ -331,14 +257,12 @@ async def test_site_settings_backup_and_restore_round_trip(settings):
     assert backup.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(backup.content)) as archive:
         exported = json.loads(archive.read("site-settings.json"))
-    assert exported["credentials"][0]["payload"] == {"sid": "secret"}
-    assert exported["cookiecloud_sources"][0]["password"] == "cloud-secret"
+    assert exported["schema_version"] == 2
+    assert set(exported) == {"schema_version", "exported_at", "automations"}
     assert restored.json() == {
-        "restored": True, "credential_count": 1, "automation_count": 1,
-        "cookiecloud_source_count": 1,
+        "restored": True, "automation_count": 1,
     }
     with app.state.sessions() as session:
-        assert [item.name for item in session.scalars(select(CredentialRecord)).all()] == ["saved"]
         assert [item.name for item in session.scalars(select(AutomationRecord)).all()] == ["saved-task"]
         assert session.scalars(select(ExecutionRecord)).all() == []
 
@@ -370,7 +294,7 @@ async def test_lan_access_can_be_disabled_and_persists(settings):
         )
     async with httpx.AsyncClient(transport=public_transport, base_url="http://test") as client:
         public_login = await client.get("/login")
-        protected = await client.get("/api/v1/credentials")
+        protected = await client.get("/api/v1/automations")
 
     assert current.json() == {"lan_only": True}
     assert disabled.json() == {"lan_only": False}
@@ -421,7 +345,6 @@ async def test_management_uses_dedicated_login_page_and_docs_require_session(set
     assert javascript.status_code == 200
     assert css.headers["cache-control"] == "no-store"
     assert javascript.headers["cache-control"] == "no-store"
-    assert 'document.execCommand("copy")' in javascript.text
     assert 'const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"])' in javascript.text
     assert "window.setInterval(refreshExecutionStates, 15_000)" in javascript.text
     assert 'api("/api/v1/periodic-signin/sites")' in javascript.text
@@ -450,19 +373,19 @@ async def test_management_session_login_and_logout(settings):
         session = await client.get("/api/auth/session")
         app_page = await client.get("/app", follow_redirects=False)
         login_page = await client.get("/login", follow_redirects=False)
-        credentials = await client.get("/api/v1/credentials")
+        automations = await client.get("/api/v1/automations")
         docs = await client.get("/docs")
         schema = await client.get("/openapi.json")
         assert session.json() == {"username": settings.username}
         assert app_page.status_code == 200
-        assert "CookieCloud" in app_page.text
+        assert "CookieCloud" not in app_page.text
         assert "PT 站点" in app_page.text
         assert "站点签到" in app_page.text
         assert "周期签到" in app_page.text
         assert "系统升级" in app_page.text
         assert "系统设置" in app_page.text
-        assert 'id="settings-tab-cookiecloud"' in app_page.text
-        assert 'id="settings-tab-web-credentials"' in app_page.text
+        assert 'id="settings-tab-cookiecloud"' not in app_page.text
+        assert 'id="settings-tab-web-credentials"' not in app_page.text
         assert 'id="settings-tab-site-settings"' in app_page.text
         assert 'id="settings-tab-logs"' in app_page.text
         assert 'id="logs-settings-panel"' in app_page.text
@@ -473,22 +396,22 @@ async def test_management_session_login_and_logout(settings):
         assert 'id="periodic-site-rows"' in app_page.text
         assert 'id="periodic-candidate-rows"' in app_page.text
         assert 'id="periodic-history-rows"' in app_page.text
-        assert 'id="token-sync-base-url"' in app_page.text
-        assert 'id="token-script-button"' in app_page.text
-        assert 'id="token-script-copy-button"' in app_page.text
+        assert 'id="token-sync-base-url"' not in app_page.text
+        assert 'id="token-script-button"' not in app_page.text
+        assert 'id="token-script-copy-button"' not in app_page.text
         assert 'id="site-backup-button"' in app_page.text
         assert 'id="site-restore-button"' in app_page.text
         assert 'id="lan-only-access"' in app_page.text
-        assert 'id="web-credential-rows"' in app_page.text
+        assert 'id="web-credential-rows"' not in app_page.text
         assert "M-Team" not in app_page.text
-        assert 'id="copy-uuid-button"' in app_page.text
-        assert 'id="copy-password-button"' in app_page.text
+        assert 'id="copy-uuid-button"' not in app_page.text
+        assert 'id="copy-password-button"' not in app_page.text
         assert 'id="settings-tab-upgrade"' in app_page.text
         assert 'id="upgrade-dialog"' not in app_page.text
         assert "login-form" not in app_page.text
         assert login_page.status_code == 307
         assert login_page.headers["location"] == "/app"
-        assert credentials.status_code == 200
+        assert automations.status_code == 200
         assert docs.status_code == 200
         assert schema.json()["info"]["title"] == "AutoSurf"
 
@@ -690,19 +613,6 @@ async def test_current_program_can_repair_python_dependencies(settings, tmp_path
     assert response.json()["can_upgrade"] is True
     assert response.json()["python_dependencies"]["issues"][0]["name"] == "httpx"
 
-def test_secret_box_does_not_store_plaintext():
-    box = SecretBox("x" * 32)
-    encrypted = box.encrypt_json({"sid": "top-secret"})
-    assert "top-secret" not in encrypted
-    assert box.decrypt_json(encrypted) == {"sid": "top-secret"}
-
-
-def test_cookiecloud_round_trip(settings):
-    app = create_app(settings)
-    payload = {"uuid": "browser-key", "encrypted": "opaque-data"}
-    app.state.cookiecloud.put(payload)
-    assert app.state.cookiecloud.get("browser-key") == payload
-
 
 def test_expired_running_execution_can_be_reclaimed(settings):
     app = create_app(settings)
@@ -761,43 +671,6 @@ def test_pt_scheduled_execution_is_randomized_and_immediate_run_is_deduplicated(
         assert len(records) == 1
         assert records[0].id == immediate.id == scheduled.id
         assert records[0].available_at <= utc_now()
-
-
-def test_execution_keeps_credential_snapshot(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert("snapshot", "example.test", {"sid": "old"})
-    automation = app.state.automations.create("a", "http_signin", 3600,
-                                              {"url": "https://example.test"}, credential.id)
-    execution = app.state.queue.enqueue_now(automation.id)
-    app.state.credentials.upsert("snapshot", "example.test", {"sid": "new"})
-    with app.state.sessions() as session:
-        row = session.get(ExecutionRecord, execution.id)
-        assert app.state.credentials.cookies_from_payload(row.credential_payload) == {"sid": "old"}
-
-
-def test_immediate_retry_refreshes_waiting_credential_snapshot(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "retry-snapshot", "example.test", {"sid": "old"}, provider="cookiecloud"
-    )
-    automation = app.state.automations.create(
-        "retry", "pt_signin", 3600,
-        {"url": "https://example.test/attendance.php"}, credential.id,
-    )
-    execution = app.state.queue.enqueue_now(automation.id)
-    with app.state.sessions.begin() as session:
-        row = session.get(ExecutionRecord, execution.id)
-        row.status = ExecutionStatus.RETRY_WAIT
-
-    app.state.credentials.upsert(
-        "retry-snapshot", "example.test", {"sid": "new"}, provider="cookiecloud"
-    )
-    retried = app.state.queue.enqueue_now(automation.id)
-
-    with app.state.sessions() as session:
-        row = session.get(ExecutionRecord, retried.id)
-        assert retried.id == execution.id
-        assert app.state.credentials.cookies_from_payload(row.credential_payload) == {"sid": "new"}
 
 
 def test_immediate_run_creates_new_execution_after_terminal_result(settings):

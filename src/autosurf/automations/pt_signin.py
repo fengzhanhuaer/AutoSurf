@@ -131,7 +131,7 @@ class RousiAdapter:
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
         token = context.cookies.get("token", "")
         if not token:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 尚未同步")
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Chrome 中未找到 Rousi Token")
 
         me = await _rousi_api(page, "/api/me", token)
         if me["status"] in {401, 403}:
@@ -179,7 +179,7 @@ class RousiAdapter:
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
         token = context.cookies.get("token", "")
         if not token:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 尚未同步")
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Chrome 中未找到 Rousi Token")
 
         response = await _rousi_api(page, "/api/me", token)
         if response["status"] in {401, 403}:
@@ -415,7 +415,7 @@ def _mteam_api_failure(value: dict[str, Any], url: str, action: str) -> RunResul
         message,
         re.IGNORECASE,
     ):
-        return RunResult(RunOutcome.AUTH_EXPIRED, "M-Team Web 凭据已失效", details)
+        return RunResult(RunOutcome.AUTH_EXPIRED, "Chrome 中的 M-Team 登录已失效", details)
     if status < 200 or status >= 300 or code != 0:
         return RunResult(RunOutcome.FAILED, f"M-Team {action}失败", details)
     return None
@@ -1171,22 +1171,6 @@ class TjuptAdapter:
         )
 
 
-def web_storage_init_script(url: str, values: dict[str, str]) -> str:
-    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
-    clean_values = {
-        key: value for key, value in values.items()
-        if isinstance(key, str) and isinstance(value, str) and value
-    }
-    payload = json.dumps({"hostname": hostname, "values": clean_values}, ensure_ascii=False)
-    return (
-        f"const autosurfWebCredential = {payload};"
-        "if (location.hostname.toLowerCase() === autosurfWebCredential.hostname) {"
-        "Object.entries(autosurfWebCredential.values).forEach(([key, value]) => "
-        "localStorage.setItem(key, value));"
-        "}"
-    )
-
-
 def profile_refresh_skip_result(sign_in: RunResult | None, url: str) -> RunResult | None:
     if sign_in is None or sign_in.outcome != RunOutcome.AUTH_EXPIRED:
         return None
@@ -1230,9 +1214,9 @@ class PtSignInHandler:
             profile_refresh_enabled = True
         if not sign_in_enabled and not profile_refresh_enabled:
             return RunResult(RunOutcome.FAILED, "PT 站点未启用签到或个人信息刷新")
-        credential_domain = str(config.get("credential_domain") or "").lower().lstrip(".")
-        if credential_domain and not _domain_matches(credential_domain, parsed.hostname or ""):
-            raise ValueError("sign-in URL must use the selected credential domain")
+        site_domain = str(config.get("site_domain") or "").lower().lstrip(".")
+        if site_domain and not _domain_matches(site_domain, parsed.hostname or ""):
+            raise ValueError("sign-in URL must use the configured site domain")
 
         from playwright.async_api import Error as PlaywrightError
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -1330,7 +1314,7 @@ class PtSignInHandler:
                                     profile_result = await adapter_refresh(page, context)
                                 else:
                                     profile_result = await refresh_pt_profile_page(
-                                        page, context, url, credential_domain, timeout_ms
+                                        page, context, url, site_domain, timeout_ms
                                     )
                             except PlaywrightTimeoutError as exc:
                                 profile_result = RunResult(
@@ -1723,9 +1707,9 @@ def _contains_any(value: str, patterns: list[str]) -> bool:
     return any(pattern.strip().casefold() in lowered for pattern in patterns if pattern.strip())
 
 
-def _domain_matches(credential_domain: str, hostname: str) -> bool:
+def _domain_matches(site_domain: str, hostname: str) -> bool:
     hostname = hostname.lower().rstrip(".")
-    return hostname == credential_domain or hostname.endswith(f".{credential_domain}")
+    return hostname == site_domain or hostname.endswith(f".{site_domain}")
 
 
 def _classified_result(outcome: RunOutcome, url: str, status_code: int | None,
@@ -1791,7 +1775,7 @@ def classify_cloudflare_upstream_error(
 
 
 async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
-                                  credential_domain: str, timeout_ms: int) -> RunResult:
+                                  site_domain: str, timeout_ms: int) -> RunResult:
     current_body = await page_body_text(page)
     current_outcome = classify_pt_page(page.url, None, current_body, context.config)
     if current_outcome == RunOutcome.AUTH_EXPIRED:
@@ -1808,7 +1792,7 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
         return RunResult(RunOutcome.FAILED, "未找到 PT 站个人信息页", {"url": page.url})
 
     parsed = validated_http_url(profile_url)
-    if credential_domain and not _domain_matches(credential_domain, parsed.hostname or ""):
+    if site_domain and not _domain_matches(site_domain, parsed.hostname or ""):
         return RunResult(RunOutcome.FAILED, "个人信息页不属于当前 PT 站点", {"url": profile_url})
 
     response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_ms)

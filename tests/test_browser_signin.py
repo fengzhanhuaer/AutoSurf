@@ -10,7 +10,6 @@ from autosurf.automations.browser_session import (
     _prepare_shared_profile,
     _remove_stale_chrome_singletons,
     PersistentBrowserRuntime,
-    bootstrap_browser_environment,
     browser_environment_run_context,
     browser_profile_path,
     connect_standalone_browser,
@@ -18,7 +17,6 @@ from autosurf.automations.browser_session import (
     launch_standalone_browser,
     persistent_browser_mode,
     playwright_cookies,
-    supplement_playwright_cookies,
 )
 from autosurf.domain.models import RunContext
 from autosurf.domain.models import RunOutcome
@@ -283,146 +281,6 @@ async def test_playwright_connects_to_standalone_chrome_without_owning_it(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_browser_profile_cookies_take_precedence_over_imported_credentials():
-    class BrowserContext:
-        def __init__(self):
-            self.updates = []
-
-        async def cookies(self, _urls):
-            return [
-                {"name": "sl-session", "value": "profile-value", "domain": ".hdkyl.in", "path": "/"},
-                {"name": "c_secure_uid", "value": "old", "domain": ".hdkyl.in", "path": "/"},
-            ]
-
-        async def add_cookies(self, values):
-            self.updates.extend(values)
-
-    browser_context = BrowserContext()
-    context = RunContext(
-        execution_id="test",
-        config={},
-        cookies={},
-        browser_cookies=[
-            {"name": "sl-session", "value": "desktop-value", "domain": ".hdkyl.in", "path": "/"},
-            {"name": "c_secure_uid", "value": "new", "domain": ".hdkyl.in", "path": "/"},
-            {"name": "c_secure_pass", "value": "secret", "domain": ".hdkyl.in", "path": "/"},
-        ],
-    )
-
-    await supplement_playwright_cookies(browser_context, context, "https://www.hdkyl.in/attendance.php")
-
-    assert {item["name"] for item in browser_context.updates} == {"c_secure_pass"}
-
-
-@pytest.mark.asyncio
-async def test_browser_credentials_are_injected_only_on_first_container_start(tmp_path):
-    class BrowserContext:
-        def __init__(self):
-            self.updates = []
-
-        async def cookies(self, _urls):
-            return []
-
-        async def add_cookies(self, values):
-            self.updates.extend(values)
-
-    browser_context = BrowserContext()
-    runtime = PersistentBrowserRuntime(
-        context=browser_context,
-        profile_path=tmp_path,
-        mode="persistent_headful",
-        display=None,
-    )
-    first = RunContext(
-        execution_id="first",
-        config={},
-        cookies={"session": "initial"},
-    )
-    later = RunContext(
-        execution_id="later",
-        config={},
-        cookies={"session": "stale"},
-    )
-
-    await bootstrap_browser_environment(
-        runtime, [("https://tracker.example/attendance.php", first)]
-    )
-    await bootstrap_browser_environment(
-        runtime, [("https://tracker.example/attendance.php", later)]
-    )
-
-    assert [item["value"] for item in browser_context.updates] == ["initial"]
-    state = tmp_path.joinpath(".autosurf-environment-bootstrap.json").read_text(
-        encoding="utf-8"
-    )
-    assert "tracker.example" in state
-    assert "initial" not in state
-
-
-@pytest.mark.asyncio
-async def test_web_storage_is_initialized_once_on_first_container_start(tmp_path):
-    class Request:
-        @staticmethod
-        def is_navigation_request():
-            return True
-
-    class Route:
-        request = Request()
-
-        async def fulfill(self, **_kwargs):
-            return None
-
-        async def abort(self):
-            raise AssertionError("navigation request should be fulfilled")
-
-    class Page:
-        def __init__(self):
-            self.values = {}
-            self.closed = False
-
-        async def route(self, pattern, handler):
-            assert pattern == "**/*"
-            await handler(Route())
-
-        async def goto(self, url, **kwargs):
-            assert url == "https://kp.m-team.cc/"
-            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 10_000}
-
-        async def evaluate(self, script, values):
-            assert "localStorage.setItem" in script
-            self.values.update(values)
-
-        async def close(self):
-            self.closed = True
-
-    class BrowserContext:
-        def __init__(self):
-            self.pages = []
-
-        async def new_page(self):
-            page = Page()
-            self.pages.append(page)
-            return page
-
-    browser_context = BrowserContext()
-    runtime = PersistentBrowserRuntime(
-        context=browser_context,
-        profile_path=tmp_path,
-        mode="persistent_headful",
-        display=None,
-    )
-    first = RunContext("first", {}, {"auth": "initial"}, [])
-    later = RunContext("later", {}, {"auth": "stale"}, [])
-
-    await bootstrap_browser_environment(runtime, [("https://kp.m-team.cc/", first)])
-    await bootstrap_browser_environment(runtime, [("https://kp.m-team.cc/", later)])
-
-    assert len(browser_context.pages) == 1
-    assert browser_context.pages[0].values == {"auth": "initial"}
-    assert browser_context.pages[0].closed is True
-
-
-@pytest.mark.asyncio
 async def test_run_context_uses_current_browser_cookie_and_web_storage_values():
     class BrowserContext:
         async def cookies(self, _urls):
@@ -439,6 +297,7 @@ async def test_run_context_uses_current_browser_cookie_and_web_storage_values():
 
         async def evaluate(self, script):
             assert "autosurfBrowserEnvironment" in script
+            assert "sessionStorage" in script
             return {
                 "autosurfBrowserEnvironment": True,
                 "values": {"token": "browser-token"},

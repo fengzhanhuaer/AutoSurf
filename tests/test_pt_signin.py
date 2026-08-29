@@ -50,7 +50,6 @@ from autosurf.automations.pt_signin import (
     wait_for_automatic_pt_challenge,
 )
 from autosurf.config import Settings
-from autosurf.application.services import reconcile_pt_site_aliases
 from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.domain.models import utc_now
 from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
@@ -691,7 +690,7 @@ async def test_handler_keeps_profile_refresh_after_signin_navigation_error(monke
         "navigation-error",
         {
             "url": "https://u2.dmhy.org/attendance.php",
-            "credential_domain": "u2.dmhy.org",
+            "site_domain": "u2.dmhy.org",
             "profile_url": "/userdetails.php?id=7",
             "sign_in_enabled": True,
             "profile_refresh_enabled": True,
@@ -904,17 +903,13 @@ def test_pt_profile_stats_prefers_structured_cards_and_rejects_navigation_level(
 @pytest.mark.asyncio
 async def test_pt_stats_api_returns_latest_profile_snapshot(settings):
     app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:tracker.test", "tracker.test", {"sid": "secret"},
-        provider="cookiecloud",
-    )
     automation = app.state.automations.create(
         "Tracker", "pt_signin", 86400, {
             "url": "https://tracker.test/attendance.php",
-            "credential_domain": "tracker.test",
+            "site_domain": "tracker.test",
             "sign_in_enabled": True,
             "profile_refresh_enabled": True,
-        }, credential.id,
+        },
     )
     execution = app.state.queue.enqueue_now(automation.id)
     first_finished_at = utc_now() - timedelta(minutes=1)
@@ -1213,7 +1208,7 @@ async def test_mteam_adapter_refreshes_profile_without_daily_hello():
 
 
 @pytest.mark.asyncio
-async def test_mteam_adapter_requires_synced_web_credential():
+async def test_mteam_adapter_requires_chrome_local_storage_token():
     page = MTeamPage({
         "/member/profile": {
             "status": 0, "authenticated": False, "missingAuth": True,
@@ -1234,7 +1229,7 @@ async def test_mteam_adapter_requires_synced_web_credential():
     (401, "請重新登入"),
     (1, "無效的請求"),
 ])
-async def test_mteam_adapter_reports_expired_web_credential(code, message):
+async def test_mteam_adapter_reports_expired_browser_session(code, message):
     page = MTeamPage({
         "/member/profile": {
             "status": 200, "code": code, "message": message, "authenticated": False,
@@ -1246,7 +1241,7 @@ async def test_mteam_adapter_reports_expired_web_credential(code, message):
     )
 
     assert result.outcome == RunOutcome.AUTH_EXPIRED
-    assert result.message == "M-Team Web 凭据已失效"
+    assert result.message == "Chrome 中的 M-Team 登录已失效"
     assert page.paths == ["/member/profile"]
 
 
@@ -2664,7 +2659,7 @@ def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     assert discovery.profile_url == "https://zhuque.in/user/info"
     assert rousi is not None
     assert rousi.name == "Rousi"
-    assert rousi.strategy == "custom_required"
+    assert rousi.strategy == "web_storage_browser"
     rousi_authenticated = discover_pt_site("rousi.pro", {"token"})
     assert rousi_authenticated is not None
     assert rousi_authenticated.strategy == "web_storage_browser"
@@ -2673,7 +2668,7 @@ def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     assert rousi_authenticated.default_profile_refresh_enabled is True
     assert mteam is not None
     assert mteam.name == "M-Team"
-    assert mteam.strategy == "custom_required"
+    assert mteam.strategy == "web_storage_profile_refresh_only"
 
     mteam_authenticated = discover_pt_site("kp.m-team.cc", {"auth", "did", "visitorId"})
     assert mteam_authenticated is not None
@@ -2714,64 +2709,14 @@ def test_oshen_soulvoice_and_0ff_are_cataloged_with_expected_actions():
     assert zeroff.default_profile_refresh_enabled is True
 
 
-@pytest.mark.parametrize(
-    "domain", ["www.ptlover.cc", "raingfh.top", "lemonhd.club", "pt.gtk.pw"],
-)
+@pytest.mark.parametrize("domain", ["www.ptlover.cc", "raingfh.top", "lemonhd.club", "pt.gtk.pw"])
 @pytest.mark.asyncio
-async def test_dead_pt_site_is_excluded_even_with_pt_cookie_markers(settings, domain):
-    app = create_app(settings)
-    app.state.credentials.upsert(
-        f"cookiecloud:test:{domain}", domain, {"c_secure_uid": "7"},
-        provider="cookiecloud",
-    )
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/api/v1/pt-signin/candidates?include_unknown=true",
-            auth=(settings.username, settings.password),
-        )
-
-    assert response.status_code == 200
-    assert all(item["credential"]["domain"] != domain for item in response.json()["items"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("domain", ["raingfh.top", "lemonhd.club", "pt.gtk.pw"])
-async def test_dead_pt_site_existing_task_is_disabled_and_rejected(settings, domain):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        f"cookiecloud:test:{domain}", domain, {"c_secure_uid": "7"},
-        provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        domain, "pt_signin", 86400, {
-            "url": f"https://{domain}/attendance.php",
-            "credential_domain": domain,
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": False,
-            "discovered": True,
-        }, credential.id,
-    )
-    execution = app.state.queue.enqueue_now(task.id)
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        stored_task = session.get(AutomationRecord, task.id)
-        config = json.loads(stored_task.config_json)
-        stored_execution = session.get(ExecutionRecord, execution.id)
-        assert stored_task.enabled is False
-        assert config["sign_in_enabled"] is False
-        assert config["sign_in_supported"] is False
-        assert stored_execution.status == "cancelled"
-        assert stored_execution.error == "站点已停用"
-
+async def test_dead_pt_site_is_rejected_without_starting_browser(domain):
     result = await PtSignInHandler().run(RunContext(
         "dead-site", {"url": f"https://{domain}/attendance.php"}, {}, [],
     ))
     assert result.outcome == RunOutcome.FAILED
     assert result.message == "PT 站点已停用"
-
 
 @pytest.mark.parametrize(
     ("error", "message"),
@@ -2838,654 +2783,89 @@ def test_hdvideo_uses_current_catalog_domain():
     assert discovery.url == "https://hdvideo.top/attendance.php"
 
 
-def test_hdvideo_discovered_task_migrates_to_attendance_page(settings):
+@pytest.mark.asyncio
+async def test_pt_signin_api_uses_catalog_without_credentials(settings):
     app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:hdvideo.top", "hdvideo.top", {"c_secure_uid": "7"},
-        provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "HDVideo", "pt_signin", 86400, {
-            "url": "https://hdvideo.top/",
-            "credential_domain": "hdvideo.top",
-            "discovered": True,
-        }, credential.id,
-    )
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        candidates = await client.get("/api/v1/pt-signin/candidates", auth=auth)
+        items = candidates.json()["items"]
+        by_key = {item["site_key"]: item for item in items}
+        assert "tjupt.org" in by_key
+        assert "zhuque.in" in by_key
+        assert "rousi.pro" in by_key
+        assert "kp.m-team.cc" in by_key
+        assert not any(item["site_key"] in {"lemonhd.club", "pt.gtk.pw"} for item in items)
 
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
+        collected = await client.post(
+            "/api/v1/pt-signin/sites/collect",
+            auth=auth,
+            json={
+                "site_keys": ["tjupt.org", "zhuque.in"],
+                "interval_hours": 12,
+                "timeout_seconds": 45,
+            },
+        )
+        collected_again = await client.post(
+            "/api/v1/pt-signin/sites/collect",
+            auth=auth,
+            json={"site_keys": ["tjupt.org", "zhuque.in"]},
+        )
+        listed = await client.get("/api/v1/pt-signin/sites", auth=auth)
 
-    with app.state.sessions() as session:
-        config = json.loads(session.get(AutomationRecord, task.id).config_json)
-        assert config["url"] == "https://hdvideo.top/attendance.php"
-
-
-def test_sunnypt_discovered_task_migrates_current_attendance_route(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:sunnypt.top", "sunnypt.top", {"c_secure_uid": "7"},
-        provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "sunnypt.top", "pt_signin", 86400, {
-            "url": "https://sunnypt.top/attendance.php",
-            "credential_domain": "sunnypt.top",
-            "discovered": True,
-        }, credential.id,
-    )
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        record = session.get(AutomationRecord, task.id)
-        config = json.loads(record.config_json)
-        assert record.name == "SunnyPT"
-        assert config["url"] == "https://sunnypt.top/user/attendance"
-        assert config.get("profile_url") is None
-        assert config["discovery_strategy"] == "generic_browser"
-
-
-def test_pttime_discovered_task_migrates_to_www_cookie_scope(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:www.pttime.org", "www.pttime.org", [{
-            "name": "c_secure_uid", "value": "7",
-            "domain": ".www.pttime.org", "path": "/",
-        }], provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "PTTime", "pt_signin", 86400, {
-            "url": "https://pttime.org/attendance.php",
-            "credential_domain": "pttime.org",
-            "discovered": True,
-            "discovery_reason": "site_catalog",
-        }, credential.id,
-    )
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        config = json.loads(session.get(AutomationRecord, task.id).config_json)
-        assert config["url"] == "https://www.pttime.org/attendance.php"
-        assert config["credential_domain"] == "pttime.org"
-
-
-def test_soulvoice_discovered_task_migrates_to_catalog(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:pt.soulvoice.club", "pt.soulvoice.club",
-        {"c_secure_uid": "7"}, provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "pt.soulvoice.club", "pt_signin", 86400, {
-            "url": "https://pt.soulvoice.club/attendance.php",
-            "credential_domain": "pt.soulvoice.club",
-            "discovered": True,
-            "discovery_reason": "cookie_signature",
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": True,
-            "sign_in_supported": True,
-            "profile_refresh_supported": True,
-        }, credential.id,
-    )
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        record = session.get(AutomationRecord, task.id)
-        config = json.loads(record.config_json)
-        assert record.name == "SoulVoice"
-        assert config["url"] == "https://pt.soulvoice.club/attendance.php"
-        assert config["discovery_reason"] == "site_catalog"
-        assert config["sign_in_enabled"] is True
-        assert config["profile_refresh_enabled"] is True
-
-
-def test_newly_cataloged_0ff_task_enables_profile_refresh_once(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:pt.0ff.cc", "pt.0ff.cc", {"c_secure_uid": "7"},
-        provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "pt.0ff.cc", "pt_signin", 86400, {
-            "url": "https://pt.0ff.cc/attendance.php",
-            "credential_domain": "pt.0ff.cc",
-            "discovered": True,
-            "discovery_reason": "cookie_signature",
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": False,
-            "sign_in_supported": True,
-            "profile_refresh_supported": True,
-        }, credential.id,
-    )
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        config = json.loads(session.get(AutomationRecord, task.id).config_json)
-        assert config["profile_refresh_enabled"] is True
-        assert config["discovery_reason"] == "site_catalog"
-
-    with app.state.sessions.begin() as session:
-        record = session.get(AutomationRecord, task.id)
-        config = json.loads(record.config_json)
-        config["profile_refresh_enabled"] = False
-        record.config_json = json.dumps(config)
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-    with app.state.sessions() as session:
-        config = json.loads(session.get(AutomationRecord, task.id).config_json)
-        assert config["profile_refresh_enabled"] is False
+    assert collected.status_code == 201
+    assert len(collected.json()["created"]) == 2
+    assert {item["domain"] for item in collected.json()["created"]} == {"tjupt.org", "zhuque.in"}
+    assert collected_again.json()["created"] == []
+    assert len(collected_again.json()["skipped"]) == 2
+    assert len(listed.json()["items"]) == 2
 
 
 @pytest.mark.asyncio
-async def test_pt_handler_rejects_cross_domain_before_starting_browser():
-    handler = PtSignInHandler()
-    context = RunContext(
-        execution_id="test",
-        config={"url": "https://other.test/attendance.php", "credential_domain": "tracker.test"},
-        cookies={"sid": "secret"},
-    )
-
-    with pytest.raises(ValueError, match="selected credential domain"):
-        await handler.run(context)
-
-
-@pytest.mark.asyncio
-async def test_pt_signin_api_manages_sites_and_history(settings):
+async def test_pt_signin_api_creates_manual_site_without_credential(settings):
     app = create_app(settings)
-    assert "pt_signin" in app.state.registry.types()
-    handler = app.state.registry.get("pt_signin")
-    assert any(isinstance(adapter, ChdBitsAdapter) for adapter in handler.adapters)
-    assert any(isinstance(adapter, MTeamAdapter) for adapter in handler.adapters)
-    assert any(isinstance(adapter, OshenPtAdapter) for adapter in handler.adapters)
-    assert any(isinstance(adapter, SoulVoiceAdapter) for adapter in handler.adapters)
-    assert any(isinstance(adapter, SunnyPtAdapter) for adapter in handler.adapters)
-    assert any(isinstance(adapter, ZhuqueAdapter) for adapter in handler.adapters)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:tracker.test",
-        "tracker.test",
-        {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    other = app.state.credentials.upsert(
-        "manual",
-        "tracker.test",
-        {"sid": "secret"},
-        provider="manual",
-    )
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
     payload = {
         "name": "Tracker",
-        "credential_id": credential.id,
         "url": "https://tracker.test/attendance.php",
         "interval_hours": 24,
         "timeout_seconds": 60,
-        "success_patterns": ["签到完成"],
-        "already_patterns": ["今天签过了"],
     }
-
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        assert (await client.get("/api/v1/pt-signin/sites")).status_code == 401
-        wrong_provider = await client.post(
-            "/api/v1/pt-signin/sites", auth=auth, json={**payload, "credential_id": other.id}
-        )
-        cross_domain = await client.post(
-            "/api/v1/pt-signin/sites", auth=auth,
-            json={**payload, "url": "https://other.test/attendance.php"},
-        )
         created = await client.post("/api/v1/pt-signin/sites", auth=auth, json=payload)
-        assert created.status_code == 201
-        site = created.json()
-        site_id = site["id"]
-        assert site["credential"]["domain"] == "tracker.test"
-        assert site["config"]["success_patterns"] == ["签到完成"]
-        assert site["config"]["daily_start_time"] == "09:00"
-        assert datetime.fromisoformat(site["next_run_at"]).hour == 1
-
+        site_id = created.json()["id"]
+        started = await client.post(f"/api/v1/pt-signin/sites/{site_id}/run", auth=auth)
         listed = await client.get("/api/v1/pt-signin/sites", auth=auth)
-        scheduled = await client.patch(
-            f"/api/v1/pt-signin/sites/{site_id}/schedule", auth=auth, json={
-                "interval_hours": 12,
-                "timeout_seconds": 45,
-                "random_delay_minutes": 30,
-                "retry_interval_hours": 2,
-                "max_retries": 5,
-            },
-        )
-        disabled = await client.patch(
-            f"/api/v1/pt-signin/sites/{site_id}/enabled", auth=auth, json={"enabled": False}
-        )
-        refreshed_only = await client.patch(
-            f"/api/v1/pt-signin/sites/{site_id}/actions", auth=auth, json={
-                "sign_in_enabled": False,
-                "profile_refresh_enabled": True,
-            },
-        )
-        queued = await client.post(f"/api/v1/pt-signin/sites/{site_id}/run", auth=auth)
-        history = await client.get("/api/v1/pt-signin/executions", auth=auth)
         deleted = await client.delete(f"/api/v1/pt-signin/sites/{site_id}", auth=auth)
-        empty = await client.get("/api/v1/pt-signin/sites", auth=auth)
 
-    assert wrong_provider.status_code == 422
-    assert cross_domain.status_code == 422
-    assert listed.json()["items"][0]["id"] == site_id
-    assert scheduled.json()["interval_hours"] == 12
-    assert scheduled.json()["config"]["daily_start_time"] == "09:00"
-    assert datetime.fromisoformat(scheduled.json()["next_run_at"]).hour == 1
-    assert scheduled.json()["config"]["random_delay_minutes"] == 30
-    assert scheduled.json()["config"]["retry_interval_hours"] == 2
-    assert scheduled.json()["config"]["max_retries"] == 5
-    assert disabled.json()["enabled"] is False
-    assert refreshed_only.json()["enabled"] is True
-    assert refreshed_only.json()["config"]["sign_in_enabled"] is False
-    assert refreshed_only.json()["config"]["profile_refresh_enabled"] is True
-    assert queued.status_code == 202
-    assert history.json()["items"][0]["automation_name"] == "Tracker"
-    assert history.json()["items"][0]["status"] == "pending"
+    assert created.status_code == 201
+    assert created.json()["domain"] == "tracker.test"
+    assert started.status_code == 202
+    assert listed.json()["items"][0]["domain"] == "tracker.test"
     assert deleted.status_code == 204
-    assert empty.json()["items"] == []
-
-
-@pytest.mark.asyncio
-async def test_pt_signin_api_discovers_and_bulk_collects_cookiecloud_sites(settings):
-    app = create_app(settings)
-    recognized = app.state.credentials.upsert(
-        "cookiecloud:test:tracker.test",
-        "tracker.test",
-        {"c_secure_uid": "1", "sid": "secret"},
-        provider="cookiecloud",
-    )
-    catalog = app.state.credentials.upsert(
-        "cookiecloud:test:tjupt.org",
-        "tjupt.org",
-        {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    unknown = app.state.credentials.upsert(
-        "cookiecloud:test:example.com",
-        "example.com",
-        {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    refresh_only = app.state.credentials.upsert(
-        "cookiecloud:test:zhuque.in", "zhuque.in", {"sid": "secret"}, provider="cookiecloud",
-    )
-    unsupported = app.state.credentials.upsert(
-        "cookiecloud:test:rousi.pro",
-        "rousi.pro",
-        {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    pttime_root = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:pttime.org", "pttime.org", [{
-            "name": "cf_clearance", "value": "clear", "domain": ".pttime.org", "path": "/",
-        }], provider="cookiecloud",
-    )
-    pttime_www = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:www.pttime.org", "www.pttime.org", [{
-            "name": "c_secure_uid", "value": "1", "domain": "www.pttime.org", "path": "/",
-        }, {
-            "name": "c_secure_pass", "value": "pass", "domain": "www.pttime.org", "path": "/",
-        }], provider="cookiecloud",
-    )
-    app.state.credentials.upsert("manual", "manual.test", {"passkey": "secret"}, provider="manual")
-    transport = httpx.ASGITransport(app=app)
-    auth = (settings.username, settings.password)
-
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        candidates = await client.get("/api/v1/pt-signin/candidates", auth=auth)
-        recognized_only = await client.get(
-            "/api/v1/pt-signin/candidates?include_unknown=false", auth=auth
-        )
-        rejected = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
-            "credential_ids": [unknown.id], "interval_hours": 12, "timeout_seconds": 45,
-        })
-        unsupported_result = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
-            "credential_ids": [unsupported.id],
-        })
-        collected = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
-            "credential_ids": [
-                recognized.id, recognized.id, catalog.id, refresh_only.id,
-                pttime_root.id, pttime_www.id,
-            ],
-            "interval_hours": 12,
-            "timeout_seconds": 45,
-        })
-        created_zhuque = next(
-            item for item in collected.json()["created"] if item["name"] == "Zhuque"
-        )
-        rejected_sign_in = await client.patch(
-            f"/api/v1/pt-signin/sites/{created_zhuque['id']}/actions",
-            auth=auth,
-            json={"sign_in_enabled": True, "profile_refresh_enabled": True},
-        )
-        collected_again = await client.post("/api/v1/pt-signin/sites/collect", auth=auth, json={
-            "credential_ids": [recognized.id, catalog.id],
-        })
-        refreshed = await client.get("/api/v1/pt-signin/candidates", auth=auth)
-
-    items = candidates.json()["items"]
-    by_id = {item["credential"]["id"]: item for item in items}
-    assert set(by_id) == {
-        recognized.id, catalog.id, unknown.id, refresh_only.id, unsupported.id, pttime_www.id,
-    }
-    assert by_id[recognized.id]["reason"] == "cookie_signature"
-    assert by_id[catalog.id]["name"] == "TJUPT"
-    assert by_id[unknown.id]["recognized"] is False
-    assert by_id[unsupported.id]["supported"] is False
-    assert by_id[refresh_only.id]["supported"] is True
-    assert by_id[refresh_only.id]["sign_in_supported"] is False
-    assert by_id[refresh_only.id]["profile_refresh_supported"] is True
-    assert by_id[refresh_only.id]["profile_url"] == "https://zhuque.in/user/info"
-    assert by_id[pttime_www.id]["name"] == "PTTime"
-    assert by_id[pttime_www.id]["url"] == "https://www.pttime.org/attendance.php"
-    assert set(by_id[pttime_www.id]["credential_ids"]) == {pttime_root.id, pttime_www.id}
-    assert "c_secure_uid" not in candidates.text
-    assert "secret" not in candidates.text
-    assert {item["credential"]["id"] for item in recognized_only.json()["items"]} == {
-        recognized.id, catalog.id, refresh_only.id, unsupported.id, pttime_www.id,
-    }
-    assert rejected.status_code == 422
-    assert unsupported_result.status_code == 422
-    assert "尚需专用适配" in unsupported_result.json()["detail"]
-    assert collected.status_code == 201
-    assert len(collected.json()["created"]) == 4
-    assert {item["interval_hours"] for item in collected.json()["created"]} == {12}
-    assert {item["config"]["timeout_seconds"] for item in collected.json()["created"]} == {45}
-    assert collected_again.json()["created"] == []
-    assert len(collected_again.json()["skipped"]) == 2
-    assert sum(item["configured"] for item in refreshed.json()["items"]) == 4
-    assert rejected_sign_in.status_code == 422
-    assert "没有签到功能" in rejected_sign_in.json()["detail"]
-
-    pttime_site = next(item for item in collected.json()["created"] if item["name"] == "PTTime")
-    zhuque_site = next(item for item in collected.json()["created"] if item["name"] == "Zhuque")
-    assert zhuque_site["config"]["sign_in_enabled"] is False
-    assert zhuque_site["config"]["profile_refresh_enabled"] is True
-    assert zhuque_site["config"]["sign_in_supported"] is False
-    assert zhuque_site["url"] == "https://zhuque.in/"
-    execution = app.state.queue.enqueue_now(pttime_site["id"])
-    with app.state.sessions() as session:
-        snapshot = session.get(ExecutionRecord, execution.id).credential_payload
-    _, browser_cookies = app.state.credentials.credential_values_from_payload(snapshot)
-    assert {(cookie["name"], cookie["domain"]) for cookie in browser_cookies} == {
-        ("cf_clearance", ".pttime.org"),
-        ("c_secure_uid", "www.pttime.org"),
-        ("c_secure_pass", "www.pttime.org"),
-    }
-
-
-@pytest.mark.asyncio
-async def test_existing_zhuque_task_migrates_to_refresh_only_and_can_be_disabled(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:zhuque.in", "zhuque.in", {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "Zhuque", "pt_signin", 86400, {
-            "url": "https://zhuque.in/",
-            "credential_domain": "zhuque.in",
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": False,
-        }, credential.id,
-    )
-    transport = httpx.ASGITransport(app=app)
-    auth = (settings.username, settings.password)
-
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        before = await client.get("/api/v1/pt-signin/sites", auth=auth)
-        disabled = await client.patch(
-            f"/api/v1/pt-signin/sites/{task.id}/actions", auth=auth,
-            json={"sign_in_enabled": False, "profile_refresh_enabled": False},
-        )
-        after = await client.get("/api/v1/pt-signin/sites", auth=auth)
-
-    before_config = before.json()["items"][0]["config"]
-    assert before_config["sign_in_enabled"] is False
-    assert before_config["profile_refresh_enabled"] is True
-    assert before_config["sign_in_supported"] is False
-    assert disabled.status_code == 200
-    assert disabled.json()["enabled"] is False
-    assert after.json()["items"][0]["config"]["profile_refresh_enabled"] is False
-
-
-def test_pt_alias_reconciliation_merges_tasks_history_and_active_executions(settings):
-    app = create_app(settings)
-    root = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:pttime.org", "pttime.org", [{
-            "name": "cf_clearance", "value": "clear", "domain": ".pttime.org", "path": "/",
-        }], provider="cookiecloud",
-    )
-    www = app.state.credentials.upsert_cookie_records(
-        "cookiecloud:test:www.pttime.org", "www.pttime.org", [{
-            "name": "c_secure_uid", "value": "1", "domain": "www.pttime.org", "path": "/",
-        }], provider="cookiecloud",
-    )
-    root_task = app.state.automations.create(
-        "PTTime", "pt_signin", 86400,
-        {"url": "https://pttime.org/attendance.php", "credential_domain": "pttime.org"}, root.id,
-    )
-    www_task = app.state.automations.create(
-        "PTTime", "pt_signin", 86400,
-        {"url": "https://www.pttime.org/attendance.php", "credential_domain": "www.pttime.org"}, www.id,
-    )
-    root_execution = app.state.queue.enqueue_now(root_task.id)
-    www_execution = app.state.queue.enqueue_now(www_task.id)
-
-    assert reconcile_pt_site_aliases(app.state.sessions, app.state.credentials) == 1
-
-    with app.state.sessions() as session:
-        tasks = session.scalars(select(AutomationRecord).where(
-            AutomationRecord.handler_type == "pt_signin"
-        )).all()
-        executions = session.scalars(select(ExecutionRecord).order_by(ExecutionRecord.id)).all()
-        assert len(tasks) == 1
-        assert tasks[0].id == www_task.id
-        assert tasks[0].credential_id == www.id
-        assert {execution.id for execution in executions} == {root_execution.id, www_execution.id}
-        assert {execution.automation_id for execution in executions} == {www_task.id}
-        assert sorted(execution.status for execution in executions) == ["cancelled", "pending"]
-        pending = next(execution for execution in executions if execution.status == "pending")
-        _, browser_cookies = app.state.credentials.credential_values_from_payload(
-            pending.credential_payload
-        )
-        assert {cookie["name"] for cookie in browser_cookies} == {"cf_clearance", "c_secure_uid"}
-        assert json.loads(tasks[0].config_json)["credential_aliases_merged"] is True
-
-
-def test_pt_reconciliation_updates_catalog_url_only_for_discovered_tasks(settings):
-    app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:52pt.site", "52pt.site", {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    discovered = app.state.automations.create(
-        "52PT", "pt_signin", 86400,
-        {
-            "url": "https://52pt.site/attendance.php",
-            "credential_domain": "52pt.site",
-            "discovered": True,
-        },
-        credential.id,
-    )
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions.begin() as session:
-        discovered_config = json.loads(session.get(AutomationRecord, discovered.id).config_json)
-        assert discovered_config["url"] == "https://52pt.site/52bakatest0818.php"
-        discovered_config["url"] = "https://52pt.site/custom-signin.php"
-        discovered_config["discovered"] = False
-        session.get(AutomationRecord, discovered.id).config_json = json.dumps(discovered_config)
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        manual_config = json.loads(session.get(AutomationRecord, discovered.id).config_json)
-        assert manual_config["url"] == "https://52pt.site/custom-signin.php"
-
-
-def test_pt_reconciliation_migrates_capabilities_and_current_domain(settings):
-    app = create_app(settings)
-    refresh_credential = app.state.credentials.upsert(
-        "cookiecloud:test:nanyangpt.com", "nanyangpt.com", {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    old_domain_credential = app.state.credentials.upsert(
-        "cookiecloud:test:pterclub.com", "pterclub.com", {"sid": "secret"},
-        provider="cookiecloud",
-    )
-    refresh_task = app.state.automations.create(
-        "nanyangpt.com", "pt_signin", 86400, {
-            "url": "https://nanyangpt.com/attendance.php",
-            "credential_domain": "nanyangpt.com",
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": False,
-            "sign_in_supported": True,
-            "profile_refresh_supported": True,
-            "discovered": True,
-        }, refresh_credential.id,
-    )
-    old_domain_task = app.state.automations.create(
-        "PterClub", "pt_signin", 86400, {
-            "url": "https://pterclub.com/attendance.php",
-            "credential_domain": "pterclub.com",
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": True,
-            "sign_in_supported": True,
-            "profile_refresh_supported": True,
-            "discovered": True,
-        }, old_domain_credential.id,
-    )
-    old_domain_execution = app.state.queue.enqueue_now(old_domain_task.id)
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        refreshed = session.get(AutomationRecord, refresh_task.id)
-        refresh_config = json.loads(refreshed.config_json)
-        migrated = session.get(AutomationRecord, old_domain_task.id)
-        migrated_config = json.loads(migrated.config_json)
-        execution = session.get(ExecutionRecord, old_domain_execution.id)
-        assert refresh_config["url"] == "https://nanyangpt.com/"
-        assert refresh_config["sign_in_enabled"] is False
-        assert refresh_config["profile_refresh_enabled"] is True
-        assert refresh_config["sign_in_supported"] is False
-        assert migrated.enabled is True
-        assert migrated.name == "PterClub"
-        assert migrated_config["url"] == "https://pterclub.net/attendance.php"
-        assert migrated_config["sign_in_supported"] is True
-        assert migrated_config["profile_refresh_supported"] is True
-        assert execution.status == "pending"
-
-
-def test_pt_reconciliation_rebinds_old_task_to_current_domain_credential(settings):
-    app = create_app(settings)
-    old = app.state.credentials.upsert(
-        "cookiecloud:test:www.haidan.video", "www.haidan.video", {"sid": "old"},
-        provider="cookiecloud",
-    )
-    current = app.state.credentials.upsert(
-        "cookiecloud:test:www.haidan.cc", "www.haidan.cc",
-        {"c_secure_uid": "7", "sid": "current"}, provider="cookiecloud",
-    )
-    task = app.state.automations.create(
-        "Haidan (旧域名)", "pt_signin", 86400, {
-            "url": "https://www.haidan.video/attendance.php",
-            "credential_domain": "www.haidan.video",
-            "sign_in_enabled": True,
-            "profile_refresh_enabled": True,
-            "discovered": True,
-        }, old.id,
-    )
-
-    reconcile_pt_site_aliases(app.state.sessions, app.state.credentials)
-
-    with app.state.sessions() as session:
-        migrated = session.get(AutomationRecord, task.id)
-        config = json.loads(migrated.config_json)
-        assert migrated.name == "Haidan"
-        assert migrated.credential_id == current.id
-        assert migrated.credential.domain == "www.haidan.cc"
-        assert config["url"] == "https://www.haidan.cc/"
-        assert config["credential_domain"] == "haidan.cc"
-        assert config["sign_in_enabled"] is True
-        assert config["sign_in_supported"] is True
-        assert config["profile_refresh_enabled"] is True
-
-
-def test_hhan_alias_reconciliation_merges_three_domains_and_preserves_history(settings):
-    app = create_app(settings)
-    tasks = []
-    executions = []
-    for index, domain in enumerate(("hhan.club", "hhanclub.net", "hhanclub.top")):
-        credential = app.state.credentials.upsert(
-            f"cookiecloud:test:{domain}", domain,
-            {"c_secure_uid": str(index + 1)}, provider="cookiecloud",
-        )
-        task = app.state.automations.create(
-            domain, "pt_signin", 86400,
-            {
-                "url": f"https://{domain}/attendance.php",
-                "credential_domain": domain,
-                "sign_in_enabled": index != 0,
-                "profile_refresh_enabled": index == 0,
-                "discovered": True,
-            },
-            credential.id,
-        )
-        tasks.append(task)
-        executions.append(app.state.queue.enqueue_now(task.id))
-
-    assert reconcile_pt_site_aliases(app.state.sessions, app.state.credentials) == 2
-
-    with app.state.sessions() as session:
-        remaining = session.scalars(select(AutomationRecord).where(
-            AutomationRecord.handler_type == "pt_signin"
-        )).all()
-        history = session.scalars(select(ExecutionRecord)).all()
-        assert len(remaining) == 1
-        assert remaining[0].name == "HhanClub"
-        assert remaining[0].credential.domain == "hhanclub.net"
-        assert {item.automation_id for item in history} == {remaining[0].id}
-        assert {item.id for item in history} == {item.id for item in executions}
-        config = json.loads(remaining[0].config_json)
-        assert config["url"] == "https://hhanclub.net/attendance.php"
-        assert config["credential_domain"] == "hhanclub.net"
-        assert config["sign_in_enabled"] is True
-        assert config["profile_refresh_enabled"] is True
-
 
 @pytest.mark.asyncio
 async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     app = create_app(settings)
-    credential = app.state.credentials.upsert(
-        "cookiecloud:test:tracker.test", "tracker.test", {"sid": "secret"}, provider="cookiecloud"
-    )
     site = app.state.automations.create(
         "Tracker", "pt_signin", 86400,
-        {"url": "https://tracker.test/attendance.php", "credential_domain": "tracker.test"},
-        credential.id,
+        {"url": "https://tracker.test/attendance.php", "site_domain": "tracker.test"},
     )
     empty_site = app.state.automations.create(
         "Empty", "pt_signin", 86400,
-        {"url": "https://tracker.test/attendance.php", "credential_domain": "tracker.test"},
-        credential.id,
-    )
-    refresh_credential = app.state.credentials.upsert(
-        "cookiecloud:test:nanyangpt.com", "nanyangpt.com", {"sid": "secret"},
-        provider="cookiecloud",
+        {"url": "https://tracker.test/attendance.php", "site_domain": "tracker.test"},
     )
     refresh_only = app.state.automations.create(
         "NanyangPT", "pt_signin", 86400, {
             "url": "https://nanyangpt.com/",
-            "credential_domain": "nanyangpt.com",
+            "site_domain": "nanyangpt.com",
             "sign_in_enabled": False,
             "profile_refresh_enabled": True,
             "sign_in_supported": False,
             "profile_refresh_supported": True,
-        }, refresh_credential.id,
+        },
     )
     offset = timedelta(minutes=480)
     local_today = (utc_now() + offset).date()

@@ -9,8 +9,10 @@ from sqlalchemy import create_engine, inspect
 
 INITIAL_REVISION = "0001_initial"
 COOKIECLOUD_REVISION = "0002_cookiecloud_import"
-HEAD_REVISION = "0003_system_settings"
-CORE_TABLES = {"credentials", "automations", "executions", "cookiecloud_blobs"}
+SYSTEM_SETTINGS_REVISION = "0003_system_settings"
+HEAD_REVISION = "0004_browser_only_sessions"
+LEGACY_CORE_TABLES = {"credentials", "automations", "executions", "cookiecloud_blobs"}
+BROWSER_ONLY_CORE_TABLES = {"automations", "executions", "system_settings"}
 
 
 def upgrade_database(database_url: str) -> None:
@@ -28,9 +30,14 @@ def _adopt_unversioned_database(config: Config, database_url: str) -> None:
         tables = set(inspector.get_table_names())
         if "alembic_version" in tables or not tables:
             return
-        present_core = tables & CORE_TABLES
-        if present_core != CORE_TABLES:
-            missing = ", ".join(sorted(CORE_TABLES - present_core))
+        if BROWSER_ONLY_CORE_TABLES.issubset(tables) and not (
+            {"credentials", "cookiecloud_blobs", "cookiecloud_sources"} & tables
+        ):
+            command.stamp(config, HEAD_REVISION)
+            return
+        present_core = tables & LEGACY_CORE_TABLES
+        if present_core != LEGACY_CORE_TABLES:
+            missing = ", ".join(sorted(LEGACY_CORE_TABLES - present_core))
             raise RuntimeError(f"cannot migrate an unversioned partial database; missing tables: {missing}")
 
         execution_columns = {item["name"] for item in inspector.get_columns("executions")}
@@ -41,7 +48,7 @@ def _adopt_unversioned_database(config: Config, database_url: str) -> None:
         if not has_snapshot:
             command.stamp(config, INITIAL_REVISION)
         elif "system_settings" in tables:
-            command.stamp(config, HEAD_REVISION)
+            command.stamp(config, SYSTEM_SETTINGS_REVISION)
         else:
             command.stamp(config, COOKIECLOUD_REVISION)
     finally:

@@ -47,7 +47,42 @@ class BrowserSignInHandler:
                         ), browser_session)
 
                     clicked = False
-                    if config.get("click_role") and config.get("click_name"):
+                    request_config = config.get("browser_request")
+                    if isinstance(request_config, dict):
+                        request_result = await page.evaluate(
+                            """async (options) => {
+                              const init = {
+                                method: options.method || 'GET',
+                                credentials: 'include',
+                                headers: {'Accept': 'application/json, text/plain, */*'},
+                              };
+                              if (options.json !== undefined) {
+                                init.headers['Content-Type'] = 'application/json';
+                                init.body = JSON.stringify(options.json);
+                              }
+                              const response = await fetch(options.url, init);
+                              return {
+                                url: response.url,
+                                status: response.status,
+                                body: (await response.text()).slice(0, 1000000),
+                              };
+                            }""",
+                            request_config,
+                        )
+                        body = str(request_result.get("body") or "")
+                        status = int(request_result.get("status") or 0) or None
+                        details = {
+                            "url": str(request_result.get("url") or page.url),
+                            "status_code": status,
+                            "browser_request": True,
+                            "clicked": False,
+                        }
+                        result = _classify_body(config, body, status, before_click=False)
+                        if result is not None:
+                            return with_browser_details(RunResult(
+                                result.outcome, result.message, details,
+                            ), browser_session)
+                    elif config.get("click_role") and config.get("click_name"):
                         await page.get_by_role(
                             str(config["click_role"]),
                             name=str(config["click_name"]),

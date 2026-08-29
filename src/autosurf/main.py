@@ -17,19 +17,15 @@ from autosurf.api import (
     SESSION_COOKIE,
     auth_router,
     authenticated_session_username,
-    cookiecloud_router,
     require_login,
     router,
-    web_credential_router,
 )
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import (
     AutomationService,
-    CredentialService,
     ExecutionService,
     QueueService,
     reconcile_periodic_signin_templates,
-    reconcile_pt_site_aliases,
     reconcile_signin_schedules,
 )
 from autosurf.browser_control import (
@@ -54,12 +50,8 @@ from autosurf.automations.pt_signin import (
     ZhuqueAdapter,
 )
 from autosurf.config import Settings, get_settings
-from autosurf.infrastructure.cookiecloud import CookieCloudStore
-from autosurf.infrastructure.crypto import SecretBox
 from autosurf.infrastructure.database import create_session_factory
-from autosurf.infrastructure.gzip_request import GZipRequestMiddleware
 from autosurf.infrastructure.migrations import upgrade_database
-from autosurf.infrastructure.web_credentials import WebCredentialStore
 from autosurf.management import management_router
 from autosurf.upgrade import upgrade
 
@@ -79,16 +71,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         TjuptAdapter(), RousiAdapter(),
         MTeamAdapter(), SunnyPtAdapter(), ZhuqueAdapter(),
     ]))
-    secrets = SecretBox(settings.secret_key)
-    credentials = CredentialService(sessions, secrets)
     automations = AutomationService(sessions, registry)
-    queue = QueueService(sessions, settings.execution_lease_seconds, credentials)
-    execution = ExecutionService(sessions, queue, credentials, registry)
+    queue = QueueService(sessions, settings.execution_lease_seconds)
+    execution = ExecutionService(sessions, queue, registry)
     browser_control = BrowserControlService(
-        credential_bootstrap=credentials.browser_bootstrap_contexts,
         display_settings=BrowserDisplaySettings(sessions),
     )
-    reconcile_pt_site_aliases(sessions, credentials)
     reconcile_periodic_signin_templates(sessions)
     reconcile_signin_schedules(sessions)
 
@@ -120,23 +108,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LanAccessMiddleware, policy=lan_access)
-    app.add_middleware(GZipRequestMiddleware)
     app.state.settings = settings
     app.state.sessions = sessions
     app.state.lan_access = lan_access
     app.state.registry = registry
-    app.state.credentials = credentials
     app.state.automations = automations
     app.state.queue = queue
     app.state.execution = execution
     app.state.browser_control = browser_control
-    app.state.cookiecloud = CookieCloudStore(sessions, secrets, credentials)
-    app.state.web_credentials = WebCredentialStore(sessions, secrets, credentials)
     app.state.upgrade_guard = threading.Lock()
     app.state.upgrade_process = None
     app.include_router(router)
-    app.include_router(cookiecloud_router)
-    app.include_router(web_credential_router)
     app.include_router(auth_router)
     app.include_router(management_router)
 
@@ -176,6 +158,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.close(code=4403, reason="same origin required")
             return
         await browser_control.proxy_websocket(websocket)
+
+    @app.websocket("/browser-control/audio")
+    async def browser_audio_websocket(websocket: WebSocket) -> None:
+        client_host = websocket.client.host if websocket.client else None
+        if lan_access.lan_only and not is_lan_address(client_host):
+            await websocket.close(code=4403, reason="LAN access required")
+            return
+        username = authenticated_session_username(
+            settings,
+            websocket.cookies.get(SESSION_COOKIE),
+        )
+        if not username:
+            await websocket.close(code=4401, reason="login required")
+            return
+        origin = websocket.headers.get("origin")
+        host = websocket.headers.get("host")
+        if origin and host and origin.split("://", 1)[-1].rstrip("/") != host:
+            await websocket.close(code=4403, reason="same origin required")
+            return
+        await browser_control.stream_audio(websocket)
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:

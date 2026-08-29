@@ -1,6 +1,4 @@
 const state = {
-  sources: [],
-  credentials: [],
   ptCandidates: [],
   ptSites: [],
   ptHistory: { today: null, days: [], items: [], latest_execution: null },
@@ -8,13 +6,11 @@ const state = {
   periodicCandidates: [],
   periodicSites: [],
   periodicExecutions: [],
-  webCredentials: [],
   debugLogs: [],
   debugAutomations: [],
   lanOnly: true,
   ptSelection: new Set(),
   periodicSelection: new Set(),
-  selected: "",
   activeView: "pt-signin",
   activePtTab: "signin",
   activeSigninTab: "tasks",
@@ -29,13 +25,18 @@ const state = {
     remote_url: "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify",
     viewport: { width: 1365, height: 768 },
     supported_resolutions: [],
+    audio_supported: false,
   },
+  browserAudioEnabled: false,
 };
 
 const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"]);
 let executionRefreshInFlight = false;
 let browserStatusTimer = null;
 let browserResolutionChanging = false;
+let browserAudioSocket = null;
+let browserAudioContext = null;
+let browserAudioNextStart = 0;
 
 const elements = {
   body: document.body,
@@ -61,36 +62,21 @@ const elements = {
   browserControlPageTitle: document.querySelector("#browser-control-page-title"),
   browserControlError: document.querySelector("#browser-control-error"),
   browserResolution: document.querySelector("#browser-resolution"),
+  browserAudio: document.querySelector("#browser-audio"),
   browserFullscreen: document.querySelector("#browser-fullscreen"),
   browserRemoteShell: document.querySelector("#browser-remote-shell"),
   browserRemoteFrame: document.querySelector("#browser-remote-frame"),
   browserRemotePlaceholder: document.querySelector("#browser-remote-placeholder"),
   browserRemoteCover: document.querySelector("#browser-remote-cover"),
   ptStatsRows: document.querySelector("#pt-stats-rows"),
-  cookieCloudPanel: document.querySelector("#cookiecloud-settings-panel"),
-  webCredentialsPanel: document.querySelector("#web-credentials-settings-panel"),
   siteSettingsPanel: document.querySelector("#site-settings-panel"),
   logsPanel: document.querySelector("#logs-settings-panel"),
   upgradePanel: document.querySelector("#upgrade-settings-panel"),
-  form: document.querySelector("#source-form"),
-  selector: document.querySelector("#source-selector"),
-  uuid: document.querySelector("#uuid"),
-  password: document.querySelector("#password"),
-  copyUuidButton: document.querySelector("#copy-uuid-button"),
-  copyPasswordButton: document.querySelector("#copy-password-button"),
-  passwordHint: document.querySelector("#password-hint"),
-  autoImport: document.querySelector("#auto-import"),
-  importButton: document.querySelector("#import-button"),
-  saveButton: document.querySelector("#save-button"),
   refreshButton: document.querySelector("#refresh-button"),
-  copyButton: document.querySelector("#copy-button"),
-  endpoint: document.querySelector("#endpoint-url"),
   toast: document.querySelector("#toast"),
-  rows: document.querySelector("#credential-rows"),
   logoutButton: document.querySelector("#logout-button"),
   ptForm: document.querySelector("#pt-site-form"),
   ptName: document.querySelector("#pt-name"),
-  ptCredential: document.querySelector("#pt-credential"),
   ptUrl: document.querySelector("#pt-url"),
   ptInterval: document.querySelector("#pt-interval"),
   ptTimeout: document.querySelector("#pt-timeout"),
@@ -129,15 +115,9 @@ const elements = {
   upgradeDependencies: document.querySelector("#upgrade-dependencies"),
   upgradeBrowser: document.querySelector("#upgrade-browser"),
   upgradeState: document.querySelector("#upgrade-state"),
-  tokenSyncBaseUrl: document.querySelector("#token-sync-base-url"),
-  tokenSyncState: document.querySelector("#token-sync-state"),
-  webCredentialRows: document.querySelector("#web-credential-rows"),
-  tokenScriptButton: document.querySelector("#token-script-button"),
-  tokenScriptCopyButton: document.querySelector("#token-script-copy-button"),
   periodicForm: document.querySelector("#periodic-site-form"),
   periodicTemplate: document.querySelector("#periodic-template"),
   periodicName: document.querySelector("#periodic-name"),
-  periodicCredential: document.querySelector("#periodic-credential"),
   periodicUrl: document.querySelector("#periodic-url"),
   periodicInterval: document.querySelector("#periodic-interval"),
   periodicTimeout: document.querySelector("#periodic-timeout"),
@@ -201,9 +181,6 @@ const elements = {
   debugLogOutput: document.querySelector("#debug-log-output"),
 };
 
-elements.endpoint.textContent = `${location.origin}/cookiecloud`;
-elements.tokenSyncBaseUrl.value = location.origin;
-
 function escapeHtml(value) {
   const node = document.createElement("span");
   node.textContent = String(value ?? "");
@@ -240,14 +217,6 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-function sourceByUuid(uuid) {
-  return state.sources.find((item) => item.uuid === uuid);
-}
-
-function credentialById(id) {
-  return state.credentials.find((item) => item.id === id);
-}
-
 function showToast(message, error = false) {
   elements.toast.textContent = message;
   elements.toast.classList.toggle("error", error);
@@ -262,7 +231,7 @@ function goToLogin() {
 }
 
 async function setActiveView(value, { syncHash = true } = {}) {
-  const validViews = ["pt-signin", "periodic-signin", "browser-control", "cookiecloud", "web-credentials", "site-settings", "logs", "upgrade"];
+  const validViews = ["pt-signin", "periodic-signin", "browser-control", "site-settings", "logs", "upgrade"];
   const activeView = validViews.includes(value) ? value : "pt-signin";
   state.activeView = activeView;
   const ptView = activeView === "pt-signin";
@@ -273,8 +242,6 @@ async function setActiveView(value, { syncHash = true } = {}) {
   elements.ptStatsPanel.hidden = !ptView || state.activePtTab !== "stats";
   elements.periodicPanel.hidden = !periodicView;
   elements.browserControlPanel.hidden = !browserView;
-  elements.cookieCloudPanel.hidden = activeView !== "cookiecloud";
-  elements.webCredentialsPanel.hidden = activeView !== "web-credentials";
   elements.siteSettingsPanel.hidden = activeView !== "site-settings";
   elements.logsPanel.hidden = activeView !== "logs";
   elements.upgradePanel.hidden = activeView !== "upgrade";
@@ -282,8 +249,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   elements.ptTabList.hidden = !ptView;
 
   for (const item of elements.navItems) {
-    const active = item.dataset.view === activeView
-      || (item.dataset.view === "cookiecloud" && systemView);
+    const active = item.dataset.view === activeView;
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
@@ -303,7 +269,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
     elements.pageDescription.textContent = "普通站点周期任务";
   } else if (systemView) {
     elements.pageTitle.textContent = "系统设置";
-    elements.pageDescription.textContent = "CookieCloud、Web 凭据、运行日志与系统升级";
+    elements.pageDescription.textContent = "站点设置、运行日志与系统升级";
   } else {
     elements.pageTitle.textContent = "PT 站点";
     elements.pageDescription.textContent = "站点管理与自动化";
@@ -312,8 +278,6 @@ async function setActiveView(value, { syncHash = true } = {}) {
     "pt-signin": "刷新签到任务",
     "periodic-signin": "刷新周期签到任务",
     "browser-control": "刷新浏览器状态",
-    cookiecloud: "刷新 CookieCloud 状态",
-    "web-credentials": "刷新 Web 凭据同步状态",
     "site-settings": "刷新站点设置",
     logs: "刷新运行日志",
     upgrade: "刷新升级状态",
@@ -376,12 +340,9 @@ function setBusy(busy) {
   elements.periodicSelectAllButton.disabled = busy || selectablePeriodicCandidates().length === 0;
   elements.periodicCollectButton.disabled = busy || state.periodicSelection.size === 0;
   elements.refreshButton.disabled = busy;
-  elements.tokenScriptButton.disabled = busy;
-  elements.tokenScriptCopyButton.disabled = busy;
   elements.siteBackupButton.disabled = busy;
   elements.siteRestoreButton.disabled = busy;
   for (const button of elements.periodicSiteRows.querySelectorAll("button, input")) button.disabled = busy;
-  for (const button of elements.webCredentialRows.querySelectorAll("button")) button.disabled = busy;
 }
 
 function renderBrowserControl() {
@@ -399,6 +360,11 @@ function renderBrowserControl() {
   const resolutionValue = `${viewport.width}x${viewport.height}`;
   elements.browserResolution.value = resolutionValue;
   elements.browserResolution.disabled = busy || changing;
+  elements.browserAudio.disabled = !active || !browser.audio_supported;
+  elements.browserAudio.setAttribute("aria-pressed", String(state.browserAudioEnabled));
+  elements.browserAudio.title = state.browserAudioEnabled ? "关闭声音" : "开启声音";
+  elements.browserAudio.setAttribute("aria-label", elements.browserAudio.title);
+  elements.browserAudio.querySelector("span").textContent = state.browserAudioEnabled ? "静" : "音";
   elements.browserRemoteShell.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
   elements.browserRemotePlaceholder.hidden = active && !changing;
   elements.browserRemoteCover.hidden = !active || !busy;
@@ -453,10 +419,77 @@ async function changeBrowserResolution() {
   }
 }
 
+function scheduleBrowserAudio(arrayBuffer) {
+  const context = browserAudioContext;
+  if (!context || context.state === "closed") return;
+  const samples = new Int16Array(arrayBuffer);
+  const frames = Math.floor(samples.length / 2);
+  if (!frames) return;
+  const buffer = context.createBuffer(2, frames, 48_000);
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  for (let frame = 0; frame < frames; frame += 1) {
+    left[frame] = samples[frame * 2] / 32768;
+    right[frame] = samples[frame * 2 + 1] / 32768;
+  }
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(context.destination);
+  const earliest = context.currentTime + 0.08;
+  if (browserAudioNextStart < earliest || browserAudioNextStart > context.currentTime + 1) {
+    browserAudioNextStart = earliest;
+  }
+  source.start(browserAudioNextStart);
+  browserAudioNextStart += buffer.duration;
+}
+
+async function startBrowserAudio() {
+  if (state.browserAudioEnabled || !state.browserControl.audio_supported) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) throw new Error("当前浏览器不支持远程音频播放");
+  browserAudioContext = new AudioContextClass({ sampleRate: 48_000 });
+  await browserAudioContext.resume();
+  browserAudioNextStart = 0;
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  browserAudioSocket = new WebSocket(`${protocol}//${location.host}/browser-control/audio`);
+  browserAudioSocket.binaryType = "arraybuffer";
+  browserAudioSocket.addEventListener("message", (event) => {
+    if (event.data instanceof ArrayBuffer) scheduleBrowserAudio(event.data);
+  });
+  browserAudioSocket.addEventListener("close", () => {
+    if (state.browserAudioEnabled) stopBrowserAudio();
+  }, { once: true });
+  state.browserAudioEnabled = true;
+  renderBrowserControl();
+}
+
+function stopBrowserAudio() {
+  state.browserAudioEnabled = false;
+  const socket = browserAudioSocket;
+  const context = browserAudioContext;
+  browserAudioSocket = null;
+  browserAudioContext = null;
+  browserAudioNextStart = 0;
+  if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+  if (context && context.state !== "closed") context.close();
+  renderBrowserControl();
+}
+
+async function toggleBrowserAudio() {
+  try {
+    if (state.browserAudioEnabled) stopBrowserAudio();
+    else await startBrowserAudio();
+  } catch (error) {
+    stopBrowserAudio();
+    showToast(error.message || "无法开启远程声音", true);
+  }
+}
+
 function setBrowserControlPolling(enabled) {
   window.clearInterval(browserStatusTimer);
   browserStatusTimer = null;
   if (!enabled) {
+    stopBrowserAudio();
     elements.browserRemoteFrame.removeAttribute("src");
     return;
   }
@@ -523,32 +556,6 @@ function lineValues(value) {
   return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).slice(0, 20);
 }
 
-function renderPtCredentialOptions() {
-  const selected = elements.ptCredential.value;
-  const candidateIds = new Set(state.ptCandidates
-    .filter((item) => item.recognized && !item.configured)
-    .map((item) => item.credential.id));
-  const credentials = state.credentials
-    .filter((item) => item.provider === "cookiecloud" && candidateIds.has(item.id))
-    .sort((left, right) => left.domain.localeCompare(right.domain));
-  elements.ptCredential.replaceChildren(new Option("请选择凭据", ""));
-  for (const item of credentials) {
-    const option = new Option(`${item.domain} · v${item.version}`, item.id);
-    elements.ptCredential.append(option);
-  }
-  if (credentials.some((item) => item.id === selected)) elements.ptCredential.value = selected;
-}
-
-function applyPtCredentialSuggestion() {
-  const credential = credentialById(elements.ptCredential.value);
-  if (!credential) return;
-  if (!elements.ptName.value.trim()) elements.ptName.value = credential.domain;
-  if (!elements.ptUrl.value.trim() || elements.ptUrl.dataset.suggested === "true") {
-    elements.ptUrl.value = `https://${credential.domain}/attendance.php`;
-    elements.ptUrl.dataset.suggested = "true";
-  }
-}
-
 function renderPtSummary() {
   document.querySelector("#pt-discovered-count").textContent = state.ptCandidates.filter((item) => item.recognized).length;
   document.querySelector("#pt-enabled-count").textContent = state.ptSites.filter((item) => item.enabled).length;
@@ -564,7 +571,6 @@ function candidateReasonLabel(candidate) {
   }
   return ({
     site_catalog: "站点目录",
-    cookie_signature: "PT Cookie 特征",
   })[candidate.reason] || "未识别";
 }
 
@@ -584,7 +590,7 @@ function updatePtCollectControls() {
 
 function renderPtCandidates() {
   const recognized = state.ptCandidates.filter((item) => item.recognized && !item.configured);
-  const validIds = new Set(selectablePtCandidates().map((item) => item.credential.id));
+  const validIds = new Set(selectablePtCandidates().map((item) => item.site_key));
   state.ptSelection = new Set([...state.ptSelection].filter((id) => validIds.has(id)));
   elements.ptUnknownCount.textContent = recognized.length;
   elements.ptCandidateRows.replaceChildren();
@@ -601,17 +607,17 @@ function renderPtCandidates() {
     checkbox.type = "checkbox";
     checkbox.className = "candidate-checkbox";
     checkbox.disabled = candidate.configured || !candidate.supported;
-    checkbox.checked = state.ptSelection.has(candidate.credential.id);
+    checkbox.checked = state.ptSelection.has(candidate.site_key);
     checkbox.setAttribute("aria-label", `选择 ${candidate.name}`);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.ptSelection.add(candidate.credential.id);
-      else state.ptSelection.delete(candidate.credential.id);
+      if (checkbox.checked) state.ptSelection.add(candidate.site_key);
+      else state.ptSelection.delete(candidate.site_key);
       updatePtCollectControls();
     });
     selectCell.append(checkbox);
     row.append(selectCell);
 
-    for (const value of [candidate.name, candidate.credential.domain, candidateReasonLabel(candidate)]) {
+    for (const value of [candidate.name, candidate.domain, candidateReasonLabel(candidate)]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -639,7 +645,7 @@ function renderPtSites() {
   }
   for (const site of state.ptSites) {
     const row = document.createElement("tr");
-    for (const value of [site.name, site.credential?.domain || "凭据已删除"]) {
+    for (const value of [site.name, site.domain || "-"]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -702,27 +708,6 @@ function renderPtSites() {
   }
 }
 
-function renderPeriodicCredentialOptions() {
-  const selected = elements.periodicCredential.value;
-  elements.periodicCredential.innerHTML = '<option value="">无需凭据</option>';
-  for (const credential of state.credentials.filter((item) => item.provider === "cookiecloud")) {
-    const option = document.createElement("option");
-    option.value = credential.id;
-    option.textContent = `${credential.domain} · v${credential.version}`;
-    elements.periodicCredential.append(option);
-  }
-  if (selected && [...elements.periodicCredential.options].some((option) => option.value === selected)) {
-    elements.periodicCredential.value = selected;
-  } else if (elements.periodicTemplate.value === "nodeseek") {
-    const recommended = state.credentials.find((item) => (
-      item.provider === "cookiecloud" && item.domain === "www.nodeseek.com"
-    )) || state.credentials.find((item) => (
-      item.provider === "cookiecloud" && item.domain === "nodeseek.com"
-    ));
-    elements.periodicCredential.value = recommended?.id || "";
-  }
-}
-
 function selectablePeriodicCandidates() {
   return state.periodicCandidates.filter((item) => item.supported && !item.configured);
 }
@@ -740,7 +725,7 @@ function updatePeriodicCollectControls() {
 
 function renderPeriodicCandidates() {
   const candidates = state.periodicCandidates.filter((item) => !item.configured);
-  const validIds = new Set(selectablePeriodicCandidates().map((item) => item.credential.id));
+  const validIds = new Set(selectablePeriodicCandidates().map((item) => item.site_key));
   state.periodicSelection = new Set(
     [...state.periodicSelection].filter((id) => validIds.has(id)),
   );
@@ -758,16 +743,17 @@ function renderPeriodicCandidates() {
     checkbox.type = "checkbox";
     checkbox.className = "candidate-checkbox";
     checkbox.disabled = !candidate.supported;
-    checkbox.checked = state.periodicSelection.has(candidate.credential.id);
+    checkbox.checked = state.periodicSelection.has(candidate.site_key);
     checkbox.setAttribute("aria-label", `选择 ${candidate.name}`);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.periodicSelection.add(candidate.credential.id);
-      else state.periodicSelection.delete(candidate.credential.id);
+      if (checkbox.checked) state.periodicSelection.add(candidate.site_key);
+      else state.periodicSelection.delete(candidate.site_key);
       updatePeriodicCollectControls();
     });
     selectCell.append(checkbox);
     row.append(selectCell);
-    for (const value of [candidate.name, candidate.credential.domain, "内置周期模板"]) {
+    const domain = new URL(candidate.url).hostname;
+    for (const value of [candidate.name, domain, "内置周期模板"]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -800,13 +786,12 @@ function applyPeriodicTemplate() {
     elements.periodicSuccessPatterns.value = "";
     elements.periodicAlreadyPatterns.value = "";
     elements.periodicAuthPatterns.value = "";
-    elements.periodicCredential.value = "";
     return;
   }
   elements.periodicName.value = "NodeSeek";
-  elements.periodicHandler.value = "http_signin";
+  elements.periodicHandler.value = "browser_signin";
   elements.periodicMethod.value = "POST";
-  elements.periodicUrl.value = "https://www.nodeseek.com/api/attendance?random=false";
+  elements.periodicUrl.value = "https://www.nodeseek.com/board";
   elements.periodicWaitSelector.value = "";
   elements.periodicClickSelector.value = "";
   elements.periodicClickRole.value = "";
@@ -816,7 +801,6 @@ function applyPeriodicTemplate() {
   elements.periodicSuccessPatterns.value = '"success"\\s*:\\s*true\n签到成功';
   elements.periodicAlreadyPatterns.value = "今日已签到\n已经签到\n重复签到";
   elements.periodicAuthPatterns.value = "请先登录\n未登录\n登录后";
-  renderPeriodicCredentialOptions();
 }
 
 function openPeriodicSchedule(site) {
@@ -896,7 +880,7 @@ function renderPeriodicSites() {
     link.textContent = site.name;
     nameCell.append(link);
     row.append(nameCell);
-    for (const value of [site.credential?.domain || "无需凭据", `${site.interval_hours} 小时`, formatDate(site.next_run_at)]) {
+    for (const value of [site.domain || "-", `${site.interval_hours} 小时`, formatDate(site.next_run_at)]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -954,7 +938,7 @@ function renderPeriodicHistory() {
       name.rel = "noopener noreferrer";
     }
     const domain = document.createElement("small");
-    domain.textContent = execution.domain || "无需凭据";
+    domain.textContent = execution.domain || "-";
     task.append(name, domain);
     taskCell.append(task);
     row.append(taskCell);
@@ -1235,32 +1219,6 @@ async function deletePtSite(site) {
   }
 }
 
-function renderWebCredentials(statuses) {
-  state.webCredentials = statuses;
-  const configuredCount = statuses.filter((item) => item.credential_configured).length;
-  const scriptConfigured = statuses.length > 0 && statuses.every((item) => item.script_configured);
-  elements.tokenSyncState.textContent = configuredCount === statuses.length && statuses.length
-    ? "同步正常" : scriptConfigured ? `已同步 ${configuredCount}/${statuses.length}` : "未配置";
-  elements.tokenSyncState.className = `status-badge${configuredCount === statuses.length && statuses.length ? " succeeded" : ""}`;
-  elements.tokenScriptButton.textContent = scriptConfigured ? "重新下载脚本" : "下载脚本";
-  elements.webCredentialRows.innerHTML = statuses.length ? statuses.map((status) => `
-    <tr>
-      <td>${escapeHtml(status.site)}</td>
-      <td>${escapeHtml(status.domain)}</td>
-      <td>${status.script_configured ? "已生成" : "未生成"}</td>
-      <td>${status.credential_configured ? `已加密保存 (${status.configured_keys.length} 项)` : "未同步"}</td>
-      <td>${escapeHtml(formatDate(status.last_sync_at))}</td>
-      <td><button class="table-button danger" type="button" data-web-credential-clear="${escapeHtml(status.source_key)}"
-        ${status.credential_configured ? "" : "disabled"}>清除凭据</button></td>
-    </tr>`).join("") : '<tr><td class="empty" colspan="6">暂无 Web 凭据来源</td></tr>';
-}
-
-async function loadWebCredentialStatus() {
-  const status = await api("/api/v1/web-credentials", { cache: "no-store" });
-  renderWebCredentials(status.items);
-  return status.items;
-}
-
 const DEBUG_STATUS_LABELS = {
   pending: "等待执行",
   running: "执行中",
@@ -1451,161 +1409,32 @@ async function waitForUpgrade() {
   showToast("升级状态等待超时，请查看服务日志", true);
 }
 
-function renderSelector() {
-  const selected = state.selected;
-  elements.selector.innerHTML = '<option value="">新建配置</option>';
-  for (const source of state.sources) {
-    const option = document.createElement("option");
-    option.value = source.uuid;
-    option.textContent = source.uuid;
-    elements.selector.append(option);
-  }
-  elements.selector.value = selected;
-}
-
-function renderSelected() {
-  const source = sourceByUuid(state.selected);
-  const uuid = source?.uuid || "";
-  elements.uuid.value = uuid;
-  elements.uuid.disabled = Boolean(source);
-  elements.password.value = "";
-  elements.password.placeholder = source?.password_configured ? "已保存（不自动回显）" : "";
-  elements.password.required = !source?.password_configured;
-  elements.passwordHint.textContent = source?.password_configured ? "已加密保存；留空将保留当前密码" : "新配置必须填写密码";
-  updateCredentialCopyControls();
-  elements.autoImport.checked = source ? source.auto_import : true;
-  elements.importButton.disabled = !source?.configured || !source?.password_configured || !source?.blob_updated_at;
-  document.querySelector("#status-uuid").textContent = uuid || "未选择";
-  document.querySelector("#last-upload").textContent = formatDate(source?.blob_updated_at);
-  document.querySelector("#last-import").textContent = formatDate(source?.last_import_at);
-  document.querySelector("#auto-import-state").textContent = source ? (source.auto_import ? "已启用" : "已停用") : "未配置";
-  const errorBox = document.querySelector("#error-box");
-  errorBox.hidden = !source?.last_error;
-  errorBox.textContent = source?.last_error || "";
-}
-
-function updateCredentialCopyControls() {
-  elements.copyUuidButton.disabled = !elements.uuid.value.trim();
-  const savedPasswordAvailable = Boolean(sourceByUuid(state.selected)?.password_configured);
-  elements.copyPasswordButton.disabled = !elements.password.value && !savedPasswordAvailable;
-  const label = elements.password.value ? "复制当前输入的 CookieCloud 密码" : "复制已保存的 CookieCloud 密码";
-  elements.copyPasswordButton.title = label;
-  elements.copyPasswordButton.setAttribute("aria-label", label);
-}
-
-async function writeClipboardText(value) {
-  const text = String(value ?? "");
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch (_) {}
-  }
-
-  const previousFocus = document.activeElement;
-  const textArea = document.createElement("textarea");
-  textArea.value = text;
-  textArea.readOnly = true;
-  textArea.setAttribute("aria-hidden", "true");
-  Object.assign(textArea.style, {
-    position: "fixed", top: "0", left: "0", width: "1px", height: "1px",
-    padding: "0", border: "0", opacity: "0", pointerEvents: "none",
-  });
-  document.body.append(textArea);
-  try {
-    textArea.focus();
-    textArea.select();
-    textArea.setSelectionRange(0, text.length);
-    if (!document.execCommand("copy")) throw new Error("copy command was rejected");
-  } finally {
-    textArea.remove();
-    if (previousFocus instanceof HTMLElement) previousFocus.focus({ preventScroll: true });
-  }
-}
-
-async function copyCredentialValue(value, successMessage) {
-  try {
-    await writeClipboardText(value);
-    showToast(successMessage);
-  } catch (_) {
-    showToast("浏览器未允许复制，请手动选择内容", true);
-  }
-}
-
-function renderSummary() {
-  const configured = state.sources.filter((item) => item.configured).length;
-  const imported = state.credentials.filter((item) => item.provider === "cookiecloud").length;
-  const selected = sourceByUuid(state.selected);
-  document.querySelector("#source-count").textContent = configured;
-  document.querySelector("#credential-count").textContent = imported;
-  document.querySelector("#sync-state").textContent = selected?.last_error ? "同步异常"
-    : selected?.last_import_at ? "最近导入成功"
-      : selected?.blob_updated_at ? "等待首次导入"
-        : configured ? "等待浏览器上传" : "等待配置";
-}
-
-function renderCredentials() {
-  const prefix = state.selected ? `cookiecloud:${state.selected}:` : "cookiecloud:";
-  const credentials = state.credentials.filter((item) => item.provider === "cookiecloud" && item.name.startsWith(prefix));
-  elements.rows.replaceChildren();
-  if (!credentials.length) {
-    elements.rows.innerHTML = '<tr><td class="empty" colspan="4">暂无已导入凭据</td></tr>';
-    return;
-  }
-  for (const item of credentials) {
-    const row = document.createElement("tr");
-    for (const value of [item.domain, "CookieCloud", `v${item.version}`, formatDate(item.updated_at)]) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
-    }
-    elements.rows.append(row);
-  }
-}
-
-function renderCookieCloud() {
-  renderSelector();
-  renderSelected();
-  renderSummary();
-  renderCredentials();
-}
-
 async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [sources, credentials, ptCandidates, ptSites, ptHistory, ptStats, webCredentials, accessSettings,
+    const [ptCandidates, ptSites, ptHistory, ptStats, accessSettings,
       periodicCandidates, periodicSites, periodicExecutions] = await Promise.all([
-      api("/api/v1/cookiecloud/sources"),
-      api("/api/v1/credentials"),
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
       api("/api/v1/pt-signin/stats"),
-      api("/api/v1/web-credentials", { cache: "no-store" }),
       api("/api/v1/system/access", { cache: "no-store" }),
       api("/api/v1/periodic-signin/candidates"),
       api("/api/v1/periodic-signin/sites"),
       api("/api/v1/periodic-signin/executions?limit=100"),
     ]);
-    state.sources = sources.items;
-    state.credentials = credentials.items;
     state.ptCandidates = ptCandidates.items;
     state.ptSites = ptSites.items;
     state.ptHistory = ptHistory;
     state.ptStats = ptStats.items;
-    state.webCredentials = webCredentials.items;
     state.lanOnly = accessSettings.lan_only;
     elements.lanOnlyAccess.checked = state.lanOnly;
     state.periodicCandidates = periodicCandidates.items;
     state.periodicSites = periodicSites.items;
     state.periodicExecutions = periodicExecutions.items;
-    if (state.selected && !sourceByUuid(state.selected)) state.selected = "";
-    if (!state.selected && state.sources.length === 1) state.selected = state.sources[0].uuid;
-    renderCookieCloud();
     renderPt();
     renderPeriodic();
-    renderWebCredentials(webCredentials.items);
     if (!quiet) showToast("状态已刷新");
   } catch (error) {
     if (error.status === 401) goToLogin();
@@ -1654,10 +1483,10 @@ async function refreshExecutionStates() {
 
 elements.ptSelectAllButton.addEventListener("click", () => {
   const selectable = selectablePtCandidates();
-  const allSelected = selectable.length > 0 && selectable.every((item) => state.ptSelection.has(item.credential.id));
+  const allSelected = selectable.length > 0 && selectable.every((item) => state.ptSelection.has(item.site_key));
   state.ptSelection = allSelected
     ? new Set()
-    : new Set(selectable.map((item) => item.credential.id));
+    : new Set(selectable.map((item) => item.site_key));
   renderPtCandidates();
 });
 
@@ -1668,7 +1497,7 @@ elements.ptCollectButton.addEventListener("click", async () => {
     const result = await api("/api/v1/pt-signin/sites/collect", {
       method: "POST",
       body: JSON.stringify({
-        credential_ids: [...state.ptSelection],
+        site_keys: [...state.ptSelection],
         interval_hours: Number(elements.ptCollectInterval.value),
         timeout_seconds: Number(elements.ptCollectTimeout.value),
         random_delay_minutes: Number(elements.ptCollectRandomDelay.value),
@@ -1689,11 +1518,11 @@ elements.ptCollectButton.addEventListener("click", async () => {
 elements.periodicSelectAllButton.addEventListener("click", () => {
   const selectable = selectablePeriodicCandidates();
   const allSelected = selectable.length > 0 && selectable.every(
-    (item) => state.periodicSelection.has(item.credential.id),
+    (item) => state.periodicSelection.has(item.site_key),
   );
   state.periodicSelection = allSelected
     ? new Set()
-    : new Set(selectable.map((item) => item.credential.id));
+    : new Set(selectable.map((item) => item.site_key));
   renderPeriodicCandidates();
 });
 
@@ -1704,7 +1533,7 @@ elements.periodicCollectButton.addEventListener("click", async () => {
     const result = await api("/api/v1/periodic-signin/sites/collect", {
       method: "POST",
       body: JSON.stringify({
-        credential_ids: [...state.periodicSelection],
+        site_keys: [...state.periodicSelection],
         interval_hours: Number(elements.periodicCollectInterval.value),
         timeout_seconds: Number(elements.periodicCollectTimeout.value),
         random_delay_minutes: Number(elements.periodicCollectRandomDelay.value),
@@ -1754,7 +1583,6 @@ elements.ptScheduleForm.addEventListener("submit", async (event) => {
   }
 });
 
-elements.ptCredential.addEventListener("change", applyPtCredentialSuggestion);
 elements.ptUrl.addEventListener("input", () => { elements.ptUrl.dataset.suggested = "false"; });
 elements.ptForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1764,7 +1592,6 @@ elements.ptForm.addEventListener("submit", async (event) => {
       method: "POST",
       body: JSON.stringify({
         name: elements.ptName.value.trim(),
-        credential_id: elements.ptCredential.value,
         url: elements.ptUrl.value.trim(),
         interval_hours: Number(elements.ptInterval.value),
         timeout_seconds: Number(elements.ptTimeout.value),
@@ -1826,7 +1653,6 @@ elements.periodicForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         name: elements.periodicName.value.trim(),
         handler_type: elements.periodicHandler.value,
-        credential_id: elements.periodicCredential.value || null,
         template_key: template === "nodeseek" ? "nodeseek" : null,
         url: elements.periodicUrl.value.trim(),
         interval_hours: Number(elements.periodicInterval.value),
@@ -1857,146 +1683,13 @@ elements.periodicForm.addEventListener("submit", async (event) => {
   }
 });
 
-elements.selector.addEventListener("change", () => {
-  state.selected = elements.selector.value;
-  renderSelected();
-  renderSummary();
-  renderCredentials();
-});
-
-elements.form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const uuid = elements.uuid.value.trim();
-  const password = elements.password.value;
-  if (!uuid) return;
-  setBusy(true);
-  try {
-    const selected = sourceByUuid(state.selected);
-    if (selected?.configured && !password) {
-      await api(`/api/v1/cookiecloud/sources/${encodeURIComponent(uuid)}/settings`, {
-        method: "PATCH", body: JSON.stringify({ auto_import: elements.autoImport.checked }),
-      });
-    } else {
-      await api(`/api/v1/cookiecloud/sources/${encodeURIComponent(uuid)}`, {
-        method: "PUT", body: JSON.stringify({ uuid, password, auto_import: elements.autoImport.checked }),
-      });
-    }
-    state.selected = uuid;
-    await refresh({ quiet: true });
-    showToast("CookieCloud 配置已保存");
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    setBusy(false);
-  }
-});
-
-elements.importButton.addEventListener("click", async () => {
-  const uuid = state.selected;
-  if (!uuid) return;
-  setBusy(true);
-  try {
-    const result = await api(`/api/v1/cookiecloud/sources/${encodeURIComponent(uuid)}/import`, {
-      method: "POST", body: JSON.stringify({ password: null }),
-    });
-    await refresh({ quiet: true });
-    showToast(`导入完成：${result.credentials.length} 个域名`);
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    setBusy(false);
-  }
-});
-
 elements.refreshButton.addEventListener("click", () => {
   if (state.activeView === "upgrade") loadUpgradeStatus();
   else if (state.activeView === "logs") loadDebugLogs();
   else if (state.activeView === "browser-control") loadBrowserControlStatus();
   else refresh();
 });
-elements.copyButton.addEventListener("click", async () => {
-  try {
-    await writeClipboardText(elements.endpoint.textContent);
-    showToast("连接地址已复制");
-  } catch (_) {
-    showToast("浏览器未允许复制，请手动选择地址", true);
-  }
-});
-elements.uuid.addEventListener("input", updateCredentialCopyControls);
-elements.password.addEventListener("input", updateCredentialCopyControls);
-elements.copyUuidButton.addEventListener("click", () => (
-  copyCredentialValue(elements.uuid.value.trim(), "UUID 已复制")
-));
-elements.copyPasswordButton.addEventListener("click", async () => {
-  try {
-    let password = elements.password.value;
-    if (!password) {
-      const uuid = state.selected;
-      if (!uuid) return;
-      const result = await api(
-        `/api/v1/cookiecloud/sources/${encodeURIComponent(uuid)}/password/reveal`,
-        { method: "POST", body: "{}", cache: "no-store" },
-      );
-      password = result.password;
-    }
-    await copyCredentialValue(password, "CookieCloud 密码已复制");
-  } catch (error) {
-    showToast(error.message, true);
-  }
-});
-async function generateWebCredentialScript() {
-  const baseUrl = elements.tokenSyncBaseUrl.value.trim();
-  if (!baseUrl) throw new Error("请填写上送地址");
-  const response = await fetch("/api/v1/web-credentials/userscript", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base_url: baseUrl }),
-  });
-  if (!response.ok) {
-    let message = `脚本生成失败 (${response.status})`;
-    try { message = (await response.json()).detail || message; } catch (_) {}
-    const error = new Error(message);
-    error.status = response.status;
-    throw error;
-  }
-  const script = await response.text();
-  await loadWebCredentialStatus();
-  return script;
-}
-
-elements.tokenScriptButton.addEventListener("click", async () => {
-  setBusy(true);
-  try {
-    const script = await generateWebCredentialScript();
-    const blobUrl = URL.createObjectURL(new Blob([script], { type: "text/javascript;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = blobUrl;
-    link.download = "autosurf-web-credential-sync.user.js";
-    document.body.append(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(blobUrl);
-    showToast("同步脚本已下载；旧脚本的上传密钥同时失效");
-  } catch (error) {
-    if (error.status === 401) goToLogin();
-    else showToast(error.message, true);
-  } finally {
-    setBusy(false);
-  }
-});
-elements.tokenScriptCopyButton.addEventListener("click", async () => {
-  setBusy(true);
-  try {
-    const script = await generateWebCredentialScript();
-    await writeClipboardText(script);
-    showToast("同步脚本已复制；旧脚本的上传密钥同时失效");
-  } catch (error) {
-    if (error.status === 401) goToLogin();
-    else showToast(error.message || "浏览器未允许复制", true);
-  } finally {
-    setBusy(false);
-  }
-});
+elements.browserAudio.addEventListener("click", toggleBrowserAudio);
 
 elements.siteBackupButton.addEventListener("click", async () => {
   setBusy(true);
@@ -2042,7 +1735,7 @@ elements.siteRestoreButton.addEventListener("click", () => elements.siteRestoreF
 elements.siteRestoreFile.addEventListener("change", async () => {
   const file = elements.siteRestoreFile.files?.[0];
   elements.siteRestoreFile.value = "";
-  if (!file || !window.confirm("恢复会替换现有站点任务、凭据和 CookieCloud 配置，继续？")) return;
+  if (!file || !window.confirm("恢复会替换现有站点任务，继续？")) return;
   setBusy(true);
   try {
     const response = await fetch("/api/v1/site-settings/restore", {
@@ -2054,26 +1747,8 @@ elements.siteRestoreFile.addEventListener("change", async () => {
       throw new Error(message);
     }
     const result = await response.json();
-    state.selected = "";
     await refresh({ quiet: true });
-    showToast(`已恢复 ${result.automation_count} 个任务和 ${result.credential_count} 个凭据`);
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    setBusy(false);
-  }
-});
-elements.webCredentialRows.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-web-credential-clear]");
-  if (!button) return;
-  const sourceKey = button.dataset.webCredentialClear;
-  const status = state.webCredentials.find((item) => item.source_key === sourceKey);
-  if (!status || !window.confirm(`清除 AutoSurf 中已同步的 ${status.site} Web 凭据？`)) return;
-  setBusy(true);
-  try {
-    await api(`/api/v1/web-credentials/${encodeURIComponent(sourceKey)}/values`, { method: "DELETE" });
-    await loadWebCredentialStatus();
-    showToast(`${status.site} Web 凭据已清除`);
+    showToast(`已恢复 ${result.automation_count} 个任务`);
   } catch (error) {
     showToast(error.message, true);
   } finally {
@@ -2112,6 +1787,7 @@ elements.upgradeStartButton.addEventListener("click", async () => {
     await loadUpgradeStatus();
   }
 });
+
 
 const settingsTabs = [...elements.settingsTabs];
 settingsTabs.forEach((button, index) => {

@@ -193,7 +193,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
         display_settings=display_settings,
     )
     started = await service.start()
-    assert started["active"] is True
+    assert started["active"] is True, started["error"]
     assert started["starting"] is False
     assert started["always_on"] is True
     assert started["remote_url"].startswith("/browser-control/remote/vnc.html?")
@@ -355,6 +355,9 @@ def test_browser_control_uses_unix_socket_and_existing_port_only():
     )
     assert "linux/arm64" not in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "AUTOSURF_BROWSER_CHANNEL=chrome" in dockerfile
+    assert "pulseaudio pulseaudio-utils" in dockerfile
+    assert "module-null-sink" in entrypoint
+    assert "AUTOSURF_AUDIO_SOURCE" in entrypoint
     assert "playwright install chromium" not in entrypoint
     assert "playwright install chromium" not in upgrade
 
@@ -370,6 +373,7 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'id="browser-remote-frame"' in html
     assert 'id="browser-fullscreen"' in html
     assert 'id="browser-resolution"' in html
+    assert 'id="browser-audio"' in html
     assert 'value="1920x1080"' in html
     assert 'title="Chrome 远程桌面"' in html
     assert 'id="browser-remote-cover"' in html
@@ -379,6 +383,8 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'api("/api/v1/browser-control"' in javascript
     assert '"/browser-control/remote/vnc.html?' in javascript
     assert "path=websockify" in javascript
+    assert "/browser-control/audio" in javascript
+    assert "new AudioContextClass" in javascript
     assert "requestFullscreen" in javascript
     assert 'method: "PATCH"' in javascript
     assert 'browserRemoteShell: document.querySelector("#browser-remote-shell")' in javascript
@@ -387,6 +393,56 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert "/api/v1/browser-control/frame" not in javascript
     assert "aspect-ratio: var(--browser-aspect-ratio, 1365 / 768)" in css
     assert ".browser-control-panel:fullscreen" in css
+
+
+@pytest.mark.asyncio
+async def test_browser_audio_streams_pcm_and_stops_capture(tmp_path, monkeypatch):
+    commands = []
+
+    class AudioStream:
+        async def read(self, _size):
+            return b"\x00\x00\x01\x00"
+
+    class AudioProcess(FakeProcess):
+        def __init__(self):
+            super().__init__()
+            self.stdout = AudioStream()
+
+    async def process_factory(*args, **kwargs):
+        commands.append((args, kwargs))
+        return AudioProcess()
+
+    class WebSocket:
+        def __init__(self):
+            self.accepted = False
+            self.payloads = []
+            self.closed = False
+
+        async def accept(self):
+            self.accepted = True
+
+        async def send_bytes(self, payload):
+            self.payloads.append(payload)
+            raise RuntimeError("client disconnected")
+
+        async def close(self, **_kwargs):
+            self.closed = True
+
+    monkeypatch.setattr("autosurf.browser_control.shutil.which", lambda value: "/usr/bin/parec" if value == "parec" else None)
+    monkeypatch.setenv("AUTOSURF_AUDIO_SOURCE", "autosurf.monitor")
+    service = BrowserControlService(process_factory=process_factory, socket_path=tmp_path / "novnc.sock")
+    websocket = WebSocket()
+
+    await service.stream_audio(websocket)
+
+    assert websocket.accepted is True
+    assert websocket.payloads == [b"\x00\x00\x01\x00"]
+    assert websocket.closed is True
+    args, kwargs = commands[0]
+    assert args[:3] == ("/usr/bin/parec", "--device=autosurf.monitor", "--format=s16le")
+    assert "--rate=48000" in args
+    assert "--channels=2" in args
+    assert kwargs["stdout"] == asyncio.subprocess.PIPE
 
 
 def test_browser_display_resolution_persists_in_system_settings(settings):

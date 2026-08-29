@@ -35,8 +35,8 @@ class PtSiteDefinition:
     default_profile_refresh: bool = False
 
 
-# This catalog supplies stable names and known sign-in paths. Cookie signatures
-# cover NexusPHP sites that are not listed here.
+# This catalog supplies stable names and known sign-in paths. Browser automation
+# reads all authentication state from the persistent Chrome profile.
 PT_SITE_CATALOG = (
     PtSiteDefinition("pt.hdupt.com", "HDU PT"),
     PtSiteDefinition("pterclub.net", "PterClub", aliases=("pterclub.com",)),
@@ -52,8 +52,8 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("ptchdbits.co", "CHDBits", "/bakatest.php"),
     PtSiteDefinition("hdcity.city", "HDCity", "/"),
     PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
-    PtSiteDefinition("rousi.pro", "Rousi", "/", "custom_required", aliases=("rousi.zip",)),
-    PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "custom_required"),
+    PtSiteDefinition("rousi.pro", "Rousi", "/", "web_storage_browser", aliases=("rousi.zip",)),
+    PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "web_storage_profile_refresh_only"),
     PtSiteDefinition("totheglory.im", "TTG", "/"),
     PtSiteDefinition(
         "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
@@ -131,13 +131,6 @@ def discover_pt_site(domain: str, cookie_names: set[str] | frozenset[str]) -> Pt
         # automation targets.
         target_domain = definition.target_domain or definition.domain
         strategy = definition.strategy
-        web_storage_strategies = {
-            "rousi.pro": ("token", "web_storage_browser"),
-            "kp.m-team.cc": ("auth", "web_storage_profile_refresh_only"),
-        }
-        web_storage = web_storage_strategies.get(definition.domain)
-        if web_storage and web_storage[0] in lowered_names:
-            strategy = web_storage[1]
         return PtDiscovery(
             site_key=definition.domain,
             name=definition.name,
@@ -194,9 +187,9 @@ def _site_definition(domain: str) -> PtSiteDefinition | None:
     ), None)
 
 
-def _domain_matches(credential_domain: str, catalog_domain: str) -> bool:
+def _domain_matches(candidate_domain: str, catalog_domain: str) -> bool:
     return (
-        credential_domain == catalog_domain
-        or credential_domain.endswith(f".{catalog_domain}")
-        or catalog_domain.endswith(f".{credential_domain}")
+        candidate_domain == catalog_domain
+        or candidate_domain.endswith(f".{catalog_domain}")
+        or catalog_domain.endswith(f".{candidate_domain}")
     )
