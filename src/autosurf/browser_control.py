@@ -150,7 +150,7 @@ class BrowserControlService:
             "remote_url": (
                 f"{REMOTE_DESKTOP_PREFIX}/vnc.html"
                 f"?autoconnect=1&resize=scale&reconnect=1&reconnect_delay=2000"
-                f"&path=browser-control/remote/websockify"
+                f"&path=websockify"
             ),
             "restart_count": self._restart_count,
             "stream_log": self._stream_log,

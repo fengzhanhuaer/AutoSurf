@@ -26,7 +26,7 @@ const state = {
     title: "",
     error: null,
     busy: false,
-    remote_url: "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=browser-control/remote/websockify",
+    remote_url: "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify",
     viewport: { width: 1365, height: 768 },
   },
 };
@@ -393,7 +393,7 @@ function renderBrowserControl() {
   elements.browserRemotePlaceholder.hidden = active;
   elements.browserRemoteCover.hidden = !active || !busy;
   if (active && state.activeView === "browser-control" && !document.hidden) {
-    const remoteUrl = browser.remote_url || "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=browser-control/remote/websockify";
+    const remoteUrl = browser.remote_url || "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify";
     if (!elements.browserRemoteFrame.getAttribute("src")) {
       elements.browserRemoteFrame.src = remoteUrl;
     }

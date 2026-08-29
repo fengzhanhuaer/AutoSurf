@@ -160,7 +160,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     assert started["starting"] is False
     assert started["always_on"] is True
     assert started["remote_url"].startswith("/browser-control/remote/vnc.html?")
-    assert "path=browser-control/remote/websockify" in started["remote_url"]
+    assert "path=websockify" in started["remote_url"]
     assert launched == [("browser-control", True)]
 
     run_context = RunContext("execution-1", {"url": "https://example.com/"}, {})
@@ -218,7 +218,7 @@ class FakeBrowserControlApi:
             "always_on": True,
             "busy": False,
             "automation_owner": None,
-            "remote_url": "/browser-control/remote/vnc.html?autoconnect=1&path=browser-control/remote/websockify",
+            "remote_url": "/browser-control/remote/vnc.html?autoconnect=1&path=websockify",
         }
 
 
@@ -271,7 +271,7 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'id="browser-frame"' not in html
     assert 'api("/api/v1/browser-control"' in javascript
     assert '"/browser-control/remote/vnc.html?' in javascript
-    assert "path=browser-control/remote/websockify" in javascript
+    assert "path=websockify" in javascript
     assert "requestFullscreen" in javascript
     assert 'document.addEventListener("fullscreenchange"' in javascript
     assert "/api/v1/browser-control/frame" not in javascript
