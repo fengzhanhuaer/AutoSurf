@@ -7,6 +7,7 @@ from autosurf.automations.browser_session import (
     _restore_waf_cookie_state,
     _save_waf_cookie_state,
     _prepare_shared_profile,
+    _remove_stale_chrome_singletons,
     PersistentBrowserRuntime,
     bootstrap_browser_environment,
     browser_environment_run_context,
@@ -123,6 +124,23 @@ async def test_shared_browser_profile_seeds_from_latest_legacy_profile(tmp_path)
     await _prepare_shared_profile(shared)
 
     assert shared.joinpath("marker").read_text(encoding="utf-8") == "latest"
+
+
+@pytest.mark.asyncio
+async def test_shared_browser_profile_removes_only_stale_chrome_singletons(tmp_path):
+    profile = tmp_path / "shared"
+    profile.mkdir()
+    profile.joinpath("SingletonCookie").write_text("stale", encoding="utf-8")
+    profile.joinpath("SingletonLock").symlink_to("old-container-123")
+    profile.joinpath("SingletonSocket").symlink_to("/tmp/old-container/socket")
+    profile.joinpath("Local State").write_text("login-data", encoding="utf-8")
+
+    await _remove_stale_chrome_singletons(profile)
+
+    assert not profile.joinpath("SingletonCookie").exists()
+    assert not profile.joinpath("SingletonLock").is_symlink()
+    assert not profile.joinpath("SingletonSocket").is_symlink()
+    assert profile.joinpath("Local State").read_text(encoding="utf-8") == "login-data"
 
 
 def test_browser_mode_falls_back_to_persistent_headless_without_xvfb(monkeypatch):

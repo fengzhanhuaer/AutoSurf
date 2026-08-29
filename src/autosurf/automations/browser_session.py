@@ -20,6 +20,11 @@ WAF_COOKIE_NAMES = frozenset({
     "sl-session",
 })
 SHARED_PROFILE_KEY = "shared"
+CHROME_SINGLETON_FILES = (
+    "SingletonCookie",
+    "SingletonLock",
+    "SingletonSocket",
+)
 _PROFILE_LOCKS: dict[str, asyncio.Lock] = {}
 _SHARED_BROWSER_PROVIDER: "SharedBrowserProvider | None" = None
 
@@ -160,6 +165,7 @@ async def launch_persistent_browser(
         validated_http_url(url)
     profile_path = browser_profile_path()
     await _prepare_shared_profile(profile_path)
+    await _remove_stale_chrome_singletons(profile_path)
     mode = persistent_browser_mode()
     display = None
     browser_context = None
@@ -493,6 +499,18 @@ async def _prepare_shared_profile(profile_path: Path) -> None:
         await asyncio.to_thread(shutil.copytree, latest, profile_path)
     except FileExistsError:
         pass
+
+
+async def _remove_stale_chrome_singletons(profile_path: Path) -> None:
+    """Drop process-scoped locks left behind when a container is replaced."""
+
+    def remove() -> None:
+        for name in CHROME_SINGLETON_FILES:
+            path = profile_path / name
+            if path.is_symlink() or path.is_file():
+                path.unlink(missing_ok=True)
+
+    await asyncio.to_thread(remove)
 
 
 def _stored_cookie(item: dict[str, Any]) -> dict[str, Any]:
