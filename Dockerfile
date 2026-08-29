@@ -15,6 +15,18 @@ RUN apt-get update \
     && python -m playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 autosurf
+
+RUN set -eux; \
+    architecture="$(dpkg --print-architecture)"; \
+    case "$architecture" in amd64|arm64) ;; *) echo "Unsupported Chrome architecture: $architecture" >&2; exit 1 ;; esac; \
+    python -c "import urllib.request; urllib.request.urlretrieve('https://dl.google.com/linux/direct/google-chrome-stable_current_${architecture}.deb', '/tmp/google-chrome.deb')"; \
+    apt-get update; \
+    apt-get install --no-install-recommends -y /tmp/google-chrome.deb; \
+    rm -f /tmp/google-chrome.deb; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV AUTOSURF_BROWSER_CHANNEL=chrome \
+    AUTOSURF_BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 WORKDIR /app
 COPY docker/entrypoint.sh /usr/local/bin/autosurf-entrypoint
 COPY docker/autosurf-upgrade /usr/local/bin/autosurf-upgrade

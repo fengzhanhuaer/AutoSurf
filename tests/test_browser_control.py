@@ -242,6 +242,9 @@ async def test_browser_control_status_and_remote_proxy_require_login(settings):
 
 def test_browser_control_uses_unix_socket_and_existing_port_only():
     compose = Path("compose.yaml").read_text(encoding="utf-8")
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    entrypoint = Path("docker/entrypoint.sh").read_text(encoding="utf-8")
+    upgrade = Path("docker/autosurf-upgrade").read_text(encoding="utf-8")
     project = Path("pyproject.toml").read_text(encoding="utf-8")
     source = Path("src/autosurf/browser_control.py").read_text(encoding="utf-8")
     assert '"aiohttp>=3.11,<4"' in project
@@ -252,6 +255,10 @@ def test_browser_control_uses_unix_socket_and_existing_port_only():
     assert '"-localhost"' in source
     assert '"--unix-listen=' in source
     assert "--subfolder=/browser-control/remote" not in compose
+    assert "google-chrome-stable_current_${architecture}.deb" in dockerfile
+    assert "AUTOSURF_BROWSER_CHANNEL=chrome" in dockerfile
+    assert "playwright install chromium" not in entrypoint
+    assert "playwright install chromium" not in upgrade
 
 
 def test_browser_control_management_ui_embeds_full_remote_desktop():
@@ -264,7 +271,7 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'id="browser-control-surface"' in html
     assert 'id="browser-remote-frame"' in html
     assert 'id="browser-fullscreen"' in html
-    assert 'title="Chromium 远程桌面"' in html
+    assert 'title="Chrome 远程桌面"' in html
     assert 'id="browser-remote-cover"' in html
     assert 'id="browser-address-form"' not in html
     assert 'id="browser-start"' not in html

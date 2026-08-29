@@ -51,7 +51,6 @@ fi
         "refs/remotes/origin/$branch"
     git -c "safe.directory=$program_dir" -C "$program_dir" clean -fd
     "$venv_dir/bin/autosurf" upgrade --repository "$program_dir"
-    "$venv_dir/bin/python" -m playwright install chromium
 } >> "$log_file" 2>&1
 
 upgrade_state=complete

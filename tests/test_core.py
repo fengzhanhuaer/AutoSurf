@@ -53,6 +53,26 @@ def test_browser_bootstrap_includes_cookie_and_web_storage_credentials(settings)
     assert contexts["https://kp.m-team.cc/"].browser_cookies == []
 
 
+def test_browser_runtime_reports_configured_google_chrome(tmp_path, monkeypatch):
+    from autosurf.api import _browser_runtime
+
+    executable = tmp_path / "google-chrome-stable"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AUTOSURF_BROWSER_EXECUTABLE_PATH", str(executable))
+    monkeypatch.setattr(
+        "autosurf.api.subprocess.run",
+        lambda *_args, **_kwargs: type(
+            "Result", (), {"stdout": "Google Chrome 150.0.1.2\n"}
+        )(),
+    )
+
+    runtime = _browser_runtime()
+
+    assert runtime["installed"] is True
+    assert runtime["browser_name"] == "Google Chrome"
+    assert runtime["browser_version"] == "150.0.1.2"
+
+
 def test_reconcile_signin_schedules_preserves_execution_history(settings):
     app = create_app(settings)
     automation = app.state.automations.create(

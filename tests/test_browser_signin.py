@@ -11,6 +11,7 @@ from autosurf.automations.browser_session import (
     bootstrap_browser_environment,
     browser_environment_run_context,
     browser_profile_path,
+    launch_persistent_browser,
     persistent_browser_mode,
     playwright_cookies,
     supplement_playwright_cookies,
@@ -135,6 +136,31 @@ def test_browser_mode_falls_back_to_persistent_headless_without_xvfb(monkeypatch
 
     monkeypatch.setenv("AUTOSURF_BROWSER_HEADLESS", "false")
     assert persistent_browser_mode() == "persistent_headful"
+
+
+@pytest.mark.asyncio
+async def test_docker_browser_uses_the_google_chrome_channel(tmp_path, monkeypatch):
+    class Chromium:
+        executable_path = "/playwright/chromium"
+
+        def __init__(self):
+            self.kwargs = None
+
+        async def launch_persistent_context(self, _profile_path, **kwargs):
+            self.kwargs = kwargs
+            return object()
+
+    chromium = Chromium()
+    playwright = type("Playwright", (), {"chromium": chromium})()
+    monkeypatch.setenv("AUTOSURF_BROWSER_CHANNEL", "chrome")
+    monkeypatch.setenv("AUTOSURF_BROWSER_HEADLESS", "true")
+    monkeypatch.setenv("AUTOSURF_BROWSER_PROFILE_DIR", str(tmp_path))
+
+    runtime = await launch_persistent_browser(playwright, RunContext("start", {}, {}))
+
+    assert runtime.context is not None
+    assert chromium.kwargs["channel"] == "chrome"
+    assert "executable_path" not in chromium.kwargs
 
 
 @pytest.mark.asyncio

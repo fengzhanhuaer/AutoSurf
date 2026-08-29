@@ -171,11 +171,15 @@ async def launch_persistent_browser(
         args = ["--disable-dev-shm-usage"]
         kwargs: dict[str, Any] = {
             "headless": mode == "persistent_headless",
-            "executable_path": playwright.chromium.executable_path,
             "locale": str(run_context.config.get("locale", "zh-CN")),
             "env": launch_env,
             "args": args,
         }
+        browser_channel = os.environ.get("AUTOSURF_BROWSER_CHANNEL", "").strip()
+        if browser_channel:
+            kwargs["channel"] = browser_channel
+        else:
+            kwargs["executable_path"] = playwright.chromium.executable_path
         if remote_desktop and mode == "persistent_headful":
             args.extend([
                 "--window-position=0,0",

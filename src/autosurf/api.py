@@ -353,6 +353,7 @@ def _settle_stale_upgrade(request: Request, last: dict[str, str] | None, *, runn
 
 def _browser_runtime() -> dict[str, Any]:
     browser_root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""))
+    configured_executable = os.environ.get("AUTOSURF_BROWSER_EXECUTABLE_PATH", "").strip()
     try:
         playwright_version = version("playwright")
     except PackageNotFoundError:
@@ -368,12 +369,34 @@ def _browser_runtime() -> dict[str, Any]:
         chromium_version = str(chromium.get("browserVersion") or "") or None
     except (ImportError, KeyError, OSError, StopIteration, TypeError, ValueError):
         pass
-    installed = bool(
-        browser_root.name and chromium_revision
-        and browser_root.joinpath(f"chromium-{chromium_revision}", "chrome-linux64", "chrome").is_file()
-    )
+    browser_name = "Chromium"
+    browser_version = chromium_version
+    if configured_executable:
+        executable = Path(configured_executable)
+        installed = executable.is_file()
+        browser_name = "Google Chrome"
+        browser_version = None
+        if installed:
+            with suppress(OSError, subprocess.SubprocessError):
+                output = subprocess.run(
+                    [str(executable), "--version"],
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.strip()
+                browser_version = re.sub(r"^Google Chrome\s+", "", output) or None
+    else:
+        installed = bool(
+            browser_root.name and chromium_revision
+            and browser_root.joinpath(
+                f"chromium-{chromium_revision}", "chrome-linux64", "chrome"
+            ).is_file()
+        )
     return {
         "installed": installed,
+        "browser_name": browser_name,
+        "browser_version": browser_version,
         "playwright_version": playwright_version,
         "persistent": bool(os.environ.get("PLAYWRIGHT_BROWSERS_PATH")),
         "session_mode": persistent_browser_mode(),

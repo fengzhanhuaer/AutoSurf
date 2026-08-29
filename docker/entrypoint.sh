@@ -31,14 +31,10 @@ if [ ! -x "$venv_dir/bin/autosurf" ]; then
     "$venv_dir/bin/python" -m pip install --disable-pip-version-check --no-cache-dir -e "$program_dir"
 fi
 
-chromium_executable=$("$venv_dir/bin/python" - <<'PY'
-from playwright.sync_api import sync_playwright
-with sync_playwright() as playwright:
-    print(playwright.chromium.executable_path)
-PY
-)
-if [ ! -x "$chromium_executable" ]; then
-    "$venv_dir/bin/python" -m playwright install chromium
+chrome_executable=${AUTOSURF_BROWSER_EXECUTABLE_PATH:-/usr/bin/google-chrome-stable}
+if [ ! -x "$chrome_executable" ]; then
+    echo "Google Chrome runtime is missing: $chrome_executable" >&2
+    exit 1
 fi
 
 terminate_child() {
