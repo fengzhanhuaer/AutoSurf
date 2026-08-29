@@ -102,7 +102,7 @@ class FakeProcess:
 
 @pytest.mark.asyncio
 async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, monkeypatch):
-    socket_path = tmp_path / "selkies.sock"
+    socket_path = tmp_path / "novnc.sock"
     context = FakeContext()
     runtime = PersistentBrowserRuntime(
         context=context,
@@ -113,6 +113,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     playwright = FakePlaywright()
     launched = []
     closed = []
+    processes = []
 
     async def browser_launcher(_playwright, run_context, *, remote_desktop):
         launched.append((run_context.execution_id, remote_desktop))
@@ -122,11 +123,18 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
         closed.append(value)
 
     async def process_factory(*args, **kwargs):
-        assert "--unix-socket=" + str(socket_path) in args
-        assert "--subfolder=/browser-control/remote" in args
         assert kwargs["env"]["DISPLAY"] == ":90"
-        socket_path.touch()
-        return FakeProcess()
+        process = FakeProcess()
+        processes.append((args, process))
+        if args[0] == "x11vnc":
+            assert "-localhost" in args
+            assert "-rfbport" in args
+        else:
+            assert args[0] == "websockify"
+            assert "--unix-listen=" + str(socket_path) in args
+            assert "--web=/usr/share/novnc" in args
+            socket_path.touch()
+        return process
 
     prepared = []
     saved = []
@@ -150,7 +158,8 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     started = await service.start()
     assert started["active"] is True
     assert started["always_on"] is True
-    assert started["remote_url"] == "/browser-control/remote/"
+    assert started["remote_url"].startswith("/browser-control/remote/vnc.html?")
+    assert "path=browser-control/remote/websockify" in started["remote_url"]
     assert launched == [("browser-control", True)]
 
     run_context = RunContext("execution-1", {"url": "https://example.com/"}, {})
@@ -168,6 +177,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     assert (await service.status())["active"] is True
 
     await service.shutdown()
+    assert all(process.returncode == 0 for _, process in processes)
     assert closed == [runtime]
     assert playwright.stopped is True
     assert (await service.status())["active"] is False
@@ -207,7 +217,7 @@ class FakeBrowserControlApi:
             "always_on": True,
             "busy": False,
             "automation_owner": None,
-            "remote_url": "/browser-control/remote/",
+            "remote_url": "/browser-control/remote/vnc.html?autoconnect=1&path=browser-control/remote/websockify",
         }
 
 
@@ -236,7 +246,8 @@ def test_browser_control_uses_unix_socket_and_existing_port_only():
     assert "18981" not in compose
     assert "6080" not in compose
     assert "5900" not in compose
-    assert "--unix-socket=" in source
+    assert '"-localhost"' in source
+    assert '"--unix-listen=' in source
     assert "--subfolder=/browser-control/remote" not in compose
 
 
@@ -256,7 +267,8 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'id="browser-start"' not in html
     assert 'id="browser-frame"' not in html
     assert 'api("/api/v1/browser-control"' in javascript
-    assert '"/browser-control/remote/"' in javascript
+    assert '"/browser-control/remote/vnc.html?' in javascript
+    assert "path=browser-control/remote/websockify" in javascript
     assert "requestFullscreen" in javascript
     assert 'document.addEventListener("fullscreenchange"' in javascript
     assert "/api/v1/browser-control/frame" not in javascript

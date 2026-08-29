@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
-        git tini wmctrl x11-utils x11-xkb-utils x11-xserver-utils \
+        git tini novnc websockify x11vnc wmctrl x11-utils x11-xkb-utils x11-xserver-utils \
         libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 \
         libxtst6 libxext6 libpulse0 \
     && pip install --no-cache-dir playwright==1.61.0 \

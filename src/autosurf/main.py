@@ -150,7 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def browser_remote_http(request: Request, path: str = ""):
         return await browser_control.proxy_http(request, path)
 
-    @app.websocket(f"{REMOTE_DESKTOP_PREFIX}/api/websockets")
+    @app.websocket(f"{REMOTE_DESKTOP_PREFIX}/websockify")
     async def browser_remote_websocket(websocket: WebSocket) -> None:
         client_host = websocket.client.host if websocket.client else None
         if lan_access.lan_only and not is_lan_address(client_host):

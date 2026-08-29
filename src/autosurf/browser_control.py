@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable
@@ -23,7 +22,8 @@ from autosurf.domain.models import RunContext
 
 
 REMOTE_DESKTOP_PREFIX = "/browser-control/remote"
-DEFAULT_SOCKET_PATH = Path("/tmp/autosurf-selkies.sock")
+DEFAULT_SOCKET_PATH = Path("/tmp/autosurf-novnc.sock")
+VNC_LOOPBACK_PORT = 5900
 RESTART_DELAY_SECONDS = 3
 STARTUP_TIMEOUT_SECONDS = 30
 
@@ -57,7 +57,8 @@ class BrowserControlService:
         self._stop_event: asyncio.Event | None = None
         self._initial_ready: asyncio.Event | None = None
         self._runtime: PersistentBrowserRuntime | None = None
-        self._selkies_process: Any | None = None
+        self._vnc_process: Any | None = None
+        self._remote_process: Any | None = None
         self._starting = False
         self._error: str | None = None
         self._automation_owner: str | None = None
@@ -120,7 +121,8 @@ class BrowserControlService:
         runtime = self._runtime
         active = (
             runtime is not None
-            and self._selkies_process is not None
+            and self._vnc_process is not None
+            and self._remote_process is not None
             and self._socket_path.exists()
         )
         url = ""
@@ -145,7 +147,11 @@ class BrowserControlService:
             "always_on": True,
             "busy": self._operation_lock.locked(),
             "automation_owner": self._automation_owner,
-            "remote_url": f"{REMOTE_DESKTOP_PREFIX}/",
+            "remote_url": (
+                f"{REMOTE_DESKTOP_PREFIX}/vnc.html"
+                f"?autoconnect=1&resize=scale&reconnect=1&reconnect_delay=2000"
+                f"&path=browser-control/remote/websockify"
+            ),
             "restart_count": self._restart_count,
             "stream_log": self._stream_log,
         }
@@ -182,7 +188,7 @@ class BrowserControlService:
         if not self._socket_path.exists():
             return Response("远程浏览器正在恢复", status_code=503)
         from aiohttp import ClientSession, UnixConnector
-        target_path = f"{REMOTE_DESKTOP_PREFIX}/{path}" if path else f"{REMOTE_DESKTOP_PREFIX}/"
+        target_path = f"/{path}" if path else "/vnc.html"
         target = f"http://localhost{target_path}"
         if request.url.query:
             target = f"{target}?{request.url.query}"
@@ -213,7 +219,7 @@ class BrowserControlService:
             await websocket.close(code=1013, reason="remote browser is starting")
             return
         from aiohttp import ClientSession, UnixConnector, WSMsgType
-        target = f"http://localhost{REMOTE_DESKTOP_PREFIX}/api/websockets"
+        target = "http://localhost/websockify"
         if websocket.url.query:
             target = f"{target}?{websocket.url.query}"
         headers = _proxy_headers(websocket.headers, include_cookie=False)
@@ -292,7 +298,8 @@ class BrowserControlService:
         manager = self._playwright_factory()
         playwright = None
         runtime = None
-        selkies = None
+        vnc = None
+        remote = None
         log_tasks: list[asyncio.Task[None]] = []
         closed = asyncio.Event()
         try:
@@ -313,37 +320,46 @@ class BrowserControlService:
             page = await self._control_page(runtime)
             page.set_default_timeout(15_000)
             self._runtime = runtime
-            selkies = await self._start_selkies(runtime.display.name)
-            self._selkies_process = selkies
-            if selkies.stdout is not None:
-                log_tasks.append(asyncio.create_task(self._drain_stream(selkies.stdout)))
-            if selkies.stderr is not None:
-                log_tasks.append(asyncio.create_task(self._drain_stream(selkies.stderr)))
-            await self._wait_for_socket(selkies)
+            vnc, remote = await self._start_remote_desktop(runtime.display.name)
+            self._vnc_process = vnc
+            self._remote_process = remote
+            for process in (vnc, remote):
+                if process.stdout is not None:
+                    log_tasks.append(asyncio.create_task(self._drain_stream(process.stdout)))
+                if process.stderr is not None:
+                    log_tasks.append(asyncio.create_task(self._drain_stream(process.stderr)))
+            await self._wait_for_socket(remote)
             self._error = None
             self._initial_ready.set()
 
             stop_wait = asyncio.create_task(stop_event.wait())
             close_wait = asyncio.create_task(closed.wait())
-            process_wait = asyncio.create_task(selkies.wait())
+            vnc_wait = asyncio.create_task(vnc.wait())
+            remote_wait = asyncio.create_task(remote.wait())
             done, pending = await asyncio.wait(
-                {stop_wait, close_wait, process_wait},
+                {stop_wait, close_wait, vnc_wait, remote_wait},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            if process_wait in done and not stop_event.is_set():
+            if vnc_wait in done and not stop_event.is_set():
                 raise BrowserControlError(
-                    f"Selkies 意外退出，状态码 {process_wait.result()}",
+                    f"x11vnc 意外退出，状态码 {vnc_wait.result()}",
+                )
+            if remote_wait in done and not stop_event.is_set():
+                raise BrowserControlError(
+                    f"noVNC 意外退出，状态码 {remote_wait.result()}",
                 )
             if close_wait in done and not stop_event.is_set():
                 raise BrowserControlError("Chromium 意外退出")
         finally:
             self._runtime = None
-            self._selkies_process = None
-            if selkies is not None:
-                await _terminate_process(selkies)
+            self._vnc_process = None
+            self._remote_process = None
+            for process in (remote, vnc):
+                if process is not None:
+                    await _terminate_process(process)
             for task in log_tasks:
                 task.cancel()
             await asyncio.gather(*log_tasks, return_exceptions=True)
@@ -354,36 +370,48 @@ class BrowserControlService:
                     await playwright.stop()
             self._socket_path.unlink(missing_ok=True)
 
-    async def _start_selkies(self, display_name: str) -> Any:
+    async def _start_remote_desktop(self, display_name: str) -> tuple[Any, Any]:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
         self._socket_path.unlink(missing_ok=True)
-        command = [
-            sys.executable,
-            "-m",
-            "selkies",
-            f"--unix-socket={self._socket_path}",
-            f"--subfolder={REMOTE_DESKTOP_PREFIX}",
-            "--mode=websockets",
-            "--enable-https=false",
-            "--enable-basic-auth=false",
-            "--audio-enabled=false",
-            "--enable-resize=false",
-            "--encoder=jpeg",
-            "--use-cpu=true",
-            "--framerate=20-20",
+        vnc_command = [
+            "x11vnc",
+            "-display", display_name,
+            "-forever",
+            "-shared",
+            "-localhost",
+            "-rfbport", str(VNC_LOOPBACK_PORT),
+            "-nopw",
+            "-noxdamage",
         ]
-        configured = os.environ.get("AUTOSURF_SELKIES_COMMAND", "").strip()
-        if configured:
-            command = [configured, *command[3:]]
         env = dict(os.environ)
         env["DISPLAY"] = display_name
-        return await self._process_factory(
-            *command,
+        vnc = await self._process_factory(
+            *vnc_command,
             env=env,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        remote_command = [
+            "websockify",
+            f"--unix-listen={self._socket_path}",
+            "--unix-listen-mode=0600",
+            "--web=/usr/share/novnc",
+            "--heartbeat=30",
+            f"127.0.0.1:{VNC_LOOPBACK_PORT}",
+        ]
+        try:
+            remote = await self._process_factory(
+                *remote_command,
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception:
+            await _terminate_process(vnc)
+            raise
+        return vnc, remote
 
     async def _wait_for_socket(self, process: Any) -> None:
         for _ in range(300):
@@ -391,10 +419,10 @@ class BrowserControlService:
                 return
             if process.returncode is not None:
                 raise BrowserControlError(
-                    f"Selkies 启动失败，状态码 {process.returncode}",
+                    f"noVNC 启动失败，状态码 {process.returncode}",
                 )
             await asyncio.sleep(0.05)
-        raise BrowserControlError("Selkies Unix socket 启动超时")
+        raise BrowserControlError("noVNC Unix socket 启动超时")
 
     async def _wait_for_runtime(self) -> PersistentBrowserRuntime:
         for _ in range(300):

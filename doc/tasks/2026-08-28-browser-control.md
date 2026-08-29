@@ -49,26 +49,26 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 ### 2.2 目标架构
 
-`BrowserControlService` 随应用启动常驻 Xvfb、Chromium 和 Selkies。Chromium 使用共享 profile，但浏览器进程生命周期与操作锁分离：人工远程桌面和自动签到共享同一 context，自动任务只在执行期间持有独占操作锁，退出后不关闭 Chromium。Selkies 通过 Unix socket 提供完整 X11 画面及输入，FastAPI 在 `/browser-control/remote/` 代理其 HTTP 与 WebSocket；客户端仍只连接现有 `18980`，容器内也不新增 TCP 监听端口。
+`BrowserControlService` 随应用启动常驻 Xvfb、Chromium、x11vnc 和 noVNC/websockify。Chromium 使用共享 profile，但浏览器进程生命周期与操作锁分离：人工远程桌面和自动签到共享同一 context，自动任务只在执行期间持有独占操作锁，退出后不关闭 Chromium。x11vnc 仅监听容器回环地址，websockify 仅监听 Unix socket；FastAPI 在 `/browser-control/remote/` 代理其 HTTP 与 WebSocket，客户端仍只连接现有 `18980`，Docker 无新增暴露端口。
 
 ### 2.3 关键模块与职责
 
 | 模块 | 当前职责 | 目标职责 | 输入 | 输出 | 依赖 |
 |---|---|---|---|---|---|
 | 浏览器宿主 | 单次自动化浏览器生命周期 | 常驻 Xvfb/Chromium，共享 profile，并向自动任务提供短时独占操作租约 | RunContext、URL | 共享 context、busy 状态 | Playwright、`persistent_chromium_session` |
-| 远程桌面 | 无 | Selkies 从同一 Xvfb 捕获完整桌面并注入原生输入 | X11 显示器、WebSocket | 视频帧、鼠标键盘 | 固定上游提交的 Selkies |
-| 管理 API | 登录后的业务接口 | 代理 Selkies Unix socket 的 HTTP/WebSocket，并暴露宿主状态 | 同源 HTTP/WS | HTML/静态资源/WS/JSON | FastAPI、aiohttp、服务实例 |
-| 管理前端 | hash 视图与业务设置 | 通过同源 iframe 嵌入远程桌面，显示启动、恢复、自动任务占用和错误状态 | 用户鼠标/键盘 | 完整 Chromium 远程操作 | Selkies Web 客户端 |
+| 远程桌面 | 无 | x11vnc 捕获同一 Xvfb，noVNC/websockify 传输画面并注入输入 | X11 显示器、WebSocket | 视频帧、鼠标键盘 | Debian 稳定包 x11vnc/noVNC/websockify |
+| 管理 API | 登录后的业务接口 | 代理 websockify Unix socket 的 HTTP/WebSocket，并暴露宿主状态 | 同源 HTTP/WS | HTML/静态资源/WS/JSON | FastAPI、aiohttp、服务实例 |
+| 管理前端 | hash 视图与业务设置 | 通过同源 iframe 嵌入 noVNC 客户端，显示启动、恢复、自动任务占用和错误状态 | 用户鼠标/键盘 | 完整 Chromium 远程操作 | noVNC Web 客户端 |
 | 应用生命周期 | 调度器与 worker | 启动浏览器宿主并在退出时按逆序清理 | startup/shutdown | 常驻进程、自恢复 | FastAPI lifespan |
 
 ### 2.4 关键流程
 
 | 流程 | 发起方 | 处理方 | 数据或状态变化 | 失败处理 | 关联需求 |
 |---|---|---|---|---|---|
-| 应用启动 | FastAPI lifespan | BrowserControlService | 启动 Xvfb、共享 Chromium、Selkies Unix socket，并注册共享浏览器提供者 | 失败记录状态并退避自恢复，不阻断管理端启动 | REQ-002/008 |
-| 远程显示与输入 | Web UI iframe | FastAPI proxy → Selkies → X11 | 同源 WebSocket 持续传输完整画面和原生输入 | 未登录拒绝；Unix socket 未就绪返回 503；前端显示恢复状态 | REQ-001/005/006/007 |
+| 应用启动 | FastAPI lifespan | BrowserControlService | 启动 Xvfb、共享 Chromium、x11vnc 和 websockify Unix socket，并注册共享浏览器提供者 | 失败记录状态并退避自恢复，不阻断管理端启动 | REQ-002/008 |
+| 远程显示与输入 | Web UI iframe | FastAPI proxy → noVNC/websockify → x11vnc → X11 | 同源 WebSocket 持续传输完整画面和原生输入 | 未登录拒绝；Unix socket 未就绪返回 503；前端显示恢复状态 | REQ-001/005/006/007 |
 | 自动签到 | worker | persistent_chromium_session → 常驻宿主 | 获取独占操作租约、新建任务标签页、执行后关闭任务标签页并释放租约 | UI 标记自动任务占用；异常仍释放租约 | REQ-002/008 |
-| 异常退出与关闭 | supervisor / lifespan | BrowserControlService | Chromium 或 Selkies 退出后清理并退避重启；应用退出时停止重启并清理 | 状态保留最近错误 | REQ-008 |
+| 异常退出与关闭 | supervisor / lifespan | BrowserControlService | Chromium、x11vnc 或 websockify 退出后清理并退避重启；应用退出时停止重启并清理 | 状态保留最近错误 | REQ-008 |
 
 ### 2.5 接口记录
 
@@ -78,8 +78,8 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | IF-002 | 浏览器会话启停 | 管理前端 | `POST/DELETE /api/v1/browser-control/session` | 旧版冷启动接口 | 已移除 | 常驻宿主不再需要启停 | REQ-002/008 | `已取消并移除` |
 | IF-003 | 旧页面截图帧 | 管理前端 | `GET /api/v1/browser-control/frame` | 页面 PNG | 旧实现 | 被完整桌面要求替代 | REQ-003 | `待移除兼容入口` |
 | IF-004 | 旧 Playwright 页面输入 | 管理前端 | `POST /navigate`、`POST /input` | 页面级动作 JSON | 旧实现 | 被 X11 原生输入替代 | REQ-004 | `待移除兼容入口` |
-| IF-005 | Selkies 同源 HTTP 代理 | iframe | `GET /browser-control/remote/{path}` | 保留路径与查询，转发到 Unix socket；继承登录和 LAN 限制；未就绪 503 | `main.py` / `browser_control.py` | 不新增端口 | REQ-001/005/006/008；TASK-006；TEST-007 | `已实现，focused test 通过` |
-| IF-006 | Selkies 同源 WebSocket 代理 | iframe | `WS /browser-control/remote/api/websockets` | 校验会话 Cookie 后双向转发 text/binary/close 到 Unix socket | 同上 | 同源、同端口、无 Basic Auth 泄漏 | REQ-001/006/007；TASK-006；TEST-007 | `已实现，focused test 通过` |
+| IF-005 | noVNC 同源 HTTP 代理 | iframe | `GET /browser-control/remote/{path}` | 去除外部前缀后转发到 websockify Unix socket；继承登录和 LAN 限制；未就绪 503 | `main.py` / `browser_control.py` | 不新增端口 | REQ-001/005/006/008；TASK-006；TEST-007 | `已实现，focused test 通过` |
+| IF-006 | noVNC 同源 WebSocket 代理 | iframe | `WS /browser-control/remote/websockify` | 校验会话 Cookie 和同源 Origin 后双向转发 text/binary/close 到 Unix socket | 同上 | 同源、同端口、无 VNC 端口暴露 | REQ-001/006/007；TASK-006；TEST-007 | `已实现，focused test 通过` |
 
 ### 2.6 架构决策引用
 
@@ -88,7 +88,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | DEC-001 | 已被 DEC-004 替代；页面截图无法显示 Chromium 原生界面 | IF-003/IF-004 |
 | DEC-002 | 维护会话复用现有 `persistent_chromium_session`，以共享锁阻止自动任务并发 | BrowserControlService |
 | DEC-003 | 已被 DEC-004 替代；PNG 短轮询不是远程桌面 | IF-003、旧 admin.js |
-| DEC-004 | 采用 Selkies WebSocket 远程桌面，经 Unix socket 和 FastAPI 同源代理接入 | IF-005/IF-006、BrowserControlService |
+| DEC-004 | 采用 noVNC/x11vnc 远程桌面，经 websockify Unix socket 和 FastAPI 同源代理接入 | IF-005/IF-006、BrowserControlService |
 | DEC-005 | Chromium 进程常驻，自动任务只租用操作权并使用临时标签页 | browser_session、签到 handler |
 
 ## 三、单元设计
@@ -132,7 +132,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TASK-003 | 实现左侧浏览器控制界面和交互 | `已完成` | REQ-003 至 005 | UNIT-003 | UI 流程可操作 |
 | TASK-004 | 完整测试、渲染 QA、差异审查与完成门禁 | `已完成` | 全部 | UNIT-004、全仓 | 追踪闭合、门禁通过 |
 | TASK-005 | 重新调查完整桌面和常驻生命周期方案 | `已完成` | REQ-001/005/006/007/008 | 上游 Selkies、现有 browser session | 修正版准备门禁通过 |
-| TASK-006 | 实现常驻共享 Chromium、Selkies Unix socket 与同源代理 | `已完成` | REQ-001/002/006/007/008 | browser_session、browser_control、main/api、依赖 | focused 后端测试通过 |
+| TASK-006 | 实现常驻共享 Chromium、noVNC Unix socket 与同源代理 | `已完成` | REQ-001/002/006/007/008 | browser_session、browser_control、main/api、依赖 | focused 后端测试通过 |
 | TASK-007 | 将管理页改为完整远程桌面 iframe | `已完成` | REQ-005/006/007/008 | admin.html/js/css | 无旧伪地址栏和启停流程；响应式预览通过 |
 | TASK-008 | Docker、完整回归与真实远程桌面 QA | `进行中` | 全部有效需求 | Dockerfile、tests、账本 | Docker 中完整 Chromium 可见可操作 |
 | TASK-009 | 增加远程桌面全屏切换并验证退出同步 | `已完成` | REQ-009 | admin.html/js/css、静态契约测试 | 桌面和移动端可进入/退出全屏，布局无溢出 |
@@ -173,8 +173,8 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-003 | 旧页面 PNG 帧 | UNIT-001/003 | TASK-002/003/004 | IF-003 | TEST-001/002/004/005 | 被完整桌面需求替代 | `已取消` |
 | REQ-004 | 旧 Playwright 页面输入 | UNIT-001/003 | TASK-002/003/004 | IF-004 | TEST-001/002/004/005 | 被显示器级输入替代 | `已取消` |
 | REQ-005 | 左侧入口、状态完整、响应式可用 | UNIT-003 | TASK-007/008 | iframe、`admin.html/js/css` | TEST-007/008 | 待验证 | `进行中` |
-| REQ-006 | 完整 Chromium 窗口可见 | UNIT-001/003 | TASK-006/007/008 | IF-005/006、Selkies | TEST-006/007/008 | 待验证 | `进行中` |
-| REQ-007 | 原生鼠标键盘远程控制 | UNIT-001/003 | TASK-006/007/008 | IF-006、Selkies | TEST-006/007/008 | 待验证 | `进行中` |
+| REQ-006 | 完整 Chromium 窗口可见 | UNIT-001/003 | TASK-006/007/008 | IF-005/006、noVNC | TEST-006/007/008 | 待验证 | `进行中` |
+| REQ-007 | 原生鼠标键盘远程控制 | UNIT-001/003 | TASK-006/007/008 | IF-006、noVNC | TEST-006/007/008 | 待验证 | `进行中` |
 | REQ-008 | 应用启动即常驻且自恢复 | UNIT-001/002 | TASK-006/008 | BrowserControlService、lifespan | TEST-006/008 | 待验证 | `进行中` |
 | REQ-009 | 全屏进入、退出和状态同步 | UNIT-003 | TASK-009 | `admin.html/js/css`、Fullscreen API | TEST-009 | 桌面与移动视口均通过 | `已完成` |
 
@@ -187,8 +187,9 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | DEC-001 | 用户禁止新端口 | FastAPI 同源截图与输入代理 | 第一版复用 18980，但无法显示原生浏览器界面 | noVNC 6080/VNC 5900 | 旧接口与 UI | 被 DEC-004 替代 | `已替代` |
 | DEC-002 | 自动任务与人工操作共享 profile | 维护会话持有现有 profile asyncio lock | 无需修改调度数据，天然串行 | 单独 profile 或暂停所有任务 | 浏览器生命周期 | 无 | `有效` |
 | DEC-003 | 同端口下需要简单可靠画面 | PNG 轮询而非 WebSocket/noVNC | 第一版依赖少，但不是远程桌面 | WebSocket 视频流 | IF-003/前端 | 被 DEC-004 替代 | `已替代` |
-| DEC-004 | 用户要求完整浏览器远程桌面且不新增端口 | Selkies WebSocket 经 Unix socket 接入，FastAPI 在 `18980` 同源代理 | 上游原生捕获 X11、注入输入、打包 Web 客户端，并支持 subfolder/Unix socket | noVNC+x11vnc、Guacamole、自研 X11 轮询 | 浏览器宿主、IF-005/006、Docker | 替代 DEC-001/003 | `有效` |
+| DEC-004 | 用户要求完整浏览器远程桌面且不新增端口 | x11vnc 仅监听容器回环地址；noVNC/websockify 监听 Unix socket；FastAPI 在 `18980` 同源代理 | Debian 稳定包可重复构建，完整支持 X11 画面和输入，外部无新增端口 | Selkies、Guacamole、自研 X11 轮询 | 浏览器宿主、IF-005/006、Docker | 替代 DEC-001/003，并由 DEC-006 修订实现 | `有效` |
 | DEC-005 | 用户要求始终打开、无冷启动 | Chromium 与 Xvfb 随应用常驻；任务租用同一 context 并使用临时标签页 | 进程常驻和操作互斥解耦，任务完成不关闭浏览器 | 控制专用 profile、任务前停控制浏览器 | browser_session、handlers、lifespan | 补充 DEC-002 | `有效` |
+| DEC-006 | GitHub Linux CI 无法安装 Selkies 开发版依赖 | 从 Selkies 开发提交切换到 Debian 稳定 noVNC/x11vnc/websockify 包 | Selkies 开发版依赖未发布的 `pixelflux~=2.1.0`，新 Docker 与 CI 均无法解析；noVNC 路径满足同端口和完整桌面要求 | 固定临时 Actions 产物、嵌入上游容器 | Docker、远程桌面进程、代理路径 | 修订 DEC-004 的实现 | `有效` |
 
 ### 7.2 冲突记录
 
@@ -198,7 +199,8 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 | 缺陷编号 | 现象 | 根因 | 修复方案 | 关联需求 | 状态 |
 |---|---|---|---|---|---|
-| DEF-001 | 上一版只显示网页内容，无法看到标签栏和地址栏；进入页面还要冷启动 | 使用 `Page.screenshot()` 和 Playwright 页面输入，且维护会话由 UI 临时创建 | 改用 Selkies 捕获 Xvfb 根显示器；Chromium 随应用常驻 | REQ-005/006/007/008 | `修复中` |
+| DEF-001 | 上一版只显示网页内容，无法看到标签栏和地址栏；进入页面还要冷启动 | 使用 `Page.screenshot()` 和 Playwright 页面输入，且维护会话由 UI 临时创建 | 改用 noVNC/x11vnc 捕获 Xvfb 根显示器；Chromium 随应用常驻 | REQ-005/006/007/008 | `修复中` |
+| DEF-002 | GitHub CI 和全新 Docker 在安装 Selkies 时失败 | 固定的 Selkies 开发提交依赖尚未发布的 `pixelflux~=2.1.0` | 移除不可解析的开发依赖，使用 Debian 稳定 noVNC/x11vnc/websockify 包 | REQ-006/007/008 | `已修复，待 CI 验证` |
 
 ## 九、回滚方案
 
@@ -223,7 +225,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | RISK-001 | 性能 | PNG 短轮询会占 CPU/带宽 | 页面打开期间有额外负载 | 仅前台活跃视图以 700ms 轮询，隐藏或离开立即取消请求，不持久化 | `已缓解` |
 | RISK-002 | 并发 | 长时间维护会话会让自动签到等待共享锁 | 调度执行可能延后 | 提供显式停止和 15 分钟空闲超时；共享锁防止 profile 损坏 | `已缓解` |
 | RISK-003 | 输入 | 页面截图不包含原生 Chrome 地址栏/下载 UI | 不满足用户目标 | 已升级为 DEF-001，替换实现 | `处理中` |
-| RISK-004 | 依赖 | PyPI `selkies==1.6.1` 是旧架构，主线能力尚未形成对应 PyPI 发布 | 错装会缺少 Unix socket/subfolder 和新 Web 客户端 | 固定已核验 Git 提交，仅 Linux 安装；记录许可证和回滚 | `已缓解` |
+| RISK-004 | 依赖 | Selkies 主线依赖未发布的原生扩展，无法在普通 pip/Docker 构建中解析 | GitHub CI 和全新 Docker 安装失败 | 已改用 Debian trixie 中稳定的 noVNC 1.6、websockify 0.12、x11vnc 0.9.17 | `已解决` |
 | RISK-005 | 生命周期 | 常驻共享 context 会让任务级 init script、标签页和锁泄漏到后续任务 | 签到结果串扰或人工输入冲突 | 每个自动任务新建并最终关闭标签页；页面级 init script；任务仅持有操作租约 | `待验证` |
 
 ## 十二、质量门禁
@@ -234,7 +236,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 |---|---|---|
 | 最新目标、范围、非范围和约束已记录 | 通过 | REQ-001/002/005 至 008，明确完整浏览器、常驻和无新端口 |
 | 验收标准可观察、可测试 | 通过 | 每项 REQ 有 UI/API/测试结果 |
-| 必要架构和单元设计达到可实现程度 | 通过 | 常驻宿主、任务租约、Selkies Unix socket、IF-005/006 |
+| 必要架构和单元设计达到可实现程度 | 通过 | 常驻宿主、任务租约、noVNC Unix socket、IF-005/006 |
 | 每项需求已有任务、范围和测试思路 | 通过 | 追踪矩阵 |
 | 工作区基线和用户已有改动已识别 | 通过 | 三个签到适配文件已记录并保留 |
 | 高风险变更已有回滚思路 | 通过 | RB-001，无迁移无新端口 |
@@ -249,7 +251,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 |---|---|---|
 | 用户最新目标和有效需求逐项验收 | 未通过 | REQ-005 至 008 正在重新实现 |
 | 端到端追踪闭合 | 未通过 | TASK-006 至 008 未完成 |
-| 测试已执行或缺口影响已准确记录 | 未通过 | 尚未完成 Selkies Docker 真实验证 |
+| 测试已执行或缺口影响已准确记录 | 未通过 | 尚未完成 noVNC Docker 真实验证 |
 | 缺陷已关闭或成为用户接受的遗留风险 | 通过 | 停止竞态与移动端图片缩放缺陷均关闭 |
 | 决策、冲突、回滚、风险和阻塞状态已更新 | 通过 | 决策有效，风险已缓解，无阻塞 |
 | 最终差异无范围漂移、无关回退和调试残留 | 通过 | `git diff --check` 通过，Compose 未改；保留既有签到修改 |
