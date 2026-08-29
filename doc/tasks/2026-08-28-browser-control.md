@@ -3,9 +3,9 @@
 - 任务标识：`2026-08-28-browser-control`
 - 状态：`已完成`
 - 创建时间：`2026-08-28 16:46 +08:00`
-- 更新时间：`2026-08-29 13:34 +08:00`
+- 更新时间：`2026-08-29 22:22 +08:00`
 - 用户原始需求：在现有功能中添加一个专门显示并操作 Docker 内 Chrome 的界面。
-- 用户最新指令：展示并操作整个 Google Chrome 窗口，效果类似远程桌面；浏览器随 AutoSurf 常驻，不需要冷启动；不使用新端口；窗口支持全屏；首次初始化后 Cookie/WebStorage/API 只使用浏览器实际环境；Google 登录数据跨容器重建持久化。
+- 用户最新指令：只发布已完成改动，不需要监控 Actions、在线升级或发布后验证；发布后修改 `autosurf-push-deploy` 技能，去除在线升级和发布后验证。
 - 启用方式：明确长任务条件（跨浏览器生命周期、后端接口、前端交互与渲染验证）。
 
 ## 一、需求定义
@@ -20,8 +20,8 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 ### 1.3 范围、非范围与约束
 
-- 范围内：应用启动时拉起常驻 Xvfb/Chromium、异常退出自恢复、完整虚拟显示器画面、原生浏览器界面、鼠标移动/点击/双击/滚轮、键盘按下/释放、共享浏览器操作互斥、管理界面与接口测试。
-- 范围外：新增 Docker 暴露端口、额外 VNC/RFB 服务端口、绕过 CAPTCHA 或安全验证、多人同时输入、部署发布。
+- 范围内：应用启动时拉起常驻 Xvfb/Chrome、异常退出自恢复、完整虚拟显示器画面、原生浏览器界面、鼠标键盘输入、共享浏览器操作互斥、普通 Chrome 人工登录、Playwright 按任务短时连接、一个持久化 User Data 根目录下的多个 Chrome Profile 与独立 Google Sync、管理界面与接口测试。
+- 范围外：新增 Docker 暴露端口、额外 VNC/RFB 服务端口、绕过 CAPTCHA 或安全验证、多个独立 Chrome 容器、跨 Profile 自动迁移账号数据、多人同时输入、部署发布。
 - 约束：仅支持 Docker/Linux 运行时，不实现 Windows 远程桌面运行时；所有客户端流量继续使用 `18980` 并继承 `require_login` 与 LAN 中间件；常驻进程不能永久阻塞自动签到；已有签到适配修改不得覆盖或回退；不记录 Cookie、密码或页面敏感 DOM；本地运行验证使用 WSL 或 Windows Docker Desktop，禁止使用 HomePc NAS 进行测试。
 
 ### 1.4 需求与验收标准
@@ -39,6 +39,10 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-009 | 远程浏览器窗口支持全屏 | 控制页可用明确按钮进入全屏；按钮状态随全屏进入、退出和 `Esc` 同步；不支持 Fullscreen API 时提示错误 | P1 | `已完成` | 用户最新指令“窗口应该支持全屏” |
 | REQ-010 | 容器首次启动时一次性初始化浏览器环境 | 共享 profile 尚未初始化时，容器启动先批量写入 Cookie 和 WebStorage 并落持久化标记；后续容器重启及签到任务只读取 Chrome 当前环境，API 适配器也不再回退旧凭据 | P0 | `已完成` | 用户明确首次容器启动自动注入，后续 Cookie/WebStorage/API 均按实际浏览器环境操作 |
 | REQ-011 | 使用官方 Google Chrome 并持久化完整登录数据 | Docker amd64 镜像安装官方 Chrome stable；Playwright 使用 `chrome` channel；`user-data-dir` 固定在 `/app/browser/profiles/shared`，容器重建后 Google 登录态与站点存储保持；不发布 arm64 | P0 | `已完成` | 用户明确“使用chrome替换chromium”、保证谷歌登录数据持久化并且“不需要arm” |
+| REQ-012 | 可选择并持久化远程桌面分辨率 | 浏览器控制页提供常用分辨率；选择 1920x1080 后安全重启 Xvfb、Chrome 和远程桌面，状态回报新尺寸；刷新页面及容器重启后保持选择；全屏画面比例与选择一致 | P0 | `已完成` | 用户最新指令 |
+| REQ-013 | 普通 Chrome 人工登录、多个 Sync Profile 与 Playwright 生命周期分离 | Chrome 由宿主直接启动且不含 Playwright 自动化启动参数；人工访问 Google 登录页时 `navigator.webdriver=false`；Playwright 仅在初始化或签到时通过容器回环 CDP 连接，操作结束后断开且 Chrome/noVNC/人工页面继续运行；完整 User Data 根目录持久化 `Default`、`Profile 1` 等多个资料，每个资料可独立登录与 Sync；启动参数不固定单一 `--profile-directory` | P0 | `已完成` | 用户明确“解决无法登陆”“Playwright 可以单独一个操作，与nvc独立”“跟windows下一样，支持多个chrome sync” |
+| REQ-014 | 发布 AutoSurf 源码 | 范围内功能代码提交并推送到 `origin/main`；不监控 Actions、不调用在线升级、不执行发布后验证 | P0 | `已完成` | 功能提交 `b473580` 已推送 |
+| REQ-015 | 收窄 AutoSurf 发布技能 | `autosurf-push-deploy` 只保留发布前测试、Git 提交和推送；删除在线升级、部署、CI 监控、发布后检查和实时签到回归；技能元数据同步且校验通过 | P0 | `已完成` | 用户明确“发布后，修改技能，去除发布后验证”“去除在线升级” |
 
 ## 二、总体架构
 
@@ -51,13 +55,13 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 ### 2.2 目标架构
 
-`BrowserControlService` 随应用启动常驻 Xvfb、Google Chrome、x11vnc 和 noVNC/websockify。Chrome 使用共享 profile，但浏览器进程生命周期与操作锁分离：人工远程桌面和自动签到共享同一 context，自动任务只在执行期间持有独占操作锁，退出后不关闭 Chrome。x11vnc 仅监听容器回环地址，websockify 仅监听 Unix socket；FastAPI 在 `/browser-control/remote/` 代理其 HTTP 与 WebSocket，客户端仍只连接现有 `18980`，Docker 无新增暴露端口。
+`BrowserControlService` 随应用启动常驻 Xvfb、由普通子进程直接启动的 Google Chrome、x11vnc 和 noVNC/websockify。Chrome 使用 `/app/browser/profiles/shared` 作为完整 User Data 根目录，内含多个 Chrome Profile；不固定 `--profile-directory`，由 Chrome 原生资料选择器创建、切换和管理各自 Sync。浏览器与 noVNC 生命周期不依赖 Playwright；自动任务只在执行期间持有独占操作锁，通过容器回环 CDP 临时附加，退出后仅断开 Playwright，不关闭 Chrome。x11vnc 仅监听容器回环地址，websockify 仅监听 Unix socket；FastAPI 在 `/browser-control/remote/` 代理其 HTTP 与 WebSocket，客户端仍只连接现有 `18980`，Docker 无新增暴露端口。
 
 ### 2.3 关键模块与职责
 
 | 模块 | 当前职责 | 目标职责 | 输入 | 输出 | 依赖 |
 |---|---|---|---|---|---|
-| 浏览器宿主 | 单次自动化浏览器生命周期 | 常驻 Xvfb/Chromium，共享 profile，并向自动任务提供短时独占操作租约 | RunContext、URL | 共享 context、busy 状态 | Playwright、`persistent_chromium_session` |
+| 浏览器宿主 | 单次自动化浏览器生命周期 | 常驻 Xvfb/普通 Chrome，共享 User Data 根目录，并向自动任务提供短时 CDP 操作租约 | RunContext、URL | Chrome 进程、临时 BrowserContext、busy 状态 | Chrome、Playwright CDP、`persistent_chromium_session` |
 | 远程桌面 | 无 | x11vnc 捕获同一 Xvfb，noVNC/websockify 传输画面并注入输入 | X11 显示器、WebSocket | 视频帧、鼠标键盘 | Debian 稳定包 x11vnc/noVNC/websockify |
 | 管理 API | 登录后的业务接口 | 代理 websockify Unix socket 的 HTTP/WebSocket，并暴露宿主状态 | 同源 HTTP/WS | HTML/静态资源/WS/JSON | FastAPI、aiohttp、服务实例 |
 | 管理前端 | hash 视图与业务设置 | 通过同源 iframe 嵌入 noVNC 客户端，显示启动、恢复、自动任务占用和错误状态 | 用户鼠标/键盘 | 完整 Chromium 远程操作 | noVNC Web 客户端 |
@@ -67,10 +71,10 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 | 流程 | 发起方 | 处理方 | 数据或状态变化 | 失败处理 | 关联需求 |
 |---|---|---|---|---|---|
-| 应用启动 | FastAPI lifespan | BrowserControlService | 启动 Xvfb、共享 Chromium、x11vnc 和 websockify Unix socket，并注册共享浏览器提供者 | 失败记录状态并退避自恢复，不阻断管理端启动 | REQ-002/008 |
+| 应用启动 | FastAPI lifespan | BrowserControlService | 启动 Xvfb、普通 Chrome、x11vnc 和 websockify Unix socket，并注册共享浏览器提供者；无待初始化凭据时不启动 Playwright | 失败记录状态并退避自恢复，不阻断管理端启动 | REQ-002/008/013 |
 | 远程显示与输入 | Web UI iframe | FastAPI proxy → noVNC/websockify → x11vnc → X11 | 同源 WebSocket 持续传输完整画面和原生输入 | 未登录拒绝；Unix socket 未就绪返回 503；前端显示恢复状态 | REQ-001/005/006/007 |
 | 自动签到 | worker | persistent_chromium_session → 常驻宿主 | 获取独占操作租约、新建任务标签页、执行后关闭任务标签页并释放租约 | UI 标记自动任务占用；异常仍释放租约 | REQ-002/008 |
-| 异常退出与关闭 | supervisor / lifespan | BrowserControlService | Chromium、x11vnc 或 websockify 退出后清理并退避重启；应用退出时停止重启并清理 | 状态保留最近错误 | REQ-008 |
+| 异常退出与关闭 | supervisor / lifespan | BrowserControlService | Chrome、x11vnc 或 websockify 退出后清理并退避重启；应用退出时停止重启并清理 | 状态保留最近错误 | REQ-008/013 |
 
 ### 2.5 接口记录
 
@@ -82,6 +86,8 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | IF-004 | 旧 Playwright 页面输入 | 管理前端 | `POST /navigate`、`POST /input` | 页面级动作 JSON | 旧实现 | 被 X11 原生输入替代 | REQ-004 | `待移除兼容入口` |
 | IF-005 | noVNC 同源 HTTP 代理 | iframe | `GET /browser-control/remote/{path}` | 去除外部前缀后转发到 websockify Unix socket；继承登录和 LAN 限制；未就绪 503 | `main.py` / `browser_control.py` | 不新增端口 | REQ-001/005/006/008；TASK-006；TEST-007 | `已实现，focused test 通过` |
 | IF-006 | noVNC 同源 WebSocket 代理 | iframe | `WS /browser-control/remote/websockify` | 校验会话 Cookie 和同源 Origin 后双向转发 text/binary/close 到 Unix socket | 同上 | 同源、同端口、无 VNC 端口暴露 | REQ-001/006/007；TASK-006；TEST-007 | `已实现，focused test 通过` |
+| IF-007 | 远程桌面分辨率切换 | 管理前端 | `PATCH /api/v1/browser-control/resolution` | 输入受支持的 width/height；正执行自动任务时返回 409；成功后返回重启后的状态和分辨率列表 | `api.py` / `browser_control.py` | 不新增端口；共享 profile 不变 | REQ-012；TASK-013；TEST-012/013 | `已实现并通过认证、校验和重启测试` |
+| IF-008 | 容器回环 Chrome DevTools 接口 | BrowserControlService 的短时 Playwright 操作 | 普通 Chrome 子进程 | 仅监听 `127.0.0.1`；使用固定自定义 User Data 根目录；返回已有普通 Profile 页面上下文；断开 Playwright 不关闭 Chrome | `browser_session.py` / `browser_control.py` | 不新增宿主端口；现有 handler 仍接收 Playwright `BrowserContext` | REQ-013；TASK-016；TEST-014/015 | `已实现；本机 Docker 与单元测试通过` |
 
 ### 2.6 架构决策引用
 
@@ -92,6 +98,8 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | DEC-003 | 已被 DEC-004 替代；PNG 短轮询不是远程桌面 | IF-003、旧 admin.js |
 | DEC-004 | 采用 noVNC/x11vnc 远程桌面，经 websockify Unix socket 和 FastAPI 同源代理接入 | IF-005/IF-006、BrowserControlService |
 | DEC-005 | Chromium 进程常驻，自动任务只租用操作权并使用临时标签页 | browser_session、签到 handler |
+| DEC-007 | 分辨率使用受支持选项并持久化；切换时重启共享显示栈 | BrowserControlService、IF-007、管理前端 |
+| DEC-008 | 普通 Chrome 独立常驻，Playwright 仅通过回环 CDP 短时附加；完整 User Data 根目录持久化多个 Chrome Profile | browser_session、BrowserControlService、IF-008 |
 
 ## 三、单元设计
 
@@ -99,9 +107,9 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 | 单元编号 | 文件或位置 | 职责 | 输入 | 输出 | 依赖 | 关联需求 |
 |---|---|---|---|---|---|---|
-| UNIT-001 | `src/autosurf/browser_control.py` | 会话状态机、页面控制、截图和清理 | URL/动作 | 状态/PNG | Playwright、browser_session | REQ-002/003/004 |
-| UNIT-002 | `src/autosurf/api.py`、`main.py` | Pydantic 契约、受保护路由、服务注入与 shutdown | HTTP | JSON/PNG/错误 | FastAPI、UNIT-001 | REQ-001/002/003/004 |
-| UNIT-003 | `src/autosurf/web/admin.*` | 左侧视图、控制条、帧轮询和输入事件 | DOM 事件 | API 请求与渲染 | IF-001 至 IF-004 | REQ-003/004/005 |
+| UNIT-001 | `src/autosurf/browser_control.py`、`src/autosurf/automations/browser_session.py` | 普通 Chrome 子进程、短时 CDP 租约、多个 Profile 的 User Data 根目录、会话状态机、显示尺寸设置、远程桌面进程和清理 | 分辨率/生命周期/RunContext | 状态/远程桌面/临时 BrowserContext | Chrome、Playwright CDP、数据库 | REQ-002/006/008/012/013 |
+| UNIT-002 | `src/autosurf/api.py`、`main.py` | Pydantic 契约、受保护路由、服务注入与 shutdown | HTTP | JSON/错误 | FastAPI、UNIT-001 | REQ-001/002/012 |
+| UNIT-003 | `src/autosurf/web/admin.*` | 左侧视图、分辨率选择、远程桌面和全屏交互 | DOM 事件 | API 请求与渲染 | IF-001/005/006/007 | REQ-005/006/007/009/012 |
 | UNIT-004 | `tests/test_browser_control.py`、现有 Web 静态测试 | 服务/API/前端契约回归 | fake Page / ASGI | 断言 | pytest/httpx | 全部 |
 
 ### 3.2 处理与异常规则
@@ -120,8 +128,8 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 - 当前阶段：已完成
 - 当前计划步骤：无
 - 当前门禁：完成门禁通过
-- 最近完成检查点：GitHub amd64 CI 成功；本机 Docker Desktop 运行官方 Google Chrome 152.0.7977.64；完整远程桌面和键盘输入实测通过；容器重建前后 profile 初始化标记哈希一致。
-- 工作区状态：运行版本和远端版本均为 `8cf8ca9`；容器健康；禁止使用 HomePc NAS 测试。
+- 最近完成检查点：功能提交 `b473580` 已推送；24 项定向和 188 项全量测试通过；发布技能已去除在线升级与发布后验证并通过 `quick_validate.py`。
+- 工作区状态：基于 `01c2a41` 的未提交修改；未发布、未部署；未使用 HomePc NAS 测试。
 - 下一步唯一动作：无。
 - 恢复时先读取：本账本、`git status`、`browser_session.py`、`main.py`、`api.py`、`admin.html/js/css`。
 
@@ -140,6 +148,14 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TASK-009 | 增加远程桌面全屏切换并验证退出同步 | `已完成` | REQ-009 | admin.html/js/css、静态契约测试 | 桌面和移动端可进入/退出全屏，布局无溢出 |
 | TASK-010 | 在容器首次启动时一次性初始化 Cookie 与 WebStorage | `已完成` | REQ-010 | CredentialService、BrowserControlService、browser_session、pt_signin、tests | 启动时初始化并持久化完成标记；任务期从浏览器读取 Cookie 与 localStorage |
 | TASK-011 | 将 Docker 浏览器替换为官方 Google Chrome 并验证 profile 持久化 | `已完成` | REQ-011 | Dockerfile、entrypoint、upgrade、browser_session、upgrade UI、README、tests | CI amd64 镜像成功；本机正式镜像显示 Chrome，重建前后 profile 标记保持 |
+| TASK-012 | 调查全屏不随显示器变化的真实约束并补齐设计 | `已完成` | REQ-012 | browser_session、browser_control、admin.*、账本 | 确认 Xvfb 与 Chrome 均固定为 1365x768；准备门禁通过 |
+| TASK-013 | 实现分辨率持久化、受保护切换接口和前端选择器 | `已完成` | REQ-012 | UNIT-001/002/003、IF-007 | 1920x1080 可选；重启后保持；忙时不打断任务 |
+| TASK-014 | 定向回归、渲染与真实本机容器验证 | `已完成` | REQ-012 | UNIT-004、本机 Docker Desktop | API/单测/全量测试通过；桌面选择和全屏比例实测通过 |
+| TASK-015 | 验证普通 Chrome、短时 CDP 与多个 Chrome Profile 的真实行为 | `已完成` | REQ-013 | 本机 Docker 临时 User Data、IF-008、账本 | `webdriver=false`；Playwright 断开不关闭 Chrome；明确多个 Profile 的可见性和选择边界 |
+| TASK-016 | 实现普通 Chrome 常驻、短时 CDP 租约与多 Profile 持久化 | `已完成` | REQ-013 | UNIT-001、IF-008、相关测试 | noVNC 独立常驻；任务接口兼容；不固定单一 Profile；Chrome 退出可恢复 |
+| TASK-017 | 定向回归、全量测试和本机 Docker 登录/Profile 验证 | `已完成` | REQ-013 | UNIT-004、本机 Docker Desktop | 单测和全量测试通过；多个 Profile 跨重启保持；禁止使用 HomePc |
+| TASK-018 | 提交并推送源码 | `已完成` | REQ-014 | Git、`origin/main` | 功能提交 `b473580` 推送成功 |
+| TASK-019 | 修改并校验 AutoSurf 发布技能 | `已完成` | REQ-015 | `C:\Users\fengz\.codex\skills\autosurf-push-deploy` | SKILL 与 UI 元数据无在线升级和发布后验证流程；官方校验器通过 |
 
 ### 4.3 变更记录
 
@@ -150,6 +166,8 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | `src/autosurf/api.py`、`main.py` | 新增受保护接口并接入应用生命周期 | 复用现有认证、LAN 与 18980 | REQ-001/002/003/004 / TASK-002 | focused API test | RB-001 |
 | `src/autosurf/web/admin.html/js/css` | 新增左侧控制页、帧轮询和响应式交互 | 用户可直接查看并操作 Docker Chrome | REQ-003/004/005 / TASK-003 | 桌面/移动真实渲染通过 | RB-001 |
 | `tests/test_browser_control.py` | 覆盖服务、API、认证、UI 契约和单端口约束 | 防止生命周期与端口回归 | 全部 / TASK-002/004 | 5 passed | RB-001 |
+| `src/autosurf/automations/browser_session.py`、`src/autosurf/browser_control.py` | 普通 Chrome 子进程、回环 CDP、短时 Playwright、多 Profile 根目录和 Chrome 退出自恢复 | 修复 Google 登录拒绝并保持 Windows 式多 Sync Profile | REQ-013 / TASK-016 | TEST-014/015/016 | RB-001 |
+| `tests/test_browser_control.py`、`tests/test_browser_signin.py` | 覆盖独立生命周期、任务 Playwright 复用、启动参数和 Profile 数据保留 | 防止登录环境和多 Profile 回归 | REQ-013 / TASK-016/017 | 24 项定向 + 188 项全量 | RB-001 |
 
 ## 五、测试与验证
 
@@ -165,10 +183,17 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TEST-009 | 远程桌面全屏切换 | REQ-009 / TASK-009 | regular Playwright；1365×900、390×844 | 点击进入全屏，面板铺满视口；再次点击退出；状态同步；无溢出和控制台错误 | 两种视口均进入完整视口并可退出，零溢出、零控制台错误 | `通过` | 2026-08-29 运行 |
 | TEST-010 | Cookie/WebStorage 仅在首次容器启动初始化 | REQ-010 / TASK-010 | `.venv\Scripts\python.exe -m pytest -q` | 两类凭据均进入初始化源；首次启动注入并落标记；第二次启动不回填；任务/API 使用浏览器当前 Cookie 与 localStorage | 184 passed，1 个现有 SQLite 弃用警告 | `通过` | 2026-08-29 |
 | TEST-011 | Google Chrome 镜像与持久 profile | REQ-011 / TASK-011 | CI amd64 build；本机 Docker 拉取、`google-chrome-stable --version`、远程桌面、容器重建前后 profile 文件校验 | 正式 Chrome 启动；`/app/browser/profiles/shared` 挂载持久；无 Chromium 下载路径或 arm64 发布 | CI `33235957823` 成功；Chrome 152.0.7977.64；容器健康；完整窗口可见；键盘导航改变 URL 并恢复；标记 SHA256 保持 `185136E2...84CA` | `通过` | 2026-08-29，本机 Docker Desktop |
+| TEST-012 | 分辨率设置、校验、持久化和共享显示重启 | REQ-012 / TASK-013 | focused pytest | 默认值兼容；只接受支持尺寸；忙时 409；切换后 launcher 和状态使用新尺寸 | 22 项定向测试通过；覆盖 401、422、409、数据库持久化、重启和 1920x1080 启动参数 | `通过` | 2026-08-29 |
+| TEST-013 | 1920x1080 管理页与全屏渲染 | REQ-012 / TASK-014 | regular Playwright + 本机 Docker Desktop（禁止 HomePc） | 选择器可操作；iframe 比例更新；容器实际 Xvfb/Chrome/状态均为 1920x1080；全屏无重叠 | 桌面选择值和比例为 1920x1080；全屏面板 1920x1080；移动端无横向溢出；两者控制台零错误；Docker Xvfb dimensions 为 1920x1080 | `通过` | Browser plugin 未暴露，使用 regular Playwright |
+| TEST-014 | 普通 Chrome 与短时 CDP 生命周期 | REQ-013 / TASK-015/016 | 单元测试 + 本机 Docker 临时 Profile | Chrome 命令无 Playwright 自动化参数；`webdriver=false`；CDP 仅回环；Playwright 断开后 Chrome/noVNC 存活 | 24 项定向测试通过；隔离应用进入 Google `signin/identifier` 且非 rejected；`webdriver=false`；Playwright 退出后 Chrome PID 仍存活；Chrome 被结束后服务自动拉起新 PID | `通过` | 2026-08-29，本机 Docker Desktop |
+| TEST-015 | 多 Chrome Profile/Sync 数据持久化 | REQ-013 / TASK-015/017 | 本机 Docker 临时和应用 Profile | `Default`/`Profile 1` 等目录及 Local State 元数据保留；启动不锁定一个资料；重启后资料仍存在 | 隔离应用创建两份资料；`Local State` 保存两份元数据；启动命令无 `--profile-directory`；Chrome 自恢复后两份目录和元数据仍在 | `通过` | 2026-08-29，本机 Docker Desktop；未使用 HomePc |
+| TEST-016 | REQ-013 完整回归 | REQ-013 / TASK-017 | `.venv\Scripts\python.exe -m pytest -q` | 全部测试通过 | 188 passed，1 个现有 SQLAlchemy/SQLite 弃用警告 | `通过` | 2026-08-29 |
+| TEST-017 | 发布后 Actions、在线升级与运行验证 | REQ-014 / TASK-018 | GitHub Actions、升级 API、容器与浏览器控制 API | 用户明确不需要验证 | 未执行 | `已取消` | 2026-08-29，按用户最新指令取消 |
+| TEST-018 | 发布技能结构校验 | REQ-015 / TASK-019 | `quick_validate.py C:\Users\fengz\.codex\skills\autosurf-push-deploy` | 技能 frontmatter、名称和内容结构有效 | `Skill is valid!` | `通过` | 2026-08-29 |
 
 ### 5.2 未执行测试
 
-无。
+`ruff` 未执行：当前虚拟环境未安装该模块；以 `compileall`、`git diff --check`、24 项定向测试、188 项全量测试和本机 Docker 验证替代。该缺口不影响运行时行为结论。
 
 ## 六、端到端追踪
 
@@ -185,6 +210,10 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-009 | 全屏进入、退出和状态同步 | UNIT-003 | TASK-009 | `admin.html/js/css`、Fullscreen API | TEST-009 | 桌面与移动视口均通过 | `已完成` |
 | REQ-010 | 首次容器启动初始化 Cookie/WebStorage，后续任务和 API 只用浏览器环境 | UNIT-001/002 | TASK-010 | `services.py`、`browser_control.py`、`browser_session.py`、`pt_signin.py`、`main.py` | TEST-010 | 完整回归通过 | `已完成` |
 | REQ-011 | 官方 Chrome 运行时和完整 Google 登录数据跨容器持久化 | UNIT-001/002/003 | TASK-011 | Docker shell、Chrome channel、共享 profile、升级状态 UI | TEST-011 | Chrome 152；仅 amd64；profile 标记重建前后哈希一致 | `已完成` |
+| REQ-012 | 可选并持久化 1920x1080 等远程桌面尺寸 | UNIT-001/002/003 | TASK-012/013/014 | IF-007、Xvfb、Chrome、管理页选择器 | TEST-012/013 | API、服务重启、数据库、桌面/移动 UI 和本机 Docker Xvfb 均通过 | `已完成` |
+| REQ-013 | 普通 Chrome、Playwright 短时 CDP、多个持久化 Sync Profile | UNIT-001/004 | TASK-015/016/017 | IF-008、User Data 根目录、BrowserControlService | TEST-014/015/016 | Google identifier 正常、`webdriver=false`、短时连接后 Chrome 常驻、自恢复后两个 Profile 保留、188 项全量测试通过 | `已完成` |
+| REQ-014 | 提交并推送到 main | UNIT-001/002/003/004 | TASK-018 | Git、`origin/main` | TEST-016；TEST-017 按用户指令取消 | 功能提交 `b473580` 推送成功 | `已完成` |
+| REQ-015 | 发布技能不再升级或验证部署 | 不适用，用户级技能 | TASK-019 | `autosurf-push-deploy/SKILL.md`、`agents/openai.yaml` | TEST-018 | 技能校验通过 | `已完成` |
 
 ## 七、决策与冲突记录
 
@@ -193,11 +222,13 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | 决策编号 | 触发原因 | 采用方案 | 理由与证据 | 替代方案 | 影响范围 | 替代关系 | 状态 |
 |---|---|---|---|---|---|---|---|
 | DEC-001 | 用户禁止新端口 | FastAPI 同源截图与输入代理 | 第一版复用 18980，但无法显示原生浏览器界面 | noVNC 6080/VNC 5900 | 旧接口与 UI | 被 DEC-004 替代 | `已替代` |
-| DEC-002 | 自动任务与人工操作共享 profile | 维护会话持有现有 profile asyncio lock | 无需修改调度数据，天然串行 | 单独 profile 或暂停所有任务 | 浏览器生命周期 | 无 | `有效` |
+| DEC-002 | 自动任务与人工操作共享 profile | 维护会话持有现有 profile asyncio lock | 第一版无需修改调度数据即可串行 | 单独 profile 或暂停所有任务 | 浏览器生命周期 | 被 DEC-008 的常驻 Chrome + 短时 operation lock 替代 | `已替代` |
 | DEC-003 | 同端口下需要简单可靠画面 | PNG 轮询而非 WebSocket/noVNC | 第一版依赖少，但不是远程桌面 | WebSocket 视频流 | IF-003/前端 | 被 DEC-004 替代 | `已替代` |
 | DEC-004 | 用户要求完整浏览器远程桌面且不新增端口 | x11vnc 仅监听容器回环地址；noVNC/websockify 监听 Unix socket；FastAPI 在 `18980` 同源代理 | Debian 稳定包可重复构建，完整支持 X11 画面和输入，外部无新增端口 | Selkies、Guacamole、自研 X11 轮询 | 浏览器宿主、IF-005/006、Docker | 替代 DEC-001/003，并由 DEC-006 修订实现 | `有效` |
-| DEC-005 | 用户要求始终打开、无冷启动 | Chromium 与 Xvfb 随应用常驻；任务租用同一 context 并使用临时标签页 | 进程常驻和操作互斥解耦，任务完成不关闭浏览器 | 控制专用 profile、任务前停控制浏览器 | browser_session、handlers、lifespan | 补充 DEC-002 | `有效` |
+| DEC-005 | 用户要求始终打开、无冷启动 | Chromium 与 Xvfb 随应用常驻；任务租用同一 context 并使用临时标签页 | 第一版实现了进程常驻，但 Playwright 仍拥有浏览器进程 | 控制专用 profile、任务前停控制浏览器 | browser_session、handlers、lifespan | 常驻进程目标保留；常驻 Playwright context 部分被 DEC-008 替代 | `已替代` |
 | DEC-006 | GitHub Linux CI 无法安装 Selkies 开发版依赖 | 从 Selkies 开发提交切换到 Debian 稳定 noVNC/x11vnc/websockify 包 | Selkies 开发版依赖未发布的 `pixelflux~=2.1.0`，新 Docker 与 CI 均无法解析；noVNC 路径满足同端口和完整桌面要求 | 固定临时 Actions 产物、嵌入上游容器 | Docker、远程桌面进程、代理路径 | 修订 DEC-004 的实现 | `有效` |
+| DEC-007 | 客户端全屏只能放大画布，服务端无法据此自动改变 Xvfb | 提供 1280x720、1365x768、1600x900、1920x1080 固定选项；选择持久化，切换时在操作锁内重启共享显示栈 | 分辨率改变必须重建 Xvfb 与 Chrome；固定选项可控制资源消耗并避免任意超大画布；profile 目录不变 | 每次进入全屏按客户端 screen 自动重启、任意宽高输入 | browser_session、BrowserControlService、IF-007、管理前端 | 补充 DEC-004/005 | `有效` |
+| DEC-008 | Google 拒绝 Playwright 启动的浏览器，且用户要求 noVNC 与 Playwright 独立、支持多个 Sync | 由 BrowserControlService 直接启动普通 Chrome；Playwright 仅在初始化和任务期间通过回环 CDP 附加；持久化完整 User Data 根目录且不固定 `--profile-directory` | 本机 Docker 验证普通 Chrome `webdriver=false`、Google 登录页可进入 identifier、Playwright stop 后 Chrome 仍存活；Chrome 原生 Profile 模型与 Windows 一致 | 继续由 Playwright `launch_persistent_context` 启动；每个账号单独容器 | browser_session、BrowserControlService、IF-008、测试 | 替代 DEC-005 中“常驻 Playwright context”部分 | `有效` |
 
 ### 7.2 冲突记录
 
@@ -213,6 +244,7 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | DEF-004 | noVNC 页面同源代理返回 500 | Unix socket HTTP 客户端使用 `aiohttp`，但从 Selkies 切换后未将它声明为直接项目依赖 | 在 `pyproject.toml` 显式加入 `aiohttp>=3.11,<4` 并增加依赖契约断言 | REQ-001/006/007 | `已修复并通过 Docker 复验` |
 | DEF-005 | noVNC WebSocket 请求路径重复前缀并返回 403 | noVNC 将 `path` 查询参数相对当前 `vnc.html` 目录解析，却传入了完整 `browser-control/remote/websockify` | 将 noVNC 参数改为相对 `path=websockify`，由浏览器解析到受保护的同源路由 | REQ-001/006/007 | `已修复并通过 Docker 复验` |
 | DEF-006 | 容器重建后 Chrome 长时间停在启动中 | 持久 profile 的 `SingletonLock/SingletonCookie/SingletonSocket` 仍指向上一容器进程 | 启动共享 Chrome 前只清理三个进程级残留锁，并用测试保护 Local State | REQ-008/011 | `已修复并通过二次重建复验` |
+| DEF-007 | Google 登录页显示“此浏览器或应用可能不安全”并进入 `signin/rejected` | 官方 Chrome 仍由 Playwright 以自动化控制参数启动，Google 将登录环境判定为不受支持；顶部 `--no-sandbox` 横幅不是直接拒绝原因 | 改为普通 Chrome 子进程常驻，Playwright 通过容器回环 CDP 短时连接；不伪造 User-Agent 或绕过验证 | REQ-013 | `已修复并通过本机 Docker 复验` |
 
 ## 九、回滚方案
 
@@ -238,7 +270,10 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | RISK-002 | 并发 | 长时间维护会话会让自动签到等待共享锁 | 调度执行可能延后 | 提供显式停止和 15 分钟空闲超时；共享锁防止 profile 损坏 | `已缓解` |
 | RISK-003 | 输入 | 页面截图不包含原生 Chrome 地址栏/下载 UI | 不满足用户目标 | 已升级为 DEF-001，替换实现 | `处理中` |
 | RISK-004 | 依赖 | Selkies 主线依赖未发布的原生扩展，无法在普通 pip/Docker 构建中解析 | GitHub CI 和全新 Docker 安装失败 | 已改用 Debian trixie 中稳定的 noVNC 1.6、websockify 0.12、x11vnc 0.9.17 | `已解决` |
-| RISK-005 | 生命周期 | 常驻共享 context 会让任务级 init script、标签页和锁泄漏到后续任务 | 签到结果串扰或人工输入冲突 | 每个自动任务新建并最终关闭标签页；页面级 init script；任务仅持有操作租约 | `已验证` |
+| RISK-005 | 生命周期 | 多次短时 CDP 操作可能把任务新建标签页留在常驻 Chrome | 签到结果串扰或人工页面累积 | 每次任务记录连接前页面集合，只关闭任务新建页面；Playwright 断开不关闭原有人工页面 | `已验证` |
+| RISK-006 | 性能 | 1920x1080 比 1365x768 增加约 98% 像素和远程桌面编码带宽 | 弱设备或网络下操作延迟增加 | 保留较低分辨率选项；只在用户切换时重启；限制为四个已验证尺寸 | `已缓解` |
+| RISK-007 | 兼容 | 两个 Chrome Profile 的 CDP 目标具有不同 `browserContextId`，但 Playwright 高层将页面合并到一个 context，且无法按非默认 ID 创建新目标 | 自动任务无法可靠地用 Playwright context 直接绑定 Profile 目录 | 本轮保证人工多 Sync 与完整数据持久化；自动任务沿用当前活动资料，后续若要账号绑定需设计显式 Profile 契约 | `已确认边界` |
+| RISK-008 | 容器安全 | 当前 Docker `no-new-privileges` 下官方 Chrome 沙箱无法建立 namespace，普通 Chrome 仍需 `--no-sandbox` | Chrome 顶部显示安全提示，容器内浏览器沙箱弱化 | 保持容器非 root、LAN/登录边界和最小端口；不把 CDP 暴露到容器外；后续可单独评估容器 capability/seccomp | `已知并限制暴露` |
 
 ## 十二、质量门禁
 
@@ -246,9 +281,9 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 | 检查项 | 结论 | 证据或条件 |
 |---|---|---|
-| 最新目标、范围、非范围和约束已记录 | 通过 | REQ-001/002/005 至 008，明确完整浏览器、常驻和无新端口 |
-| 验收标准可观察、可测试 | 通过 | 每项 REQ 有 UI/API/测试结果 |
-| 必要架构和单元设计达到可实现程度 | 通过 | 常驻宿主、任务租约、noVNC Unix socket、IF-005/006 |
+| 最新目标、范围、非范围和约束已记录 | 通过 | REQ-001/002/005 至 013，包含普通 Chrome、短时 CDP 和多个 Sync Profile |
+| 验收标准可观察、可测试 | 通过 | REQ-013 有启动参数、Google identifier、webdriver、进程和 Profile 目录验收 |
+| 必要架构和单元设计达到可实现程度 | 通过 | 普通 Chrome 子进程、任务租约、noVNC Unix socket、IF-005/006/008 |
 | 每项需求已有任务、范围和测试思路 | 通过 | 追踪矩阵 |
 | 工作区基线和用户已有改动已识别 | 通过 | 三个签到适配文件已记录并保留 |
 | 高风险变更已有回滚思路 | 通过 | RB-001，无迁移无新端口 |
@@ -261,16 +296,16 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 | 检查项 | 结论 | 证据或条件 |
 |---|---|---|
-| 用户最新目标和有效需求逐项验收 | 通过 | REQ-001/002/005 至 011 均完成 |
-| 端到端追踪闭合 | 通过 | TASK-001 至 011 全部完成 |
-| 测试已执行或缺口影响已准确记录 | 通过 | 185 项全量测试、CI 和本机 Docker 真实验证通过 |
-| 缺陷已关闭或成为用户接受的遗留风险 | 通过 | 停止竞态与移动端图片缩放缺陷均关闭 |
+| 用户最新目标和有效需求逐项验收 | 通过 | REQ-001/002/005 至 015 均完成 |
+| 端到端追踪闭合 | 通过 | TASK-001 至 019 全部完成或按用户指令取消验证 |
+| 测试已执行或缺口影响已准确记录 | 通过 | 24 项定向、188 项全量与本机 Docker 登录/Profile 验证通过；ruff 缺口已记录 |
+| 缺陷已关闭或成为用户接受的遗留风险 | 通过 | DEF-007 已修复；RISK-007 的自动任务 Profile 绑定边界已准确记录 |
 | 决策、冲突、回滚、风险和阻塞状态已更新 | 通过 | 决策有效，风险已缓解，无阻塞 |
 | 最终差异无范围漂移、无关回退和调试残留 | 通过 | `git diff --check` 通过，Compose 未改；保留既有签到修改 |
-| 账本与工作区一致，下一步唯一动作明确 | 通过 | TASK-006 |
+| 账本与工作区一致，下一步唯一动作明确 | 通过 | 功能提交已推送；账本待作为独立文档提交推送；下一步无 |
 
 - 门禁结论：通过
-- 条件及关闭要求：无。
+- 条件及关闭要求：无；Actions、在线升级和发布后验证按用户指令不执行。
 
 ## 十三、检查点
 
@@ -280,13 +315,24 @@ AutoSurf 原先以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | 2026-08-28 17:12 +08:00 | 完成 BrowserControlService、同源 API、应用清理、管理页主流程；focused tests 4 项与语法检查通过 | 画面只在控制页可见时轮询，隐藏页不续活；Compose 未修改 | 后端任务完成，前端进入验证 | 补静态契约测试并执行桌面、移动渲染与交互验证 |
 | 2026-08-28 17:32 +08:00 | 完成真实 Chromium 操作、桌面/移动视觉 QA、停止竞态修复、移动图片缩放修复和完整回归 | 首次移动截图发现 img 缺 class，修复后实际缩放为 356px 并可见 | 全部需求闭合，完成门禁通过 | 无 |
 | 2026-08-29 13:34 +08:00 | 完成官方 Chrome、首次环境初始化、amd64 发布、本机 Docker 二次重建和 noVNC 输入验收 | 跨容器 Singleton 残留锁会阻塞持久 profile，已定向清理并保护 Local State | 运行版与远端均为 `8cf8ca9`，Chrome 152 常驻，profile 哈希保持 | 无 |
+| 2026-08-29 18:18 +08:00 | 重新打开任务并完成分辨率问题调查、接口和测试设计 | 全屏仅改变前端容器，Xvfb 与 Chrome 启动参数仍固定 1365x768 | 增加持久化分辨率选择和安全重启，不自动猜测客户端显示器 | 实现 TASK-013 |
+| 2026-08-29 18:52 +08:00 | 完成四档分辨率、持久化、安全重启、前端切换和全量验证 | 渲染 QA 发现恢复中禁用选择器及漏引 browser shell，均已修复；Google 登录拒绝是独立自动化启动问题 | REQ-012 闭合；未发布、未部署 | 等待用户决定提交发布或独立改造 Google 登录 |
+| 2026-08-29 20:46 +08:00 | 将目标修正为多个 Chrome Sync Profile；验证普通 Chrome + 短时 CDP 核心生命周期 | 普通 Chrome 可进入 Google identifier 页且 `webdriver=false`；Playwright stop 不关闭 Chrome；容器现有安全配置仍要求 `--no-sandbox` | 采用完整 User Data 根目录多 Profile，不固定单一资料；完成门禁重新打开 | 验证两个 Chrome Profile 的 CDP 可见性与持久化元数据 |
+| 2026-08-29 21:02 +08:00 | 完成两个 Chrome Profile 的真实行为验证并清理临时进程/目录 | `Default`/`Profile 1` 跨重启保留；CDP 底层可区分，高层 Playwright 合并且非默认 Profile 不能直接创建 target | 人工多 Sync 可实现；本轮不承诺不可靠的自动任务 Profile 绑定 | 实现普通 Chrome 常驻与 Playwright 短时 CDP 租约 |
+| 2026-08-29 21:22 +08:00 | 完成普通 Chrome 子进程、回环 CDP 短时租约和相关单元测试 | 服务启动不再启动 Playwright；已有任务 Playwright 直接附加并在任务结束断开；Chrome 命令不含 `--enable-automation`、`--remote-debugging-pipe` 或固定 Profile | TASK-016 完成；进入全量与本机 Docker 验证 | 运行全量测试和本机 Docker 隔离实例复验 |
+| 2026-08-29 21:45 +08:00 | 完成全量回归、本机 Docker Google 登录、短时 Playwright、Chrome 自恢复和多 Profile 持久化验证；删除隔离测试容器 | 实际 Sync 登录进入 identifier 而非 rejected；Chrome PID 18 被结束后由服务拉起 PID 705；`Default`/`Profile 1` 仍在 | REQ-013、TASK-017、DEF-007 闭合；完成门禁通过 | 无 |
+| 2026-08-29 22:08 +08:00 | 接管“发布”指令并完成发布前容器、入口进程和差异基线检查 | 不需要镜像重建；必须通过 Web 在线升级更新部署 checkout | 新增 REQ-014/TASK-018/TEST-017，发布门禁重新打开 | 复跑测试后提交推送 |
+| 2026-08-29 22:14 +08:00 | 24 项定向和 188 项全量测试再次通过；用户将范围缩小为只发布 | 不再监控 Actions、不调用在线升级、不做发布后验证 | TEST-017 取消；TASK-018 只保留提交推送 | 提交并推送 `main` |
+| 2026-08-29 22:22 +08:00 | 功能提交 `b473580` 推送成功；发布技能删除在线升级、部署与发布后验证并通过校验 | 技能自动触发仍保留，但“发布”现在只执行测试、提交和推送 | REQ-014/015 与 TASK-018/019 闭合 | 无 |
 
 ## 十四、完成摘要
 
-- 交付结果：现有管理端新增同端口“浏览器控制”页，通过 noVNC 操作常驻的完整官方 Google Chrome；首次启动初始化 Cookie/WebStorage，后续签到与 API 只使用共享 profile 当前环境。
-- 需求验收：REQ-001/002/005 至 011 全部完成；镜像只发布 linux/amd64。
-- 测试结论：定向 21 项、完整 185 项通过；GitHub CI `33235957823` 成功；本机 Docker 两次重建后完整画面和键盘输入正常。
-- 缺陷与风险：跨容器 Chrome Singleton 残留锁已修复；profile 初始化标记重建前后哈希一致；Compose 仍只暴露 18980。
+- 交付结果：普通 Google Chrome 由服务直接常驻，noVNC 不依赖 Playwright；初始化和签到仅短时通过容器回环 CDP 附加；完整 User Data 根目录保留多个 Chrome Profile 与各自 Sync 数据。
+- 需求验收：REQ-001/002/005 至 015 全部完成；镜像仍仅支持 linux/amd64，未增加端口。
+- 测试结论：24 项定向、188 项全量、本机 Docker Google identifier、`webdriver=false`、Chrome 自恢复与两个 Profile 跨重启保持均通过；发布后验证按用户要求取消。
+- 缺陷与风险：DEF-007 已修复；Playwright 高层无法可靠按 Chrome Profile 目录绑定自动任务，当前自动任务使用 CDP 默认活动资料，边界记录为 RISK-007。
 - 回滚说明：RB-001。
+- 发布结果：功能提交 `b473580` 已推送到 `origin/main`；未执行在线升级与发布后验证。
+- 技能结果：`autosurf-push-deploy` 已改为仅测试、提交、推送，并通过官方快速校验。
 - 完成门禁：通过。
 - 下一步唯一动作：无。
