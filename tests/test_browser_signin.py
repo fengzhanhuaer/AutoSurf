@@ -246,6 +246,7 @@ async def test_standalone_chrome_is_not_launched_with_playwright_automation_flag
     assert "--window-size=1920,1080" in args
     assert not any(value.startswith("--profile-directory") for value in args)
     assert "--no-sandbox" not in args
+    assert "--disable-setuid-sandbox" in args
     assert "--enable-automation" not in args
     assert "--remote-debugging-pipe" not in args
     assert kwargs["env"]["DISPLAY"] == ":99"
