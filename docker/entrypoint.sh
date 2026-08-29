@@ -41,13 +41,28 @@ audio_sink=${AUTOSURF_AUDIO_SINK:-autosurf}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/autosurf-runtime}
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-pulseaudio --start --exit-idle-time=-1 --log-target=stderr
-for _ in 1 2 3 4 5; do
+pulse_socket="$XDG_RUNTIME_DIR/pulse/native"
+rm -f "$XDG_RUNTIME_DIR/pulse/pid" "$pulse_socket"
+pulseaudio --daemonize=no --exit-idle-time=-1 --log-target=stderr &
+pulse_pid=$!
+export PULSE_SERVER="unix:$pulse_socket"
+pulse_ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     if pactl info >/dev/null 2>&1; then
+        pulse_ready=1
         break
     fi
-    sleep 0.2
+    if ! kill -0 "$pulse_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.25
 done
+if [ "$pulse_ready" -ne 1 ]; then
+    echo "PulseAudio failed to become ready at $pulse_socket" >&2
+    kill -TERM "$pulse_pid" 2>/dev/null || true
+    wait "$pulse_pid" 2>/dev/null || true
+    exit 1
+fi
 if ! pactl list short sinks | awk '{print $2}' | grep -Fxq "$audio_sink"; then
     pactl load-module module-null-sink \
         sink_name="$audio_sink" rate=48000 channels=2 \
@@ -62,6 +77,7 @@ terminate_child() {
         child_pid=$(cat "$pid_file")
         kill -TERM "$child_pid" 2>/dev/null || true
     fi
+    kill -TERM "$pulse_pid" 2>/dev/null || true
 }
 trap terminate_child TERM INT
 

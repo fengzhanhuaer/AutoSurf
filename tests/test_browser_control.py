@@ -357,6 +357,11 @@ def test_browser_control_uses_unix_socket_and_existing_port_only():
     assert "AUTOSURF_BROWSER_CHANNEL=chrome" in dockerfile
     assert "pulseaudio pulseaudio-utils" in dockerfile
     assert "module-null-sink" in entrypoint
+    assert "pulseaudio --daemonize=no" in entrypoint
+    assert "pulseaudio --start" not in entrypoint
+    assert 'export PULSE_SERVER="unix:$pulse_socket"' in entrypoint
+    assert 'kill -0 "$pulse_pid"' in entrypoint
+    assert 'if [ "$pulse_ready" -ne 1 ]' in entrypoint
     assert "AUTOSURF_AUDIO_SOURCE" in entrypoint
     assert "playwright install chromium" not in entrypoint
     assert "playwright install chromium" not in upgrade
