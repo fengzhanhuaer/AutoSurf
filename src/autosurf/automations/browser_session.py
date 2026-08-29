@@ -8,7 +8,7 @@ import subprocess
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import ParseResult, urlparse
 
 from autosurf.domain.models import RunContext, RunResult
@@ -21,6 +21,7 @@ WAF_COOKIE_NAMES = frozenset({
 })
 SHARED_PROFILE_KEY = "shared"
 _PROFILE_LOCKS: dict[str, asyncio.Lock] = {}
+_SHARED_BROWSER_PROVIDER: "SharedBrowserProvider | None" = None
 
 
 @dataclass(frozen=True)
@@ -28,12 +29,30 @@ class PersistentBrowserSession:
     context: Any
     profile_key: str
     mode: str
+    display_name: str | None = None
 
 
 @dataclass
 class VirtualDisplay:
     name: str
     process: subprocess.Popen[bytes]
+
+
+@dataclass
+class PersistentBrowserRuntime:
+    context: Any
+    profile_path: Path
+    mode: str
+    display: VirtualDisplay | None
+
+
+class SharedBrowserProvider(Protocol):
+    def automation_session(self, run_context: RunContext, url: str) -> Any: ...
+
+
+def register_shared_browser_provider(provider: SharedBrowserProvider | None) -> None:
+    global _SHARED_BROWSER_PROVIDER
+    _SHARED_BROWSER_PROVIDER = provider
 
 
 def validated_http_url(value: str) -> ParseResult:
@@ -106,44 +125,111 @@ async def persistent_chromium_session(
     url: str,
 ):
     validated_http_url(url)
+    provider = _SHARED_BROWSER_PROVIDER
+    if provider is not None:
+        async with provider.automation_session(run_context, url) as browser_session:
+            yield browser_session
+        return
+
     profile_path = browser_profile_path()
     lock = _PROFILE_LOCKS.setdefault(str(profile_path), asyncio.Lock())
 
     async with lock:
-        await _prepare_shared_profile(profile_path)
-        mode = persistent_browser_mode()
-        display = None
-        browser_context = None
+        runtime = None
         try:
-            launch_env = dict(os.environ)
-            if mode == "persistent_headful":
-                display = await _start_virtual_display()
-                launch_env["DISPLAY"] = display.name
-            kwargs: dict[str, Any] = {
-                "headless": mode == "persistent_headless",
-                "executable_path": playwright.chromium.executable_path,
-                "locale": str(run_context.config.get("locale", "zh-CN")),
-                "viewport": {"width": 1365, "height": 768},
-                "env": launch_env,
-                "args": ["--disable-dev-shm-usage"],
-            }
-            user_agent = run_context.config.get("user_agent") or run_context.user_agent
-            if user_agent:
-                kwargs["user_agent"] = str(user_agent)
-            browser_context = await playwright.chromium.launch_persistent_context(
-                str(profile_path), **kwargs,
+            runtime = await launch_persistent_browser(playwright, run_context, url=url)
+            yield PersistentBrowserSession(
+                runtime.context,
+                SHARED_PROFILE_KEY,
+                runtime.mode,
+                runtime.display.name if runtime.display else None,
             )
-            await _restore_waf_cookie_state(browser_context, profile_path, url)
-            await supplement_playwright_cookies(browser_context, run_context, url)
-            yield PersistentBrowserSession(browser_context, SHARED_PROFILE_KEY, mode)
         finally:
-            if browser_context is not None:
-                with suppress(Exception):
-                    await _save_waf_cookie_state(browser_context, profile_path, url)
-                with suppress(Exception):
-                    await browser_context.close()
-            if display is not None:
-                await _stop_virtual_display(display)
+            if runtime is not None:
+                await close_persistent_browser(runtime, url=url)
+
+
+async def launch_persistent_browser(
+    playwright: Any,
+    run_context: RunContext,
+    *,
+    url: str | None = None,
+    remote_desktop: bool = False,
+) -> PersistentBrowserRuntime:
+    if url is not None:
+        validated_http_url(url)
+    profile_path = browser_profile_path()
+    await _prepare_shared_profile(profile_path)
+    mode = persistent_browser_mode()
+    display = None
+    browser_context = None
+    try:
+        launch_env = dict(os.environ)
+        if mode == "persistent_headful":
+            display = await _start_virtual_display()
+            launch_env["DISPLAY"] = display.name
+        args = ["--disable-dev-shm-usage"]
+        kwargs: dict[str, Any] = {
+            "headless": mode == "persistent_headless",
+            "executable_path": playwright.chromium.executable_path,
+            "locale": str(run_context.config.get("locale", "zh-CN")),
+            "env": launch_env,
+            "args": args,
+        }
+        if remote_desktop and mode == "persistent_headful":
+            args.extend([
+                "--window-position=0,0",
+                "--window-size=1365,768",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ])
+            kwargs["no_viewport"] = True
+        else:
+            kwargs["viewport"] = {"width": 1365, "height": 768}
+        user_agent = run_context.config.get("user_agent") or run_context.user_agent
+        if user_agent:
+            kwargs["user_agent"] = str(user_agent)
+        browser_context = await playwright.chromium.launch_persistent_context(
+            str(profile_path), **kwargs,
+        )
+        runtime = PersistentBrowserRuntime(browser_context, profile_path, mode, display)
+        if url is not None:
+            await prepare_browser_for_run(runtime, run_context, url)
+        return runtime
+    except Exception:
+        if browser_context is not None:
+            with suppress(Exception):
+                await browser_context.close()
+        if display is not None:
+            await _stop_virtual_display(display)
+        raise
+
+
+async def prepare_browser_for_run(
+    runtime: PersistentBrowserRuntime,
+    run_context: RunContext,
+    url: str,
+) -> None:
+    await _restore_waf_cookie_state(runtime.context, runtime.profile_path, url)
+    await supplement_playwright_cookies(runtime.context, run_context, url)
+
+
+async def save_browser_after_run(runtime: PersistentBrowserRuntime, url: str) -> None:
+    await _save_waf_cookie_state(runtime.context, runtime.profile_path, url)
+
+
+async def close_persistent_browser(
+    runtime: PersistentBrowserRuntime,
+    *,
+    url: str | None = None,
+) -> None:
+    if url is not None:
+        with suppress(Exception):
+            await save_browser_after_run(runtime, url)
+    with suppress(Exception):
+        await runtime.context.close()
+    if runtime.display is not None:
+        await _stop_virtual_display(runtime.display)
 
 
 async def supplement_playwright_cookies(browser_context: Any, context: RunContext, url: str) -> None:

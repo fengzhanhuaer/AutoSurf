@@ -451,50 +451,21 @@
         <section class="panel browser-control-panel" aria-labelledby="browser-control-title">
           <div class="panel-heading browser-control-heading">
             <div>
-              <h2 id="browser-control-title">Chrome 维护会话</h2>
-              <p id="browser-control-page-title">浏览器未启动</p>
+              <h2 id="browser-control-title">Chromium 远程桌面</h2>
+              <p id="browser-control-page-title">正在连接常驻浏览器</p>
             </div>
-            <span class="status-badge" id="browser-control-state">未启动</span>
+            <span class="status-badge running" id="browser-control-state">连接中</span>
           </div>
-
-          <div class="browser-toolbar" role="toolbar" aria-label="浏览器导航">
-            <button class="icon-button browser-nav-button" id="browser-back" type="button"
-                    title="后退" aria-label="后退" disabled><span aria-hidden="true">←</span></button>
-            <button class="icon-button browser-nav-button" id="browser-forward" type="button"
-                    title="前进" aria-label="前进" disabled><span aria-hidden="true">→</span></button>
-            <button class="icon-button browser-nav-button" id="browser-reload" type="button"
-                    title="重新加载" aria-label="重新加载" disabled><span aria-hidden="true">↻</span></button>
-            <form class="browser-address-form" id="browser-address-form">
-              <label class="visually-hidden" for="browser-address">网址</label>
-              <input id="browser-address" type="url" inputmode="url" autocomplete="url"
-                     placeholder="https://example.com" required>
-              <button class="button secondary browser-go-button" id="browser-go" type="submit">打开</button>
-            </form>
-            <button class="button primary" id="browser-start" type="button">启动 Chrome</button>
-            <button class="button secondary" id="browser-stop" type="button" disabled>结束会话</button>
-          </div>
-
           <div class="browser-control-error" id="browser-control-error" role="alert" hidden></div>
-
-          <div class="browser-frame-shell" id="browser-frame-shell" tabindex="0"
-               aria-label="Chrome 页面画面，可点击、滚动并使用键盘操作">
-            <img class="browser-frame" id="browser-frame" alt="Chrome 当前页面" draggable="false" hidden>
-            <div class="browser-frame-placeholder" id="browser-frame-placeholder">
-              <strong>浏览器未启动</strong>
+          <div class="browser-remote-shell" id="browser-remote-shell">
+            <iframe id="browser-remote-frame" title="Chromium 远程桌面"
+                    allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+            <div class="browser-remote-placeholder" id="browser-remote-placeholder">
+              <strong>正在连接远程桌面</strong>
             </div>
-          </div>
-
-          <div class="browser-input-bar">
-            <div class="browser-key-buttons" aria-label="常用按键">
-              <button class="button secondary" type="button" data-browser-key="Escape" disabled>Esc</button>
-              <button class="button secondary" type="button" data-browser-key="Tab" disabled>Tab</button>
-              <button class="button secondary" type="button" data-browser-key="Enter" disabled>Enter</button>
+            <div class="browser-remote-cover" id="browser-remote-cover" hidden>
+              <strong>自动任务正在操作浏览器</strong>
             </div>
-            <form class="browser-text-form" id="browser-text-form">
-              <label class="visually-hidden" for="browser-text">发送文字</label>
-              <input id="browser-text" type="text" autocomplete="off" placeholder="输入要发送到页面的文字" disabled>
-              <button class="button secondary" id="browser-text-send" type="submit" disabled>发送文字</button>
-            </form>
           </div>
         </section>
       </section>

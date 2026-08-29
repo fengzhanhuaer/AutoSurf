@@ -650,6 +650,9 @@ async def test_handler_keeps_profile_refresh_after_signin_navigation_error(monke
     class BrowserContext:
         pages = [page]
 
+        async def new_page(self):
+            return page
+
     class BrowserSession:
         context = BrowserContext()
         mode = "persistent_headless"

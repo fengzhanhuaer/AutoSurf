@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,11 +6,14 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from autosurf.browser_control import (
-    BrowserControlInactive,
-    BrowserControlService,
+from autosurf.automations.browser_session import (
+    PersistentBrowserRuntime,
+    persistent_chromium_session,
+    register_shared_browser_provider,
 )
+from autosurf.browser_control import BrowserControlService
 from autosurf.config import Settings
+from autosurf.domain.models import RunContext
 from autosurf.main import create_app
 
 
@@ -25,36 +29,9 @@ def settings(tmp_path):
     )
 
 
-class FakeMouse:
-    def __init__(self):
-        self.clicks = []
-        self.wheels = []
-
-    async def click(self, x, y, *, click_count):
-        self.clicks.append((x, y, click_count))
-
-    async def wheel(self, delta_x, delta_y):
-        self.wheels.append((delta_x, delta_y))
-
-
-class FakeKeyboard:
-    def __init__(self):
-        self.keys = []
-        self.text = []
-
-    async def press(self, key):
-        self.keys.append(key)
-
-    async def insert_text(self, text):
-        self.text.append(text)
-
-
 class FakePage:
-    def __init__(self):
-        self.url = "about:blank"
-        self.mouse = FakeMouse()
-        self.keyboard = FakeKeyboard()
-        self.history = []
+    def __init__(self, url="about:blank"):
+        self.url = url
         self.timeout = None
         self.closed = False
 
@@ -69,156 +46,175 @@ class FakePage:
 
     async def goto(self, url, **_kwargs):
         self.url = url
-        self.history.append(("goto", url))
 
-    async def go_back(self, **_kwargs):
-        self.history.append(("back", None))
-
-    async def go_forward(self, **_kwargs):
-        self.history.append(("forward", None))
-
-    async def reload(self, **_kwargs):
-        self.history.append(("reload", None))
-
-    async def screenshot(self, **kwargs):
-        assert kwargs == {"type": "png", "animations": "disabled"}
-        return b"\x89PNG\r\n\x1a\nframe"
+    async def close(self):
+        self.closed = True
 
 
-class FakePlaywrightContext:
-    async def __aenter__(self):
-        return object()
+class FakeContext:
+    def __init__(self):
+        self.pages = [FakePage()]
+        self.listeners = {}
 
-    async def __aexit__(self, *_args):
-        return None
+    def on(self, event, callback):
+        self.listeners[event] = callback
+
+    async def new_page(self):
+        page = FakePage()
+        self.pages.append(page)
+        return page
 
 
-@pytest.fixture
-def controlled_browser():
-    page = FakePage()
-    exited = {"value": False}
+class FakePlaywright:
+    def __init__(self):
+        self.stopped = False
 
-    @asynccontextmanager
-    async def session_factory(_playwright, context, url):
-        assert context.execution_id == "browser-control"
-        assert context.config["url"] == url
-        yield SimpleNamespace(
-            context=SimpleNamespace(pages=[page]),
-            mode="persistent_headful",
-        )
-        exited["value"] = True
+    async def stop(self):
+        self.stopped = True
+
+
+class FakePlaywrightManager:
+    def __init__(self, playwright):
+        self.playwright = playwright
+
+    async def start(self):
+        return self.playwright
+
+
+class FakeProcess:
+    def __init__(self):
+        self.returncode = None
+        self.stdout = None
+        self.stderr = None
+        self._stopped = asyncio.Event()
+
+    async def wait(self):
+        await self._stopped.wait()
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = 0
+        self._stopped.set()
+
+    def kill(self):
+        self.terminate()
+
+
+@pytest.mark.asyncio
+async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, monkeypatch):
+    socket_path = tmp_path / "selkies.sock"
+    context = FakeContext()
+    runtime = PersistentBrowserRuntime(
+        context=context,
+        profile_path=tmp_path / "profile",
+        mode="persistent_headful",
+        display=SimpleNamespace(name=":90"),
+    )
+    playwright = FakePlaywright()
+    launched = []
+    closed = []
+
+    async def browser_launcher(_playwright, run_context, *, remote_desktop):
+        launched.append((run_context.execution_id, remote_desktop))
+        return runtime
+
+    async def browser_closer(value):
+        closed.append(value)
+
+    async def process_factory(*args, **kwargs):
+        assert "--unix-socket=" + str(socket_path) in args
+        assert "--subfolder=/browser-control/remote" in args
+        assert kwargs["env"]["DISPLAY"] == ":90"
+        socket_path.touch()
+        return FakeProcess()
+
+    prepared = []
+    saved = []
+
+    async def prepare(value, run_context, url):
+        prepared.append((value, run_context.execution_id, url))
+
+    async def save(value, url):
+        saved.append((value, url))
+
+    monkeypatch.setattr("autosurf.browser_control.prepare_browser_for_run", prepare)
+    monkeypatch.setattr("autosurf.browser_control.save_browser_after_run", save)
 
     service = BrowserControlService(
-        session_factory=session_factory,
-        playwright_factory=FakePlaywrightContext,
-        idle_timeout_seconds=60,
+        playwright_factory=lambda: FakePlaywrightManager(playwright),
+        browser_launcher=browser_launcher,
+        browser_closer=browser_closer,
+        process_factory=process_factory,
+        socket_path=socket_path,
     )
-    return service, page, exited
-
-
-@pytest.mark.asyncio
-async def test_browser_control_session_frame_navigation_and_input(controlled_browser):
-    service, page, exited = controlled_browser
-
-    started = await service.start("https://example.com/")
+    started = await service.start()
     assert started["active"] is True
-    assert started["starting"] is False
-    assert started["mode"] == "persistent_headful"
-    assert started["viewport"] == {"width": 1365, "height": 768}
-    assert page.timeout == 15_000
-    assert await service.frame() == b"\x89PNG\r\n\x1a\nframe"
+    assert started["always_on"] is True
+    assert started["remote_url"] == "/browser-control/remote/"
+    assert launched == [("browser-control", True)]
 
-    await service.navigate("goto", "https://example.org/path")
-    await service.navigate("back")
-    await service.navigate("forward")
-    await service.navigate("reload")
-    await service.input("click", x=100, y=200)
-    await service.input("double_click", x=101, y=201)
-    await service.input("wheel", delta_x=3, delta_y=240)
-    await service.input("key", key="Control+A")
-    await service.input("text", text="测试 text")
+    run_context = RunContext("execution-1", {"url": "https://example.com/"}, {})
+    async with service.automation_session(run_context, "https://example.com/") as session:
+        assert session.context is context
+        task_page = await context.new_page()
+        status = await service.status()
+        assert status["busy"] is True
+        assert status["automation_owner"] == "execution-1"
 
-    assert page.history == [
-        ("goto", "https://example.com/"),
-        ("goto", "https://example.org/path"),
-        ("back", None),
-        ("forward", None),
-        ("reload", None),
-    ]
-    assert page.mouse.clicks == [(100, 200, 1), (101, 201, 2)]
-    assert page.mouse.wheels == [(3, 240)]
-    assert page.keyboard.keys == ["Control+A"]
-    assert page.keyboard.text == ["测试 text"]
+    assert task_page.closed is True
+    assert context.pages[0].closed is False
+    assert prepared == [(runtime, "execution-1", "https://example.com/")]
+    assert saved == [(runtime, "https://example.com/")]
+    assert (await service.status())["active"] is True
 
-    stopped = await service.stop()
-    assert stopped["active"] is False
-    assert stopped["task_running"] is False
-    assert exited["value"] is True
+    await service.shutdown()
+    assert closed == [runtime]
+    assert playwright.stopped is True
+    assert (await service.status())["active"] is False
 
 
 @pytest.mark.asyncio
-async def test_browser_control_rejects_invalid_and_inactive_operations(controlled_browser):
-    service, _page, _exited = controlled_browser
+async def test_persistent_session_delegates_to_registered_host():
+    calls = []
 
-    with pytest.raises(ValueError):
-        await service.start("file:///etc/passwd")
-    with pytest.raises(BrowserControlInactive):
-        await service.frame()
+    class Provider:
+        @asynccontextmanager
+        async def automation_session(self, run_context, url):
+            calls.append((run_context.execution_id, url))
+            yield SimpleNamespace(context="shared", mode="persistent_headful")
 
-    await service.start("https://example.com/")
-    with pytest.raises(ValueError, match="坐标"):
-        await service.input("click", x=1400, y=10)
-    with pytest.raises(ValueError, match="导航动作"):
-        await service.navigate("invalid")
-    await service.shutdown()
+    register_shared_browser_provider(Provider())
+    try:
+        context = RunContext("execution-2", {"url": "https://example.com/"}, {})
+        async with persistent_chromium_session(None, context, "https://example.com/") as session:
+            assert session.context == "shared"
+    finally:
+        register_shared_browser_provider(None)
+    assert calls == [("execution-2", "https://example.com/")]
 
 
 class FakeBrowserControlApi:
-    def __init__(self):
-        self.active = False
-        self.calls = []
-
-    async def status(self, *, touch=False):
+    async def status(self):
         return {
-            "active": self.active,
+            "active": True,
             "starting": False,
-            "url": "https://example.com/" if self.active else "",
-            "title": "Example" if self.active else "",
-            "mode": "persistent_headful" if self.active else None,
+            "url": "about:blank",
+            "title": "Chromium",
+            "mode": "persistent_headful",
             "viewport": {"width": 1365, "height": 768},
             "error": None,
-            "task_running": self.active,
-            "touched": touch,
+            "task_running": True,
+            "always_on": True,
+            "busy": False,
+            "automation_owner": None,
+            "remote_url": "/browser-control/remote/",
         }
-
-    async def start(self, url):
-        self.calls.append(("start", url))
-        self.active = True
-        return await self.status()
-
-    async def stop(self):
-        self.calls.append(("stop",))
-        self.active = False
-        return await self.status()
-
-    async def frame(self):
-        self.calls.append(("frame",))
-        return b"\x89PNG\r\n\x1a\nframe"
-
-    async def navigate(self, action, url):
-        self.calls.append(("navigate", action, url))
-        return await self.status()
-
-    async def input(self, action, **kwargs):
-        self.calls.append(("input", action, kwargs))
-        return await self.status()
 
 
 @pytest.mark.asyncio
-async def test_browser_control_api_uses_existing_authenticated_router(settings):
+async def test_browser_control_status_and_remote_proxy_require_login(settings):
     app = create_app(settings)
-    fake = FakeBrowserControlApi()
-    app.state.browser_control = fake
+    app.state.browser_control = FakeBrowserControlApi()
     transport = httpx.ASGITransport(app=app)
     auth = (settings.username, settings.password)
 
@@ -226,77 +222,38 @@ async def test_browser_control_api_uses_existing_authenticated_router(settings):
         assert (await client.get("/api/v1/browser-control")).status_code == 401
         status = await client.get("/api/v1/browser-control", auth=auth)
         assert status.status_code == 200
-        assert status.json()["active"] is False
+        assert status.json()["always_on"] is True
 
-        started = await client.post(
-            "/api/v1/browser-control/session",
-            auth=auth,
-            json={"url": "https://example.com/"},
-        )
-        assert started.status_code == 201
-        assert started.json()["active"] is True
-
-        frame = await client.get("/api/v1/browser-control/frame", auth=auth)
-        assert frame.status_code == 200
-        assert frame.headers["content-type"] == "image/png"
-        assert frame.headers["cache-control"] == "no-store, max-age=0"
-
-        navigated = await client.post(
-            "/api/v1/browser-control/navigate",
-            auth=auth,
-            json={"action": "goto", "url": "https://example.org/"},
-        )
-        assert navigated.status_code == 200
-        clicked = await client.post(
-            "/api/v1/browser-control/input",
-            auth=auth,
-            json={"action": "click", "x": 123, "y": 456},
-        )
-        assert clicked.status_code == 200
-        stopped = await client.delete("/api/v1/browser-control/session", auth=auth)
-        assert stopped.status_code == 200
-        assert stopped.json()["active"] is False
-
-    assert fake.calls == [
-        ("start", "https://example.com/"),
-        ("frame",),
-        ("navigate", "goto", "https://example.org/"),
-        (
-            "input",
-            "click",
-            {
-                "x": 123.0,
-                "y": 456.0,
-                "delta_x": 0.0,
-                "delta_y": 0.0,
-                "key": None,
-                "text": None,
-            },
-        ),
-        ("stop",),
-    ]
+        assert (await client.get("/browser-control/remote/")).status_code == 401
+        unavailable = await client.get("/browser-control/remote/", auth=auth)
+        assert unavailable.status_code == 503
 
 
-def test_compose_keeps_browser_control_on_existing_port_only():
+def test_browser_control_uses_unix_socket_and_existing_port_only():
     compose = Path("compose.yaml").read_text(encoding="utf-8")
+    source = Path("src/autosurf/browser_control.py").read_text(encoding="utf-8")
     assert '"0.0.0.0:18980:8080"' in compose
     assert "18981" not in compose
     assert "6080" not in compose
     assert "5900" not in compose
+    assert "--unix-socket=" in source
+    assert "--subfolder=/browser-control/remote" not in compose
 
 
-def test_browser_control_management_ui_contract():
+def test_browser_control_management_ui_embeds_full_remote_desktop():
     html = Path("src/autosurf/web/admin.html").read_text(encoding="utf-8")
     javascript = Path("src/autosurf/web/admin.js").read_text(encoding="utf-8")
     css = Path("src/autosurf/web/admin.css").read_text(encoding="utf-8")
 
     assert 'data-view="browser-control"' in html
     assert 'id="browser-control-panel"' in html
-    assert 'id="browser-frame-shell"' in html
-    assert 'class="browser-frame" id="browser-frame"' in html
-    assert 'id="browser-address-form"' in html
-    assert 'id="browser-text-form"' in html
+    assert 'id="browser-remote-frame"' in html
+    assert 'title="Chromium 远程桌面"' in html
+    assert 'id="browser-remote-cover"' in html
+    assert 'id="browser-address-form"' not in html
+    assert 'id="browser-start"' not in html
+    assert 'id="browser-frame"' not in html
     assert 'api("/api/v1/browser-control"' in javascript
-    assert 'fetch(`/api/v1/browser-control/frame?t=${Date.now()}`' in javascript
-    assert 'method: "POST", body: JSON.stringify({ action: "goto", url })' in javascript
-    assert 'aspect-ratio: 1365 / 768' in css
+    assert '"/browser-control/remote/"' in javascript
+    assert "/api/v1/browser-control/frame" not in javascript
+    assert "aspect-ratio: 1365 / 768" in css

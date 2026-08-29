@@ -30,7 +30,6 @@ from autosurf.domain.scheduling import SIGNIN_START_TIME, next_signin_run_at
 from autosurf.application.services import align_all_signin_schedules
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
 from autosurf.automations.browser_session import persistent_browser_mode
-from autosurf.browser_control import BrowserControlError, BrowserControlInactive
 from autosurf.infrastructure.database import (
     AutomationRecord,
     CookieCloudBlob,
@@ -97,25 +96,6 @@ class PtSignInEnabledInput(BaseModel):
 class PtSiteActionsInput(BaseModel):
     sign_in_enabled: bool
     profile_refresh_enabled: bool
-
-
-class BrowserControlSessionInput(BaseModel):
-    url: str = Field(min_length=8, max_length=2048)
-
-
-class BrowserControlNavigateInput(BaseModel):
-    action: Literal["goto", "back", "forward", "reload"]
-    url: str | None = Field(default=None, max_length=2048)
-
-
-class BrowserControlInput(BaseModel):
-    action: Literal["click", "double_click", "wheel", "key", "text"]
-    x: float | None = Field(default=None, ge=0, le=1365)
-    y: float | None = Field(default=None, ge=0, le=768)
-    delta_x: float = Field(default=0, ge=-5000, le=5000)
-    delta_y: float = Field(default=0, ge=-5000, le=5000)
-    key: str | None = Field(default=None, max_length=64)
-    text: str | None = Field(default=None, max_length=2000)
 
 
 class PtSignInCollectInput(BaseModel):
@@ -226,6 +206,10 @@ def _session_username(settings: Any, token: str | None) -> str | None:
         return None
 
 
+def authenticated_session_username(settings: Any, token: str | None) -> str | None:
+    return _session_username(settings, token)
+
+
 def require_login(request: Request, credentials: HTTPBasicCredentials | None = Depends(basic_auth)) -> str:
     settings = request.app.state.settings
     if credentials:
@@ -276,71 +260,9 @@ router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_login)])
 web_credential_router = APIRouter(prefix="/api/web-credentials")
 
 
-def _browser_control_error(error: Exception) -> HTTPException:
-    if isinstance(error, (BrowserControlInactive, BrowserControlError)):
-        return HTTPException(status_code=409, detail=str(error))
-    return HTTPException(status_code=422, detail=str(error))
-
-
 @router.get("/browser-control")
 async def browser_control_status(request: Request) -> dict[str, Any]:
-    return await request.app.state.browser_control.status(touch=True)
-
-
-@router.post("/browser-control/session", status_code=201)
-async def start_browser_control_session(
-    payload: BrowserControlSessionInput, request: Request,
-) -> dict[str, Any]:
-    try:
-        return await request.app.state.browser_control.start(payload.url)
-    except (BrowserControlError, ValueError) as exc:
-        raise _browser_control_error(exc) from exc
-
-
-@router.delete("/browser-control/session")
-async def stop_browser_control_session(request: Request) -> dict[str, Any]:
-    return await request.app.state.browser_control.stop()
-
-
-@router.get("/browser-control/frame")
-async def browser_control_frame(request: Request) -> Response:
-    try:
-        payload = await request.app.state.browser_control.frame()
-    except BrowserControlError as exc:
-        raise _browser_control_error(exc) from exc
-    return Response(
-        content=payload,
-        media_type="image/png",
-        headers={"Cache-Control": "no-store, max-age=0"},
-    )
-
-
-@router.post("/browser-control/navigate")
-async def navigate_browser_control(
-    payload: BrowserControlNavigateInput, request: Request,
-) -> dict[str, Any]:
-    try:
-        return await request.app.state.browser_control.navigate(payload.action, payload.url)
-    except (BrowserControlError, ValueError) as exc:
-        raise _browser_control_error(exc) from exc
-
-
-@router.post("/browser-control/input")
-async def input_browser_control(
-    payload: BrowserControlInput, request: Request,
-) -> dict[str, Any]:
-    try:
-        return await request.app.state.browser_control.input(
-            payload.action,
-            x=payload.x,
-            y=payload.y,
-            delta_x=payload.delta_x,
-            delta_y=payload.delta_y,
-            key=payload.key,
-            text=payload.text,
-        )
-    except (BrowserControlError, ValueError) as exc:
-        raise _browser_control_error(exc) from exc
+    return await request.app.state.browser_control.status()
 
 
 def _program_repository() -> Path:

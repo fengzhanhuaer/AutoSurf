@@ -7,13 +7,21 @@ from pathlib import Path
 import threading
 
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from autosurf import __version__
-from autosurf.access import LanAccessMiddleware, LanAccessPolicy
-from autosurf.api import auth_router, cookiecloud_router, require_login, router, web_credential_router
+from autosurf.access import LanAccessMiddleware, LanAccessPolicy, is_lan_address
+from autosurf.api import (
+    SESSION_COOKIE,
+    auth_router,
+    authenticated_session_username,
+    cookiecloud_router,
+    require_login,
+    router,
+    web_credential_router,
+)
 from autosurf.application.registry import HandlerRegistry
 from autosurf.application.services import (
     AutomationService,
@@ -24,7 +32,7 @@ from autosurf.application.services import (
     reconcile_pt_site_aliases,
     reconcile_signin_schedules,
 )
-from autosurf.browser_control import BrowserControlService
+from autosurf.browser_control import BrowserControlService, REMOTE_DESKTOP_PREFIX
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.pt_signin import (
@@ -90,14 +98,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        await browser_control.start()
         tasks = [asyncio.create_task(scheduler_loop()), asyncio.create_task(worker_loop())]
-        yield
-        await browser_control.shutdown()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError):
-                await task
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
+            await browser_control.shutdown()
 
     app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -123,6 +134,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(management_router)
 
     management_login = [Depends(require_login)]
+
+    @app.api_route(
+        f"{REMOTE_DESKTOP_PREFIX}/",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        dependencies=management_login,
+        include_in_schema=False,
+    )
+    @app.api_route(
+        f"{REMOTE_DESKTOP_PREFIX}/{{path:path}}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        dependencies=management_login,
+        include_in_schema=False,
+    )
+    async def browser_remote_http(request: Request, path: str = ""):
+        return await browser_control.proxy_http(request, path)
+
+    @app.websocket(f"{REMOTE_DESKTOP_PREFIX}/api/websockets")
+    async def browser_remote_websocket(websocket: WebSocket) -> None:
+        client_host = websocket.client.host if websocket.client else None
+        if lan_access.lan_only and not is_lan_address(client_host):
+            await websocket.close(code=4403, reason="LAN access required")
+            return
+        username = authenticated_session_username(
+            settings,
+            websocket.cookies.get(SESSION_COOKIE),
+        )
+        if not username:
+            await websocket.close(code=4401, reason="login required")
+            return
+        origin = websocket.headers.get("origin")
+        host = websocket.headers.get("host")
+        if origin and host and origin.split("://", 1)[-1].rstrip("/") != host:
+            await websocket.close(code=4403, reason="same origin required")
+            return
+        await browser_control.proxy_websocket(websocket)
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:

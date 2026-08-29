@@ -31,7 +31,7 @@ class BrowserSignInHandler:
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
-                page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
+                page = await browser_context.new_page()
                 page.set_default_timeout(timeout_ms)
                 try:
                     response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)

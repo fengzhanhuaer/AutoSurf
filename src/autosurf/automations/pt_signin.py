@@ -1248,13 +1248,11 @@ class PtSignInHandler:
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
+                page = await browser_context.new_page()
                 if discovery and discovery.strategy in {
                     "web_storage_browser", "web_storage_profile_refresh_only",
                 }:
-                    await browser_context.add_init_script(
-                        web_storage_init_script(url, context.cookies),
-                    )
-                page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
+                    await page.add_init_script(web_storage_init_script(url, context.cookies))
                 page.set_default_timeout(timeout_ms)
                 try:
                     origin = pt_home_url(url)
