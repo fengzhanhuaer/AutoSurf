@@ -28,12 +28,14 @@ const state = {
     busy: false,
     remote_url: "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify",
     viewport: { width: 1365, height: 768 },
+    supported_resolutions: [],
   },
 };
 
 const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"]);
 let executionRefreshInFlight = false;
 let browserStatusTimer = null;
+let browserResolutionChanging = false;
 
 const elements = {
   body: document.body,
@@ -58,7 +60,9 @@ const elements = {
   browserControlState: document.querySelector("#browser-control-state"),
   browserControlPageTitle: document.querySelector("#browser-control-page-title"),
   browserControlError: document.querySelector("#browser-control-error"),
+  browserResolution: document.querySelector("#browser-resolution"),
   browserFullscreen: document.querySelector("#browser-fullscreen"),
+  browserRemoteShell: document.querySelector("#browser-remote-shell"),
   browserRemoteFrame: document.querySelector("#browser-remote-frame"),
   browserRemotePlaceholder: document.querySelector("#browser-remote-placeholder"),
   browserRemoteCover: document.querySelector("#browser-remote-cover"),
@@ -385,14 +389,20 @@ function renderBrowserControl() {
   const active = Boolean(browser.active);
   const starting = Boolean(browser.starting);
   const busy = Boolean(browser.busy);
-  elements.browserControlState.textContent = busy ? "任务占用" : (active ? "运行中" : (starting ? "恢复中" : "不可用"));
-  elements.browserControlState.className = `status-badge ${active && !busy ? "succeeded" : (starting || busy ? "running" : "failed")}`;
+  const changing = browserResolutionChanging;
+  elements.browserControlState.textContent = changing ? "切换中" : (busy ? "任务占用" : (active ? "运行中" : (starting ? "恢复中" : "不可用")));
+  elements.browserControlState.className = `status-badge ${active && !busy && !changing ? "succeeded" : (starting || busy || changing ? "running" : "failed")}`;
   elements.browserControlPageTitle.textContent = browser.title || browser.url || "正在连接常驻浏览器";
   elements.browserControlError.textContent = browser.error || "";
   elements.browserControlError.hidden = !browser.error;
-  elements.browserRemotePlaceholder.hidden = active;
+  const viewport = browser.viewport || { width: 1365, height: 768 };
+  const resolutionValue = `${viewport.width}x${viewport.height}`;
+  elements.browserResolution.value = resolutionValue;
+  elements.browserResolution.disabled = busy || changing;
+  elements.browserRemoteShell.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
+  elements.browserRemotePlaceholder.hidden = active && !changing;
   elements.browserRemoteCover.hidden = !active || !busy;
-  if (active && state.activeView === "browser-control" && !document.hidden) {
+  if (active && !changing && state.activeView === "browser-control" && !document.hidden) {
     const remoteUrl = browser.remote_url || "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify";
     if (!elements.browserRemoteFrame.getAttribute("src")) {
       elements.browserRemoteFrame.src = remoteUrl;
@@ -415,6 +425,31 @@ async function loadBrowserControlStatus({ quiet = false } = {}) {
   } catch (error) {
     if (error.status === 401) goToLogin();
     else if (!quiet) showToast(error.message, true);
+  }
+}
+
+async function changeBrowserResolution() {
+  const previous = state.browserControl.viewport;
+  const [width, height] = elements.browserResolution.value.split("x").map(Number);
+  if (width === previous.width && height === previous.height) return;
+  browserResolutionChanging = true;
+  elements.browserRemoteFrame.removeAttribute("src");
+  renderBrowserControl();
+  try {
+    const status = await api("/api/v1/browser-control/resolution", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ width, height }),
+    });
+    setBrowserControlState(status);
+    showToast(`远程桌面已切换为 ${width} x ${height}`);
+  } catch (error) {
+    elements.browserResolution.value = `${previous.width}x${previous.height}`;
+    showToast(error.message || "无法切换分辨率", true);
+  } finally {
+    browserResolutionChanging = false;
+    renderBrowserControl();
+    await loadBrowserControlStatus({ quiet: true });
   }
 }
 
@@ -459,6 +494,7 @@ async function toggleBrowserFullscreen() {
 }
 
 elements.browserFullscreen.addEventListener("click", toggleBrowserFullscreen);
+elements.browserResolution.addEventListener("change", changeBrowserResolution);
 document.addEventListener("fullscreenchange", renderBrowserFullscreenState);
 document.addEventListener("webkitfullscreenchange", renderBrowserFullscreenState);
 

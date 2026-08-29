@@ -270,8 +270,9 @@ td:first-child { color: var(--text); font-weight: 600; }
 .browser-control-panel:-webkit-full-screen .browser-remote-shell { min-height: 0; flex: 1; aspect-ratio: auto; }
 .browser-control-heading { min-height: 68px; }
 .browser-control-actions { display: flex; align-items: center; gap: 8px; }
+.browser-control-actions select { width: 128px; min-height: 38px; }
 .browser-control-error { margin: 12px 14px 0; padding: 10px 12px; border: 1px solid #f1b7b2; border-radius: 5px; background: var(--danger-bg); color: var(--danger); overflow-wrap: anywhere; }
-.browser-remote-shell { position: relative; width: 100%; aspect-ratio: 1365 / 768; overflow: hidden; background: #161b20; }
+.browser-remote-shell { position: relative; width: 100%; aspect-ratio: var(--browser-aspect-ratio, 1365 / 768); overflow: hidden; background: #161b20; }
 .browser-remote-shell iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #161b20; }
 .browser-remote-placeholder, .browser-remote-cover { position: absolute; inset: 0; display: grid; place-items: center; color: #f3f6f8; font-size: 15px; text-align: center; }
 .browser-remote-placeholder { background: #161b20; }
@@ -332,8 +333,10 @@ td:first-child { color: var(--text); font-weight: 600; }
   .debug-log-meta div:nth-child(n+3) { border-top: 1px solid var(--border); }
   .debug-log-meta div:nth-child(3) { padding-left: 0; }
   .debug-log-detail { padding: 16px; }
-  .browser-control-heading { flex-direction: row; align-items: center; }
-  .browser-control-actions .icon-button { width: 38px; }
+  .browser-control-heading { flex-direction: column; align-items: stretch; }
+  .browser-control-actions { width: 100%; }
+  .browser-control-actions select { width: auto; min-width: 0; flex: 1; }
+  .browser-control-actions .icon-button { width: 38px; flex: 0 0 38px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -32,7 +32,11 @@ from autosurf.application.services import (
     reconcile_pt_site_aliases,
     reconcile_signin_schedules,
 )
-from autosurf.browser_control import BrowserControlService, REMOTE_DESKTOP_PREFIX
+from autosurf.browser_control import (
+    BrowserControlService,
+    BrowserDisplaySettings,
+    REMOTE_DESKTOP_PREFIX,
+)
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.pt_signin import (
@@ -82,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     execution = ExecutionService(sessions, queue, credentials, registry)
     browser_control = BrowserControlService(
         credential_bootstrap=credentials.browser_bootstrap_contexts,
+        display_settings=BrowserDisplaySettings(sessions),
     )
     reconcile_pt_site_aliases(sessions, credentials)
     reconcile_periodic_signin_templates(sessions)

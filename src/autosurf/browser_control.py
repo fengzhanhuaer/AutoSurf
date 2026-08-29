@@ -1,25 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import threading
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable
 
 from playwright.async_api import async_playwright
+from sqlalchemy.orm import Session, sessionmaker
 
 from autosurf.automations.browser_session import (
     PersistentBrowserRuntime,
     PersistentBrowserSession,
+    browser_environment_bootstrap_required,
     bootstrap_browser_environment,
     close_persistent_browser,
-    launch_persistent_browser,
+    connect_standalone_browser,
+    launch_standalone_browser,
     prepare_browser_for_run,
     register_shared_browser_provider,
     save_browser_after_run,
+    standalone_browser_pages,
     validated_http_url,
 )
 from autosurf.domain.models import RunContext
+from autosurf.infrastructure.database import SystemSettingRecord
 
 
 REMOTE_DESKTOP_PREFIX = "/browser-control/remote"
@@ -27,6 +34,14 @@ DEFAULT_SOCKET_PATH = Path("/tmp/autosurf-novnc.sock")
 VNC_LOOPBACK_PORT = 5900
 RESTART_DELAY_SECONDS = 3
 STARTUP_TIMEOUT_SECONDS = 30
+BROWSER_RESOLUTION_SETTING_KEY = "browser.display_resolution"
+DEFAULT_BROWSER_RESOLUTION = (1365, 768)
+SUPPORTED_BROWSER_RESOLUTIONS = (
+    (1280, 720),
+    DEFAULT_BROWSER_RESOLUTION,
+    (1600, 900),
+    (1920, 1080),
+)
 
 
 class BrowserControlError(RuntimeError):
@@ -37,23 +52,83 @@ class BrowserControlInactive(BrowserControlError):
     pass
 
 
+class BrowserControlBusy(BrowserControlError):
+    pass
+
+
+def validate_browser_resolution(width: int, height: int) -> tuple[int, int]:
+    value = (int(width), int(height))
+    if value not in SUPPORTED_BROWSER_RESOLUTIONS:
+        supported = "、".join(f"{item[0]}x{item[1]}" for item in SUPPORTED_BROWSER_RESOLUTIONS)
+        raise ValueError(f"不支持该分辨率，可选：{supported}")
+    return value
+
+
+class BrowserDisplaySettings:
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        self._sessions = sessions
+        self._lock = threading.Lock()
+        self._resolution = self._load()
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        with self._lock:
+            return self._resolution
+
+    def set_resolution(self, width: int, height: int) -> tuple[int, int]:
+        value = validate_browser_resolution(width, height)
+        payload = json.dumps({"width": value[0], "height": value[1]})
+        with self._lock:
+            with self._sessions.begin() as session:
+                record = session.get(SystemSettingRecord, BROWSER_RESOLUTION_SETTING_KEY)
+                if record is None:
+                    session.add(SystemSettingRecord(
+                        key=BROWSER_RESOLUTION_SETTING_KEY,
+                        value_json=payload,
+                    ))
+                else:
+                    record.value_json = payload
+            self._resolution = value
+        return value
+
+    def _load(self) -> tuple[int, int]:
+        with self._sessions() as session:
+            record = session.get(SystemSettingRecord, BROWSER_RESOLUTION_SETTING_KEY)
+        if record is None:
+            return DEFAULT_BROWSER_RESOLUTION
+        try:
+            value = json.loads(record.value_json)
+            return validate_browser_resolution(value["width"], value["height"])
+        except (KeyError, TypeError, ValueError):
+            return DEFAULT_BROWSER_RESOLUTION
+
+
 class BrowserControlService:
     def __init__(
         self,
         *,
         playwright_factory: Callable[[], Any] = async_playwright,
-        browser_launcher: Callable[..., Any] = launch_persistent_browser,
+        browser_launcher: Callable[..., Any] = launch_standalone_browser,
+        browser_connector: Callable[..., Any] = connect_standalone_browser,
         browser_closer: Callable[..., Any] = close_persistent_browser,
         process_factory: Callable[..., Any] = asyncio.create_subprocess_exec,
         socket_path: Path = DEFAULT_SOCKET_PATH,
         credential_bootstrap: Callable[[], list[tuple[str, RunContext]]] | None = None,
+        display_settings: BrowserDisplaySettings | None = None,
     ) -> None:
         self._playwright_factory = playwright_factory
         self._browser_launcher = browser_launcher
+        self._browser_connector = browser_connector
         self._browser_closer = browser_closer
         self._process_factory = process_factory
         self._socket_path = socket_path
         self._credential_bootstrap = credential_bootstrap or (lambda: [])
+        self._display_settings = display_settings
+        self._resolution = (
+            display_settings.resolution
+            if display_settings is not None
+            else DEFAULT_BROWSER_RESOLUTION
+        )
         self._lifecycle_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
@@ -90,9 +165,10 @@ class BrowserControlService:
             with suppress(TimeoutError):
                 await asyncio.wait_for(ready.wait(), timeout=STARTUP_TIMEOUT_SECONDS)
         if url is not None and self._runtime is not None:
-            page = await self._control_page()
             with suppress(Exception):
-                await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                async with self._connected_runtime(self._runtime) as connected:
+                    page = await self._control_page(connected)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         return await self.status()
 
     async def stop(self) -> dict[str, Any]:
@@ -119,11 +195,29 @@ class BrowserControlService:
     async def shutdown(self) -> None:
         await self.stop()
 
+    async def set_resolution(self, width: int, height: int) -> dict[str, Any]:
+        resolution = validate_browser_resolution(width, height)
+        if resolution == self._resolution:
+            return await self.status()
+        if self._operation_lock.locked():
+            raise BrowserControlBusy("自动任务正在操作浏览器，请稍后再切换分辨率")
+        async with self._operation_lock:
+            if self._display_settings is not None:
+                self._display_settings.set_resolution(*resolution)
+            self._resolution = resolution
+            await self.stop()
+            await self.start()
+        return await self.status()
+
     async def status(self, *, touch: bool = False) -> dict[str, Any]:
         del touch
         runtime = self._runtime
         active = (
             runtime is not None
+            and (
+                runtime.browser_process is None
+                or runtime.browser_process.returncode is None
+            )
             and self._vnc_process is not None
             and self._remote_process is not None
             and self._socket_path.exists()
@@ -131,12 +225,20 @@ class BrowserControlService:
         url = ""
         title = ""
         if runtime is not None:
-            pages = [page for page in runtime.context.pages if not page.is_closed()]
-            if pages:
-                page = pages[-1]
-                url = str(page.url or "")
+            if runtime.cdp_endpoint:
                 with suppress(Exception):
-                    title = str(await page.title())[:300]
+                    pages = await standalone_browser_pages(runtime)
+                    if pages:
+                        page = pages[0]
+                        url = str(page.get("url") or "")
+                        title = str(page.get("title") or "")[:300]
+            elif runtime.context is not None:
+                pages = [page for page in runtime.context.pages if not page.is_closed()]
+                if pages:
+                    page = pages[-1]
+                    url = str(page.url or "")
+                    with suppress(Exception):
+                        title = str(await page.title())[:300]
         task = self._task
         return {
             "active": active,
@@ -144,7 +246,18 @@ class BrowserControlService:
             "url": url,
             "title": title,
             "mode": runtime.mode if runtime is not None else None,
-            "viewport": {"width": 1365, "height": 768},
+            "viewport": {
+                "width": self._resolution[0],
+                "height": self._resolution[1],
+            },
+            "supported_resolutions": [
+                {
+                    "width": width,
+                    "height": height,
+                    "label": f"{width} x {height}",
+                }
+                for width, height in SUPPORTED_BROWSER_RESOLUTIONS
+            ],
             "error": self._error,
             "task_running": bool(task is not None and not task.done()),
             "always_on": True,
@@ -160,29 +273,39 @@ class BrowserControlService:
         }
 
     @asynccontextmanager
-    async def automation_session(self, run_context: RunContext, url: str):
+    async def automation_session(
+        self,
+        run_context: RunContext,
+        url: str,
+        *,
+        playwright: Any | None = None,
+    ):
         validated_http_url(url)
         runtime = await self._wait_for_runtime()
         async with self._operation_lock:
             if runtime is not self._runtime:
                 runtime = await self._wait_for_runtime()
             self._automation_owner = run_context.execution_id
-            pages_before = set(runtime.context.pages)
             try:
-                await prepare_browser_for_run(runtime, run_context, url)
-                yield PersistentBrowserSession(
-                    runtime.context,
-                    "shared",
-                    runtime.mode,
-                    runtime.display.name if runtime.display else None,
-                )
-            finally:
-                with suppress(Exception):
-                    await save_browser_after_run(runtime, url)
-                for page in list(runtime.context.pages):
-                    if page not in pages_before:
+                async with self._connected_runtime(runtime, playwright=playwright) as connected:
+                    assert connected.context is not None
+                    pages_before = set(connected.context.pages)
+                    try:
+                        await prepare_browser_for_run(connected, run_context, url)
+                        yield PersistentBrowserSession(
+                            connected.context,
+                            "shared",
+                            connected.mode,
+                            connected.display.name if connected.display else None,
+                        )
+                    finally:
                         with suppress(Exception):
-                            await page.close()
+                            await save_browser_after_run(connected, url)
+                        for page in list(connected.context.pages):
+                            if page not in pages_before:
+                                with suppress(Exception):
+                                    await page.close()
+            finally:
                 self._automation_owner = None
 
     async def proxy_http(self, request: Any, path: str) -> Any:
@@ -298,36 +421,36 @@ class BrowserControlService:
                 pass
 
     async def _run_once(self, stop_event: asyncio.Event) -> None:
-        manager = self._playwright_factory()
-        playwright = None
         runtime = None
         vnc = None
         remote = None
         log_tasks: list[asyncio.Task[None]] = []
-        closed = asyncio.Event()
         try:
-            playwright = await manager.start()
             context = RunContext(
                 execution_id="browser-control",
                 config={"locale": "zh-CN"},
                 cookies={},
             )
             runtime = await self._browser_launcher(
-                playwright,
+                None,
                 context,
                 remote_desktop=True,
+                display_size=self._resolution,
+                process_factory=self._process_factory,
             )
-            await bootstrap_browser_environment(runtime, self._credential_bootstrap())
+            sources = self._credential_bootstrap()
+            if browser_environment_bootstrap_required(runtime, sources):
+                async with self._connected_runtime(runtime) as connected:
+                    await bootstrap_browser_environment(connected, sources)
             if runtime.display is None:
                 raise BrowserControlError("完整浏览器控制需要 Docker 中的 Xvfb")
-            runtime.context.on("close", lambda _context: closed.set())
-            page = await self._control_page(runtime)
-            page.set_default_timeout(15_000)
             self._runtime = runtime
             vnc, remote = await self._start_remote_desktop(runtime.display.name)
             self._vnc_process = vnc
             self._remote_process = remote
-            for process in (vnc, remote):
+            for process in (runtime.browser_process, vnc, remote):
+                if process is None:
+                    continue
                 if process.stdout is not None:
                     log_tasks.append(asyncio.create_task(self._drain_stream(process.stdout)))
                 if process.stderr is not None:
@@ -338,11 +461,18 @@ class BrowserControlService:
             self._initial_ready.set()
 
             stop_wait = asyncio.create_task(stop_event.wait())
-            close_wait = asyncio.create_task(closed.wait())
+            browser_wait = (
+                asyncio.create_task(runtime.browser_process.wait())
+                if runtime.browser_process is not None
+                else None
+            )
             vnc_wait = asyncio.create_task(vnc.wait())
             remote_wait = asyncio.create_task(remote.wait())
+            waiters = {stop_wait, vnc_wait, remote_wait}
+            if browser_wait is not None:
+                waiters.add(browser_wait)
             done, pending = await asyncio.wait(
-                {stop_wait, close_wait, vnc_wait, remote_wait},
+                waiters,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
@@ -356,8 +486,14 @@ class BrowserControlService:
                 raise BrowserControlError(
                     f"noVNC 意外退出，状态码 {remote_wait.result()}",
                 )
-            if close_wait in done and not stop_event.is_set():
-                raise BrowserControlError("Chromium 意外退出")
+            if (
+                browser_wait is not None
+                and browser_wait in done
+                and not stop_event.is_set()
+            ):
+                raise BrowserControlError(
+                    f"Google Chrome 意外退出，状态码 {browser_wait.result()}",
+                )
         finally:
             self._runtime = None
             self._vnc_process = None
@@ -370,10 +506,26 @@ class BrowserControlService:
             await asyncio.gather(*log_tasks, return_exceptions=True)
             if runtime is not None:
                 await self._browser_closer(runtime)
-            if playwright is not None:
-                with suppress(Exception):
-                    await playwright.stop()
             self._socket_path.unlink(missing_ok=True)
+
+    @asynccontextmanager
+    async def _connected_runtime(
+        self,
+        runtime: PersistentBrowserRuntime,
+        *,
+        playwright: Any | None = None,
+    ):
+        manager = None
+        current_playwright = playwright
+        if current_playwright is None:
+            manager = self._playwright_factory()
+            current_playwright = await manager.start()
+        try:
+            yield await self._browser_connector(current_playwright, runtime)
+        finally:
+            if manager is not None:
+                with suppress(Exception):
+                    await current_playwright.stop()
 
     async def _start_remote_desktop(self, display_name: str) -> tuple[Any, Any]:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -439,7 +591,7 @@ class BrowserControlService:
 
     async def _control_page(self, runtime: PersistentBrowserRuntime | None = None) -> Any:
         current = runtime or self._runtime
-        if current is None:
+        if current is None or current.context is None:
             raise BrowserControlInactive("常驻 Chromium 尚未就绪")
         pages = [page for page in current.context.pages if not page.is_closed()]
         return pages[0] if pages else await current.context.new_page()

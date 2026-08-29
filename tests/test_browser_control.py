@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,11 @@ from autosurf.automations.browser_session import (
     persistent_chromium_session,
     register_shared_browser_provider,
 )
-from autosurf.browser_control import BrowserControlService
+from autosurf.browser_control import (
+    BrowserControlBusy,
+    BrowserControlService,
+    BrowserDisplaySettings,
+)
 from autosurf.config import Settings
 from autosurf.domain.models import RunContext
 from autosurf.main import create_app
@@ -104,23 +109,43 @@ class FakeProcess:
 async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, monkeypatch):
     socket_path = tmp_path / "novnc.sock"
     context = FakeContext()
-    runtime = PersistentBrowserRuntime(
-        context=context,
-        profile_path=tmp_path / "profile",
-        mode="persistent_headful",
-        display=SimpleNamespace(name=":90"),
-    )
     playwright = FakePlaywright()
     launched = []
+    runtimes = []
     closed = []
     processes = []
 
-    async def browser_launcher(_playwright, run_context, *, remote_desktop):
-        launched.append((run_context.execution_id, remote_desktop))
+    async def browser_launcher(
+        _playwright,
+        run_context,
+        *,
+        remote_desktop,
+        display_size,
+        process_factory,
+    ):
+        assert _playwright is None
+        assert process_factory is not None
+        launched.append((run_context.execution_id, remote_desktop, display_size))
+        runtime = PersistentBrowserRuntime(
+            context=None,
+            profile_path=tmp_path / "profile",
+            mode="persistent_headful",
+            display=SimpleNamespace(name=":90"),
+            browser_process=FakeProcess(),
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+        runtimes.append(runtime)
         return runtime
+
+    connected = []
+
+    async def browser_connector(value, current_runtime):
+        connected.append((value, current_runtime))
+        return replace(current_runtime, context=context, browser_connection=object())
 
     async def browser_closer(value):
         closed.append(value)
+        value.browser_process.terminate()
 
     async def process_factory(*args, **kwargs):
         assert kwargs["env"]["DISPLAY"] == ":90"
@@ -148,12 +173,24 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     monkeypatch.setattr("autosurf.browser_control.prepare_browser_for_run", prepare)
     monkeypatch.setattr("autosurf.browser_control.save_browser_after_run", save)
 
+    display_settings = SimpleNamespace(
+        resolution=(1365, 768),
+        changes=[],
+    )
+
+    def set_resolution(width, height):
+        display_settings.resolution = (width, height)
+        display_settings.changes.append((width, height))
+
+    display_settings.set_resolution = set_resolution
     service = BrowserControlService(
         playwright_factory=lambda: FakePlaywrightManager(playwright),
         browser_launcher=browser_launcher,
+        browser_connector=browser_connector,
         browser_closer=browser_closer,
         process_factory=process_factory,
         socket_path=socket_path,
+        display_settings=display_settings,
     )
     started = await service.start()
     assert started["active"] is True
@@ -161,7 +198,14 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     assert started["always_on"] is True
     assert started["remote_url"].startswith("/browser-control/remote/vnc.html?")
     assert "path=websockify" in started["remote_url"]
-    assert launched == [("browser-control", True)]
+    assert launched == [("browser-control", True, (1365, 768))]
+
+    resized = await service.set_resolution(1920, 1080)
+    assert resized["active"] is True
+    assert resized["viewport"] == {"width": 1920, "height": 1080}
+    assert display_settings.changes == [(1920, 1080)]
+    assert launched[-1] == ("browser-control", True, (1920, 1080))
+    active_runtime = runtimes[-1]
 
     run_context = RunContext("execution-1", {"url": "https://example.com/"}, {})
     async with service.automation_session(run_context, "https://example.com/") as session:
@@ -170,16 +214,31 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
         status = await service.status()
         assert status["busy"] is True
         assert status["automation_owner"] == "execution-1"
+        with pytest.raises(BrowserControlBusy):
+            await service.set_resolution(1600, 900)
 
     assert task_page.closed is True
     assert context.pages[0].closed is False
-    assert prepared == [(runtime, "execution-1", "https://example.com/")]
-    assert saved == [(runtime, "https://example.com/")]
+    assert prepared[0][0].context is context
+    assert prepared[0][1:] == ("execution-1", "https://example.com/")
+    assert saved[0][0].context is context
+    assert saved[0][1] == "https://example.com/"
+    assert connected == [(playwright, active_runtime)]
+
+    task_playwright = FakePlaywright()
+    async with service.automation_session(
+        RunContext("execution-2", {}, {}),
+        "https://example.com/",
+        playwright=task_playwright,
+    ):
+        pass
+    assert connected[-1] == (task_playwright, active_runtime)
+    assert task_playwright.stopped is False
     assert (await service.status())["active"] is True
 
     await service.shutdown()
     assert all(process.returncode == 0 for _, process in processes)
-    assert closed == [runtime]
+    assert closed == runtimes
     assert playwright.stopped is True
     assert (await service.status())["active"] is False
 
@@ -190,14 +249,17 @@ async def test_persistent_session_delegates_to_registered_host():
 
     class Provider:
         @asynccontextmanager
-        async def automation_session(self, run_context, url):
+        async def automation_session(self, run_context, url, *, playwright=None):
+            assert playwright == "task-playwright"
             calls.append((run_context.execution_id, url))
             yield SimpleNamespace(context="shared", mode="persistent_headful")
 
     register_shared_browser_provider(Provider())
     try:
         context = RunContext("execution-2", {"url": "https://example.com/"}, {})
-        async with persistent_chromium_session(None, context, "https://example.com/") as session:
+        async with persistent_chromium_session(
+            "task-playwright", context, "https://example.com/"
+        ) as session:
             assert session.context == "shared"
     finally:
         register_shared_browser_provider(None)
@@ -205,6 +267,9 @@ async def test_persistent_session_delegates_to_registered_host():
 
 
 class FakeBrowserControlApi:
+    def __init__(self):
+        self.viewport = {"width": 1365, "height": 768}
+
     async def status(self):
         return {
             "active": True,
@@ -212,7 +277,11 @@ class FakeBrowserControlApi:
             "url": "about:blank",
             "title": "Chromium",
             "mode": "persistent_headful",
-            "viewport": {"width": 1365, "height": 768},
+            "viewport": self.viewport,
+            "supported_resolutions": [
+                {"width": 1365, "height": 768, "label": "1365 x 768"},
+                {"width": 1920, "height": 1080, "label": "1920 x 1080"},
+            ],
             "error": None,
             "task_running": True,
             "always_on": True,
@@ -220,6 +289,12 @@ class FakeBrowserControlApi:
             "automation_owner": None,
             "remote_url": "/browser-control/remote/vnc.html?autoconnect=1&path=websockify",
         }
+
+    async def set_resolution(self, width, height):
+        if (width, height) not in {(1365, 768), (1920, 1080)}:
+            raise ValueError("unsupported")
+        self.viewport = {"width": width, "height": height}
+        return await self.status()
 
 
 @pytest.mark.asyncio
@@ -234,6 +309,25 @@ async def test_browser_control_status_and_remote_proxy_require_login(settings):
         status = await client.get("/api/v1/browser-control", auth=auth)
         assert status.status_code == 200
         assert status.json()["always_on"] is True
+
+        denied_resize = await client.patch(
+            "/api/v1/browser-control/resolution",
+            json={"width": 1920, "height": 1080},
+        )
+        assert denied_resize.status_code == 401
+        resized = await client.patch(
+            "/api/v1/browser-control/resolution",
+            auth=auth,
+            json={"width": 1920, "height": 1080},
+        )
+        assert resized.status_code == 200
+        assert resized.json()["viewport"] == {"width": 1920, "height": 1080}
+        unsupported = await client.patch(
+            "/api/v1/browser-control/resolution",
+            auth=auth,
+            json={"width": 3840, "height": 2160},
+        )
+        assert unsupported.status_code == 422
 
         assert (await client.get("/browser-control/remote/")).status_code == 401
         unavailable = await client.get("/browser-control/remote/", auth=auth)
@@ -275,6 +369,8 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert 'id="browser-control-surface"' in html
     assert 'id="browser-remote-frame"' in html
     assert 'id="browser-fullscreen"' in html
+    assert 'id="browser-resolution"' in html
+    assert 'value="1920x1080"' in html
     assert 'title="Chrome 远程桌面"' in html
     assert 'id="browser-remote-cover"' in html
     assert 'id="browser-address-form"' not in html
@@ -284,7 +380,20 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert '"/browser-control/remote/vnc.html?' in javascript
     assert "path=websockify" in javascript
     assert "requestFullscreen" in javascript
+    assert 'method: "PATCH"' in javascript
+    assert 'browserRemoteShell: document.querySelector("#browser-remote-shell")' in javascript
+    assert 'style.aspectRatio' in javascript
     assert 'document.addEventListener("fullscreenchange"' in javascript
     assert "/api/v1/browser-control/frame" not in javascript
-    assert "aspect-ratio: 1365 / 768" in css
+    assert "aspect-ratio: var(--browser-aspect-ratio, 1365 / 768)" in css
     assert ".browser-control-panel:fullscreen" in css
+
+
+def test_browser_display_resolution_persists_in_system_settings(settings):
+    app = create_app(settings)
+    display_settings = BrowserDisplaySettings(app.state.sessions)
+    assert display_settings.resolution == (1365, 768)
+    assert display_settings.set_resolution(1920, 1080) == (1920, 1080)
+    assert BrowserDisplaySettings(app.state.sessions).resolution == (1920, 1080)
+    with pytest.raises(ValueError):
+        display_settings.set_resolution(3840, 2160)

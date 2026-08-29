@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import shutil
 import subprocess
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import ParseResult, urlparse
+from urllib.request import urlopen
 
 from autosurf.domain.models import RunContext, RunResult
 
@@ -20,6 +22,7 @@ WAF_COOKIE_NAMES = frozenset({
     "sl-session",
 })
 SHARED_PROFILE_KEY = "shared"
+STANDALONE_CDP_ENDPOINT = "http://127.0.0.1:9222"
 CHROME_SINGLETON_FILES = (
     "SingletonCookie",
     "SingletonLock",
@@ -45,14 +48,23 @@ class VirtualDisplay:
 
 @dataclass
 class PersistentBrowserRuntime:
-    context: Any
+    context: Any | None
     profile_path: Path
     mode: str
     display: VirtualDisplay | None
+    browser_process: Any | None = None
+    cdp_endpoint: str | None = None
+    browser_connection: Any | None = None
 
 
 class SharedBrowserProvider(Protocol):
-    def automation_session(self, run_context: RunContext, url: str) -> Any: ...
+    def automation_session(
+        self,
+        run_context: RunContext,
+        url: str,
+        *,
+        playwright: Any | None = None,
+    ) -> Any: ...
 
 
 def register_shared_browser_provider(provider: SharedBrowserProvider | None) -> None:
@@ -132,7 +144,11 @@ async def persistent_chromium_session(
     validated_http_url(url)
     provider = _SHARED_BROWSER_PROVIDER
     if provider is not None:
-        async with provider.automation_session(run_context, url) as browser_session:
+        async with provider.automation_session(
+            run_context,
+            url,
+            playwright=playwright,
+        ) as browser_session:
             yield browser_session
         return
 
@@ -160,6 +176,7 @@ async def launch_persistent_browser(
     *,
     url: str | None = None,
     remote_desktop: bool = False,
+    display_size: tuple[int, int] = (1365, 768),
 ) -> PersistentBrowserRuntime:
     if url is not None:
         validated_http_url(url)
@@ -172,7 +189,7 @@ async def launch_persistent_browser(
     try:
         launch_env = dict(os.environ)
         if mode == "persistent_headful":
-            display = await _start_virtual_display()
+            display = await _start_virtual_display(*display_size)
             launch_env["DISPLAY"] = display.name
         args = ["--disable-dev-shm-usage"]
         kwargs: dict[str, Any] = {
@@ -189,13 +206,16 @@ async def launch_persistent_browser(
         if remote_desktop and mode == "persistent_headful":
             args.extend([
                 "--window-position=0,0",
-                "--window-size=1365,768",
+                f"--window-size={display_size[0]},{display_size[1]}",
                 "--no-first-run",
                 "--no-default-browser-check",
             ])
             kwargs["no_viewport"] = True
         else:
-            kwargs["viewport"] = {"width": 1365, "height": 768}
+            kwargs["viewport"] = {
+                "width": display_size[0],
+                "height": display_size[1],
+            }
         user_agent = run_context.config.get("user_agent") or run_context.user_agent
         if user_agent:
             kwargs["user_agent"] = str(user_agent)
@@ -213,6 +233,132 @@ async def launch_persistent_browser(
         if display is not None:
             await _stop_virtual_display(display)
         raise
+
+
+async def launch_standalone_browser(
+    _playwright: Any,
+    run_context: RunContext,
+    *,
+    url: str | None = None,
+    remote_desktop: bool = False,
+    display_size: tuple[int, int] = (1365, 768),
+    process_factory: Callable[..., Any] = asyncio.create_subprocess_exec,
+) -> PersistentBrowserRuntime:
+    """Start ordinary Chrome; Playwright connects separately only when needed."""
+    if url is not None:
+        validated_http_url(url)
+    profile_path = browser_profile_path()
+    await _prepare_shared_profile(profile_path)
+    await _remove_stale_chrome_singletons(profile_path)
+    mode = persistent_browser_mode()
+    if remote_desktop and mode != "persistent_headful":
+        raise RuntimeError("完整浏览器控制需要 Docker 中的 Xvfb")
+
+    display = None
+    browser_process = None
+    try:
+        launch_env = dict(os.environ)
+        if mode == "persistent_headful":
+            display = await _start_virtual_display(*display_size)
+            launch_env["DISPLAY"] = display.name
+        executable = _standalone_chrome_executable()
+        args = [
+            executable,
+            f"--user-data-dir={profile_path}",
+            "--remote-debugging-address=127.0.0.1",
+            f"--remote-debugging-port={urlparse(STANDALONE_CDP_ENDPOINT).port}",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+            "--no-sandbox",
+            f"--lang={str(run_context.config.get('locale', 'zh-CN'))}",
+        ]
+        if mode == "persistent_headless":
+            args.append("--headless=new")
+        if remote_desktop and mode == "persistent_headful":
+            args.extend([
+                "--window-position=0,0",
+                f"--window-size={display_size[0]},{display_size[1]}",
+            ])
+        args.append(url or "about:blank")
+        browser_process = await process_factory(
+            *args,
+            env=launch_env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        await _wait_for_standalone_cdp(browser_process, STANDALONE_CDP_ENDPOINT)
+        return PersistentBrowserRuntime(
+            context=None,
+            profile_path=profile_path,
+            mode=mode,
+            display=display,
+            browser_process=browser_process,
+            cdp_endpoint=STANDALONE_CDP_ENDPOINT,
+        )
+    except Exception:
+        if browser_process is not None:
+            await _terminate_async_process(browser_process)
+        if display is not None:
+            await _stop_virtual_display(display)
+        raise
+
+
+async def connect_standalone_browser(
+    playwright: Any,
+    runtime: PersistentBrowserRuntime,
+) -> PersistentBrowserRuntime:
+    if not runtime.cdp_endpoint:
+        raise RuntimeError("Chrome DevTools endpoint is unavailable")
+    browser = await playwright.chromium.connect_over_cdp(
+        runtime.cdp_endpoint,
+        is_local=True,
+        no_defaults=True,
+    )
+    if not browser.contexts:
+        raise RuntimeError("Chrome DevTools did not expose a browser context")
+    return replace(
+        runtime,
+        context=browser.contexts[0],
+        browser_connection=browser,
+    )
+
+
+async def standalone_browser_pages(
+    runtime: PersistentBrowserRuntime,
+) -> list[dict[str, Any]]:
+    if not runtime.cdp_endpoint:
+        return []
+
+    def read() -> list[dict[str, Any]]:
+        with urlopen(f"{runtime.cdp_endpoint}/json/list", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, list):
+            return []
+        return [
+            item
+            for item in payload
+            if isinstance(item, dict) and item.get("type") == "page"
+        ]
+
+    return await asyncio.to_thread(read)
+
+
+def browser_environment_bootstrap_required(
+    runtime: PersistentBrowserRuntime,
+    sources: list[tuple[str, RunContext]],
+) -> bool:
+    if not sources:
+        return False
+    state_path = runtime.profile_path / ".autosurf-environment-bootstrap.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return True
+    return not (isinstance(payload, dict) and payload.get("completed") is True)
 
 
 async def prepare_browser_for_run(
@@ -338,8 +484,11 @@ async def close_persistent_browser(
     if url is not None:
         with suppress(Exception):
             await save_browser_after_run(runtime, url)
-    with suppress(Exception):
-        await runtime.context.close()
+    if runtime.browser_process is not None:
+        await _terminate_async_process(runtime.browser_process)
+    elif runtime.context is not None:
+        with suppress(Exception):
+            await runtime.context.close()
     if runtime.display is not None:
         await _stop_virtual_display(runtime.display)
 
@@ -518,7 +667,7 @@ def _stored_cookie(item: dict[str, Any]) -> dict[str, Any]:
     return {key: item[key] for key in allowed if key in item}
 
 
-async def _start_virtual_display() -> VirtualDisplay:
+async def _start_virtual_display(width: int = 1365, height: int = 768) -> VirtualDisplay:
     socket_dir = Path("/tmp/.X11-unix")
     socket_dir.mkdir(parents=True, exist_ok=True)
     for number in range(90, 190):
@@ -527,7 +676,10 @@ async def _start_virtual_display() -> VirtualDisplay:
         if socket.exists() or lock.exists():
             continue
         process = subprocess.Popen(
-            ["Xvfb", f":{number}", "-screen", "0", "1365x768x24", "-nolisten", "tcp"],
+            [
+                "Xvfb", f":{number}", "-screen", "0",
+                f"{width}x{height}x24", "-nolisten", "tcp",
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -544,6 +696,60 @@ async def _start_virtual_display() -> VirtualDisplay:
 
 async def _stop_virtual_display(display: VirtualDisplay) -> None:
     await _terminate_process(display.process)
+
+
+def _standalone_chrome_executable() -> str:
+    configured = os.environ.get("AUTOSURF_BROWSER_EXECUTABLE_PATH", "").strip()
+    if configured:
+        return configured
+    executable = shutil.which("google-chrome-stable") or shutil.which("google-chrome")
+    if executable:
+        return executable
+    raise RuntimeError("Google Chrome executable was not found")
+
+
+async def _wait_for_standalone_cdp(process: Any, endpoint: str) -> None:
+    def read_version() -> bool:
+        try:
+            with urlopen(f"{endpoint}/json/version", timeout=1) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
+        except Exception:
+            return False
+
+    for _ in range(300):
+        if process.returncode is not None:
+            raise RuntimeError(f"Google Chrome exited with status {process.returncode}")
+        if await asyncio.to_thread(read_version):
+            return
+        await asyncio.sleep(0.05)
+    raise RuntimeError("Google Chrome DevTools endpoint startup timed out")
+
+
+async def _terminate_async_process(process: Any) -> None:
+    if process.returncode is not None:
+        return
+    process_group = getattr(process, "pid", None) if os.name != "nt" else None
+    try:
+        if process_group is not None:
+            os.killpg(process_group, signal.SIGTERM)
+        else:
+            process.terminate()
+    except (LookupError, OSError):
+        with suppress(Exception):
+            process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        try:
+            if process_group is not None:
+                os.killpg(process_group, signal.SIGKILL)
+            else:
+                process.kill()
+        except (LookupError, OSError):
+            with suppress(Exception):
+                process.kill()
+        await process.wait()
 
 
 async def _terminate_process(process: subprocess.Popen[bytes]) -> None:

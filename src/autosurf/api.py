@@ -30,6 +30,7 @@ from autosurf.domain.scheduling import SIGNIN_START_TIME, next_signin_run_at
 from autosurf.application.services import align_all_signin_schedules
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
 from autosurf.automations.browser_session import persistent_browser_mode
+from autosurf.browser_control import BrowserControlBusy
 from autosurf.infrastructure.database import (
     AutomationRecord,
     CookieCloudBlob,
@@ -161,6 +162,11 @@ class SystemAccessSettingsInput(BaseModel):
     lan_only: bool = True
 
 
+class BrowserResolutionInput(BaseModel):
+    width: int
+    height: int
+
+
 class WebCredentialScriptInput(BaseModel):
     base_url: str = Field(min_length=8, max_length=2048)
 
@@ -263,6 +269,19 @@ web_credential_router = APIRouter(prefix="/api/web-credentials")
 @router.get("/browser-control")
 async def browser_control_status(request: Request) -> dict[str, Any]:
     return await request.app.state.browser_control.status()
+
+
+@router.patch("/browser-control/resolution")
+async def set_browser_control_resolution(
+    data: BrowserResolutionInput,
+    request: Request,
+) -> dict[str, Any]:
+    try:
+        return await request.app.state.browser_control.set_resolution(data.width, data.height)
+    except BrowserControlBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _program_repository() -> Path:
