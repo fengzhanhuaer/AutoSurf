@@ -330,6 +330,7 @@ class BrowserControlService:
                     log_tasks.append(asyncio.create_task(self._drain_stream(process.stderr)))
             await self._wait_for_socket(remote)
             self._error = None
+            self._starting = False
             self._initial_ready.set()
 
             stop_wait = asyncio.create_task(stop_event.wait())

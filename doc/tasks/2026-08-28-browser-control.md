@@ -22,7 +22,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 
 - 范围内：应用启动时拉起常驻 Xvfb/Chromium、异常退出自恢复、完整虚拟显示器画面、原生浏览器界面、鼠标移动/点击/双击/滚轮、键盘按下/释放、共享浏览器操作互斥、管理界面与接口测试。
 - 范围外：新增 Docker 暴露端口、额外 VNC/RFB 服务端口、绕过 CAPTCHA 或安全验证、多人同时输入、部署发布。
-- 约束：所有客户端流量继续使用 `18980` 并继承 `require_login` 与 LAN 中间件；常驻进程不能永久阻塞自动签到；已有签到适配修改不得覆盖或回退；不记录 Cookie、密码或页面敏感 DOM。
+- 约束：仅支持 Docker/Linux 运行时，不实现 Windows 远程桌面运行时；所有客户端流量继续使用 `18980` 并继承 `require_login` 与 LAN 中间件；常驻进程不能永久阻塞自动签到；已有签到适配修改不得覆盖或回退；不记录 Cookie、密码或页面敏感 DOM；本地运行验证使用 WSL 或 Windows Docker Desktop，禁止使用 HomePc NAS 进行测试。
 
 ### 1.4 需求与验收标准
 
@@ -201,6 +201,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 |---|---|---|---|---|---|
 | DEF-001 | 上一版只显示网页内容，无法看到标签栏和地址栏；进入页面还要冷启动 | 使用 `Page.screenshot()` 和 Playwright 页面输入，且维护会话由 UI 临时创建 | 改用 noVNC/x11vnc 捕获 Xvfb 根显示器；Chromium 随应用常驻 | REQ-005/006/007/008 | `修复中` |
 | DEF-002 | GitHub CI 和全新 Docker 在安装 Selkies 时失败 | 固定的 Selkies 开发提交依赖尚未发布的 `pixelflux~=2.1.0` | 移除不可解析的开发依赖，使用 Debian 稳定 noVNC/x11vnc/websockify 包 | REQ-006/007/008 | `已修复，待 CI 验证` |
+| DEF-003 | 远程桌面已 active 后状态仍返回 `starting=true` | supervisor 在 `_run_once()` 整个常驻生命周期结束前才清除 starting | Unix socket 就绪后立即清除 starting，并增加回归断言 | REQ-005/008 | `已修复` |
 
 ## 九、回滚方案
 

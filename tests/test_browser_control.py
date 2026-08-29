@@ -157,6 +157,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     )
     started = await service.start()
     assert started["active"] is True
+    assert started["starting"] is False
     assert started["always_on"] is True
     assert started["remote_url"].startswith("/browser-control/remote/vnc.html?")
     assert "path=browser-control/remote/websockify" in started["remote_url"]
