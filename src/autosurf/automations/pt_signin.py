@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from autosurf.automations.browser_session import (
     browser_environment_run_context,
+    new_browser_session_page,
     persistent_chromium_session,
     validated_http_url,
     with_browser_details,
@@ -1231,7 +1232,7 @@ class PtSignInHandler:
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
-                page = await browser_context.new_page()
+                page = await new_browser_session_page(browser_session)
                 page.set_default_timeout(timeout_ms)
                 try:
                     origin = pt_home_url(url)

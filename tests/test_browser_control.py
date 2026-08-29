@@ -1,14 +1,18 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import inspect
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from autosurf.automations.browser_session import (
+    OFFSCREEN_WINDOW_POSITION,
     PersistentBrowserRuntime,
+    new_offscreen_browser_page,
     persistent_chromium_session,
     register_shared_browser_provider,
 )
@@ -16,10 +20,12 @@ from autosurf.browser_control import (
     BrowserControlBusy,
     BrowserControlService,
     BrowserDisplaySettings,
+    CdpAutomationProvider,
 )
 from autosurf.config import Settings
 from autosurf.domain.models import RunContext
 from autosurf.main import create_app
+from autosurf.main import run_worker
 
 
 @pytest.fixture
@@ -106,6 +112,134 @@ class FakeProcess:
 
 
 @pytest.mark.asyncio
+async def test_offscreen_page_uses_a_separate_verified_chrome_window():
+    page = FakePage()
+    commands = []
+
+    class Cdp:
+        async def send(self, method, params=None):
+            commands.append((method, params))
+            if method == "Target.createTarget":
+                return {"targetId": "target-1"}
+            if method == "Browser.getWindowForTarget":
+                return {"windowId": 42}
+            if method == "Browser.getWindowBounds":
+                return {"bounds": {"left": OFFSCREEN_WINDOW_POSITION, "top": 0}}
+            return {}
+
+        async def detach(self):
+            commands.append(("detach", None))
+
+    class ExpectedPage:
+        async def __aenter__(self):
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(page)
+            return SimpleNamespace(value=future)
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Browser:
+        async def new_browser_cdp_session(self):
+            return Cdp()
+
+    context = SimpleNamespace(
+        browser=Browser(),
+        expect_page=lambda **_kwargs: ExpectedPage(),
+    )
+
+    created = await new_offscreen_browser_page(context)
+
+    assert created is page
+    create = next(params for method, params in commands if method == "Target.createTarget")
+    assert create == {"url": "about:blank", "newWindow": True, "background": True}
+    bounds = next(params for method, params in commands if method == "Browser.setWindowBounds")
+    assert bounds["windowId"] == 42
+    assert bounds["bounds"]["left"] == OFFSCREEN_WINDOW_POSITION
+    assert commands[-1] == ("detach", None)
+
+
+@pytest.mark.asyncio
+async def test_worker_cdp_provider_closes_only_automation_pages(tmp_path, monkeypatch):
+    control_page = FakePage("https://manual.example/")
+    task_page = FakePage()
+    context = FakeContext()
+    context.pages = [control_page]
+    playwright = FakePlaywright()
+
+    async def connect(_playwright, runtime):
+        assert _playwright is playwright
+        return replace(runtime, context=context, browser_connection=object())
+
+    async def create_page(value):
+        assert value is context
+        context.pages.append(task_page)
+        return task_page
+
+    monkeypatch.setattr("autosurf.browser_control.connect_standalone_browser", connect)
+    monkeypatch.setattr("autosurf.browser_control.new_offscreen_browser_page", create_page)
+    provider = CdpAutomationProvider()
+
+    async with provider.automation_session(
+        RunContext("worker-execution", {}, {}),
+        "https://example.com/",
+        playwright=playwright,
+    ) as session:
+        assert await session.new_page() is task_page
+
+    assert task_page.closed is True
+    assert control_page.closed is False
+    assert playwright.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_worker_cdp_provider_waits_for_chrome_startup(tmp_path, monkeypatch):
+    context = FakeContext()
+    attempts = 0
+    sleeps = []
+
+    async def connect(_playwright, runtime):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise ConnectionError("Chrome is starting")
+        return replace(runtime, context=context, browser_connection=object())
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("autosurf.browser_control.connect_standalone_browser", connect)
+    monkeypatch.setattr("autosurf.browser_control.asyncio.sleep", sleep)
+    provider = CdpAutomationProvider()
+    runtime = PersistentBrowserRuntime(
+        context=None,
+        profile_path=tmp_path,
+        mode="persistent_headful",
+        display=None,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    connected = await provider._connect(FakePlaywright(), runtime)
+
+    assert connected.context is context
+    assert attempts == 3
+    assert sleeps == [0.5, 0.5]
+
+
+def test_web_app_and_worker_have_separate_process_responsibilities():
+    web_source = inspect.getsource(create_app)
+    worker_source = inspect.getsource(run_worker)
+    main_source = Path("src/autosurf/main.py").read_text(encoding="utf-8")
+
+    assert "scheduler_loop" not in web_source
+    assert "worker_loop" not in web_source
+    assert "scheduler_loop" in worker_source
+    assert "worker_loop" in worker_source
+    assert 'subcommands.add_parser("worker"' in main_source
+    assert '"autosurf.main", "worker"' in main_source
+
+
+@pytest.mark.asyncio
 async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, monkeypatch):
     socket_path = tmp_path / "novnc.sock"
     context = FakeContext()
@@ -170,8 +304,15 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     async def save(value, url):
         saved.append((value, url))
 
+    async def create_offscreen_page(value):
+        assert value is context
+        return await value.new_page()
+
     monkeypatch.setattr("autosurf.browser_control.prepare_browser_for_run", prepare)
     monkeypatch.setattr("autosurf.browser_control.save_browser_after_run", save)
+    monkeypatch.setattr(
+        "autosurf.browser_control.new_offscreen_browser_page", create_offscreen_page,
+    )
 
     display_settings = SimpleNamespace(
         resolution=(1365, 768),
@@ -210,7 +351,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     run_context = RunContext("execution-1", {"url": "https://example.com/"}, {})
     async with service.automation_session(run_context, "https://example.com/") as session:
         assert session.context is context
-        task_page = await context.new_page()
+        task_page = await session.new_page()
         status = await service.status()
         assert status["busy"] is True
         assert status["automation_owner"] == "execution-1"
@@ -398,6 +539,15 @@ def test_browser_control_management_ui_embeds_full_remote_desktop():
     assert "/api/v1/browser-control/frame" not in javascript
     assert "aspect-ratio: var(--browser-aspect-ratio, 1365 / 768)" in css
     assert ".browser-control-panel:fullscreen" in css
+
+
+def test_management_javascript_only_references_registered_elements():
+    javascript = Path("src/autosurf/web/admin.js").read_text(encoding="utf-8")
+    element_block = javascript.split("const elements = {", 1)[1].split("\n};", 1)[0]
+    registered = set(re.findall(r"^\s{2}([A-Za-z][A-Za-z0-9]*):", element_block, re.MULTILINE))
+    referenced = set(re.findall(r"\belements\.([A-Za-z][A-Za-z0-9]*)", javascript))
+    assert referenced <= registered, sorted(referenced - registered)
+    assert "CredentialOptions" not in javascript
 
 
 @pytest.mark.asyncio

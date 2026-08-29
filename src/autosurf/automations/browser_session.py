@@ -23,6 +23,7 @@ WAF_COOKIE_NAMES = frozenset({
 })
 SHARED_PROFILE_KEY = "shared"
 STANDALONE_CDP_ENDPOINT = "http://127.0.0.1:9222"
+OFFSCREEN_WINDOW_POSITION = 10_000
 CHROME_SINGLETON_FILES = (
     "SingletonCookie",
     "SingletonLock",
@@ -38,6 +39,19 @@ class PersistentBrowserSession:
     profile_key: str
     mode: str
     display_name: str | None = None
+    page_factory: Callable[[], Any] | None = None
+
+    async def new_page(self) -> Any:
+        if self.page_factory is not None:
+            return await self.page_factory()
+        return await self.context.new_page()
+
+
+async def new_browser_session_page(session: Any) -> Any:
+    factory = getattr(session, "new_page", None)
+    if callable(factory):
+        return await factory()
+    return await session.context.new_page()
 
 
 @dataclass
@@ -345,6 +359,49 @@ async def standalone_browser_pages(
         ]
 
     return await asyncio.to_thread(read)
+
+
+async def new_offscreen_browser_page(browser_context: Any) -> Any:
+    """Create a Chrome window outside the noVNC framebuffer."""
+    browser = browser_context.browser
+    if browser is None:
+        raise RuntimeError("Chrome CDP browser connection is unavailable")
+    cdp = await browser.new_browser_cdp_session()
+    page = None
+    try:
+        async with browser_context.expect_page(timeout=10_000) as page_info:
+            target = await cdp.send("Target.createTarget", {
+                "url": "about:blank",
+                "newWindow": True,
+                "background": True,
+            })
+        page = await page_info.value
+        target_id = str(target["targetId"])
+        window = await cdp.send("Browser.getWindowForTarget", {"targetId": target_id})
+        window_id = int(window["windowId"])
+        await cdp.send("Browser.setWindowBounds", {
+            "windowId": window_id,
+            "bounds": {
+                "left": OFFSCREEN_WINDOW_POSITION,
+                "top": 0,
+                "width": 1365,
+                "height": 768,
+                "windowState": "normal",
+            },
+        })
+        actual = await cdp.send("Browser.getWindowBounds", {"windowId": window_id})
+        left = int(actual.get("bounds", {}).get("left", 0))
+        if left < OFFSCREEN_WINDOW_POSITION:
+            raise RuntimeError(f"Chrome automation window was not moved offscreen: left={left}")
+        return page
+    except Exception:
+        if page is not None:
+            with suppress(Exception):
+                await page.close()
+        raise
+    finally:
+        with suppress(Exception):
+            await cdp.detach()
 
 
 async def prepare_browser_for_run(

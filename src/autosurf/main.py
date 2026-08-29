@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import argparse
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
+import subprocess
+import sys
 import threading
 
 import uvicorn
@@ -31,8 +33,10 @@ from autosurf.application.services import (
 from autosurf.browser_control import (
     BrowserControlService,
     BrowserDisplaySettings,
+    CdpAutomationProvider,
     REMOTE_DESKTOP_PREFIX,
 )
+from autosurf.automations.browser_session import register_shared_browser_provider
 from autosurf.automations.http_signin import HttpSignInHandler
 from autosurf.automations.browser_signin import BrowserSignInHandler
 from autosurf.automations.pt_signin import (
@@ -56,12 +60,7 @@ from autosurf.management import management_router
 from autosurf.upgrade import upgrade
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or get_settings()
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    upgrade_database(settings.database_url)
-    sessions = create_session_factory(settings.database_url)
-    lan_access = LanAccessPolicy(sessions)
+def build_handler_registry() -> HandlerRegistry:
     registry = HandlerRegistry()
     registry.register(HttpSignInHandler())
     registry.register(BrowserSignInHandler())
@@ -71,14 +70,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         TjuptAdapter(), RousiAdapter(),
         MTeamAdapter(), SunnyPtAdapter(), ZhuqueAdapter(),
     ]))
-    automations = AutomationService(sessions, registry)
+    return registry
+
+
+async def run_worker(settings: Settings) -> None:
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    upgrade_database(settings.database_url)
+    sessions = create_session_factory(settings.database_url)
+    registry = build_handler_registry()
     queue = QueueService(sessions, settings.execution_lease_seconds)
     execution = ExecutionService(sessions, queue, registry)
-    browser_control = BrowserControlService(
-        display_settings=BrowserDisplaySettings(sessions),
-    )
     reconcile_periodic_signin_templates(sessions)
     reconcile_signin_schedules(sessions)
+    register_shared_browser_provider(CdpAutomationProvider())
 
     async def scheduler_loop() -> None:
         while True:
@@ -91,18 +95,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not worked:
                 await asyncio.sleep(settings.worker_poll_seconds)
 
+    tasks = [asyncio.create_task(scheduler_loop()), asyncio.create_task(worker_loop())]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        register_shared_browser_provider(None)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    upgrade_database(settings.database_url)
+    sessions = create_session_factory(settings.database_url)
+    lan_access = LanAccessPolicy(sessions)
+    registry = build_handler_registry()
+    automations = AutomationService(sessions, registry)
+    queue = QueueService(sessions, settings.execution_lease_seconds)
+    execution = ExecutionService(sessions, queue, registry)
+    browser_control = BrowserControlService(
+        display_settings=BrowserDisplaySettings(sessions),
+    )
+    reconcile_periodic_signin_templates(sessions)
+    reconcile_signin_schedules(sessions)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await browser_control.start()
-        tasks = [asyncio.create_task(scheduler_loop()), asyncio.create_task(worker_loop())]
         try:
             yield
         finally:
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with suppress(asyncio.CancelledError):
-                    await task
             await browser_control.shutdown()
 
     app = FastAPI(title="AutoSurf", version=__version__, lifespan=lifespan,
@@ -202,6 +226,7 @@ def run() -> None:
     parser = argparse.ArgumentParser(prog="autosurf")
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("serve", help="start the AutoSurf service")
+    subcommands.add_parser("worker", help="run the scheduler and automation worker")
     upgrade_parser = subcommands.add_parser("upgrade", help="upgrade a local Git installation")
     upgrade_parser.add_argument("--repository", type=Path, default=Path.cwd())
     args = parser.parse_args()
@@ -213,7 +238,27 @@ def run() -> None:
             print(f"Database backup: {result.backup_path}")
         print("Restart the AutoSurf service to run the new version.")
         return
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    if args.command == "worker":
+        try:
+            asyncio.run(run_worker(settings))
+        except KeyboardInterrupt:
+            pass
+        return
+
+    app = create_app(settings)
+    worker = subprocess.Popen(
+        [sys.executable, "-m", "autosurf.main", "worker"],
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        uvicorn.run(app, host=settings.host, port=settings.port)
+    finally:
+        worker.terminate()
+        try:
+            worker.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            worker.kill()
+            worker.wait(timeout=5)
 
 
 if __name__ == "__main__":

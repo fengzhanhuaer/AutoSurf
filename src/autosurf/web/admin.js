@@ -332,7 +332,6 @@ function setActivePeriodicTab(value) {
 
 function setBusy(busy) {
   elements.body.classList.toggle("loading", busy);
-  elements.saveButton.disabled = busy;
   elements.ptSaveButton.disabled = busy;
   elements.periodicSaveButton.disabled = busy;
   elements.ptSelectAllButton.disabled = busy || selectablePtCandidates().length === 0;
@@ -351,8 +350,8 @@ function renderBrowserControl() {
   const starting = Boolean(browser.starting);
   const busy = Boolean(browser.busy);
   const changing = browserResolutionChanging;
-  elements.browserControlState.textContent = changing ? "切换中" : (busy ? "任务占用" : (active ? "运行中" : (starting ? "恢复中" : "不可用")));
-  elements.browserControlState.className = `status-badge ${active && !busy && !changing ? "succeeded" : (starting || busy || changing ? "running" : "failed")}`;
+  elements.browserControlState.textContent = changing ? "切换中" : (active ? "运行中" : (starting ? "恢复中" : "不可用"));
+  elements.browserControlState.className = `status-badge ${active && !changing ? "succeeded" : (starting || changing ? "running" : "failed")}`;
   elements.browserControlPageTitle.textContent = browser.title || browser.url || "正在连接常驻浏览器";
   elements.browserControlError.textContent = browser.error || "";
   elements.browserControlError.hidden = !browser.error;
@@ -367,7 +366,7 @@ function renderBrowserControl() {
   elements.browserAudio.querySelector("span").textContent = state.browserAudioEnabled ? "静" : "音";
   elements.browserRemoteShell.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
   elements.browserRemotePlaceholder.hidden = active && !changing;
-  elements.browserRemoteCover.hidden = !active || !busy;
+  elements.browserRemoteCover.hidden = true;
   if (active && !changing && state.activeView === "browser-control" && !document.hidden) {
     const remoteUrl = browser.remote_url || "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify";
     if (!elements.browserRemoteFrame.getAttribute("src")) {
@@ -963,7 +962,6 @@ function renderPeriodicHistory() {
 }
 
 function renderPeriodic() {
-  renderPeriodicCredentialOptions();
   renderPeriodicCandidates();
   renderPeriodicSites();
   renderPeriodicHistory();
@@ -1165,7 +1163,6 @@ function openPtSchedule(site) {
 }
 
 function renderPt() {
-  renderPtCredentialOptions();
   renderPtSummary();
   renderPtCandidates();
   renderPtSites();

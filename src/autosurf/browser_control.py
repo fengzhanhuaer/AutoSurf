@@ -10,22 +10,26 @@ from pathlib import Path
 from typing import Any, Callable
 
 from playwright.async_api import async_playwright
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from autosurf.automations.browser_session import (
     PersistentBrowserRuntime,
     PersistentBrowserSession,
+    STANDALONE_CDP_ENDPOINT,
+    browser_profile_path,
     close_persistent_browser,
     connect_standalone_browser,
     launch_standalone_browser,
+    new_offscreen_browser_page,
     prepare_browser_for_run,
     register_shared_browser_provider,
     save_browser_after_run,
     standalone_browser_pages,
     validated_http_url,
 )
-from autosurf.domain.models import RunContext
-from autosurf.infrastructure.database import SystemSettingRecord
+from autosurf.domain.models import ExecutionStatus, RunContext
+from autosurf.infrastructure.database import ExecutionRecord, SystemSettingRecord
 
 
 REMOTE_DESKTOP_PREFIX = "/browser-control/remote"
@@ -52,6 +56,74 @@ class BrowserControlError(RuntimeError):
 
 class BrowserControlInactive(BrowserControlError):
     pass
+
+
+class CdpAutomationProvider:
+    """Attach a worker process to the always-on Chrome without using its visible window."""
+
+    def __init__(self, endpoint: str = STANDALONE_CDP_ENDPOINT) -> None:
+        self._endpoint = endpoint
+
+    async def _connect(self, playwright: Any, runtime: PersistentBrowserRuntime) -> Any:
+        last_error: Exception | None = None
+        for _ in range(120):
+            try:
+                return await connect_standalone_browser(playwright, runtime)
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(0.5)
+        assert last_error is not None
+        raise last_error
+
+    @asynccontextmanager
+    async def automation_session(
+        self,
+        run_context: RunContext,
+        url: str,
+        *,
+        playwright: Any | None = None,
+    ):
+        validated_http_url(url)
+        manager = None
+        current_playwright = playwright
+        if current_playwright is None:
+            manager = async_playwright()
+            current_playwright = await manager.start()
+        runtime = PersistentBrowserRuntime(
+            context=None,
+            profile_path=browser_profile_path(),
+            mode="persistent_headful",
+            display=None,
+            cdp_endpoint=self._endpoint,
+        )
+        connected = None
+        owned_pages: set[Any] = set()
+        try:
+            connected = await self._connect(current_playwright, runtime)
+            assert connected.context is not None
+            await prepare_browser_for_run(connected, run_context, url)
+
+            async def create_page() -> Any:
+                page = await new_offscreen_browser_page(connected.context)
+                owned_pages.add(page)
+                return page
+
+            yield PersistentBrowserSession(
+                connected.context,
+                "shared",
+                connected.mode,
+                page_factory=create_page,
+            )
+        finally:
+            if connected is not None and connected.context is not None:
+                with suppress(Exception):
+                    await save_browser_after_run(connected, url)
+                for page in owned_pages:
+                    with suppress(Exception):
+                        await page.close()
+            if manager is not None:
+                with suppress(Exception):
+                    await current_playwright.stop()
 
 
 class BrowserControlBusy(BrowserControlError):
@@ -92,6 +164,15 @@ class BrowserDisplaySettings:
                     record.value_json = payload
             self._resolution = value
         return value
+
+    def active_execution_id(self) -> str | None:
+        with self._sessions() as session:
+            return session.scalar(
+                select(ExecutionRecord.id)
+                .where(ExecutionRecord.status == ExecutionStatus.RUNNING)
+                .order_by(ExecutionRecord.started_at.desc())
+                .limit(1)
+            )
 
     def _load(self) -> tuple[int, int]:
         with self._sessions() as session:
@@ -199,7 +280,8 @@ class BrowserControlService:
         resolution = validate_browser_resolution(width, height)
         if resolution == self._resolution:
             return await self.status()
-        if self._operation_lock.locked():
+        active_execution = self._database_active_execution_id()
+        if self._operation_lock.locked() or active_execution is not None:
             raise BrowserControlBusy("自动任务正在操作浏览器，请稍后再切换分辨率")
         async with self._operation_lock:
             if self._display_settings is not None:
@@ -240,6 +322,8 @@ class BrowserControlService:
                     with suppress(Exception):
                         title = str(await page.title())[:300]
         task = self._task
+        database_owner = self._database_active_execution_id()
+        automation_owner = self._automation_owner or database_owner
         return {
             "active": active,
             "starting": self._starting,
@@ -261,8 +345,8 @@ class BrowserControlService:
             "error": self._error,
             "task_running": bool(task is not None and not task.done()),
             "always_on": True,
-            "busy": self._operation_lock.locked(),
-            "automation_owner": self._automation_owner,
+            "busy": self._operation_lock.locked() or database_owner is not None,
+            "automation_owner": automation_owner,
             "remote_url": (
                 f"{REMOTE_DESKTOP_PREFIX}/vnc.html"
                 f"?autoconnect=1&resize=scale&reconnect=1&reconnect_delay=2000"
@@ -278,6 +362,10 @@ class BrowserControlService:
             },
         }
 
+    def _database_active_execution_id(self) -> str | None:
+        lookup = getattr(self._display_settings, "active_execution_id", None)
+        return lookup() if callable(lookup) else None
+
     @asynccontextmanager
     async def automation_session(
         self,
@@ -292,10 +380,16 @@ class BrowserControlService:
             if runtime is not self._runtime:
                 runtime = await self._wait_for_runtime()
             self._automation_owner = run_context.execution_id
+            owned_pages: set[Any] = set()
             try:
                 async with self._connected_runtime(runtime, playwright=playwright) as connected:
                     assert connected.context is not None
-                    pages_before = set(connected.context.pages)
+
+                    async def create_page() -> Any:
+                        page = await new_offscreen_browser_page(connected.context)
+                        owned_pages.add(page)
+                        return page
+
                     try:
                         await prepare_browser_for_run(connected, run_context, url)
                         yield PersistentBrowserSession(
@@ -303,14 +397,14 @@ class BrowserControlService:
                             "shared",
                             connected.mode,
                             connected.display.name if connected.display else None,
+                            page_factory=create_page,
                         )
                     finally:
                         with suppress(Exception):
                             await save_browser_after_run(connected, url)
-                        for page in list(connected.context.pages):
-                            if page not in pages_before:
-                                with suppress(Exception):
-                                    await page.close()
+                        for page in owned_pages:
+                            with suppress(Exception):
+                                await page.close()
             finally:
                 self._automation_owner = None
 
