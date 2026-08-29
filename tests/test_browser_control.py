@@ -255,7 +255,11 @@ def test_browser_control_uses_unix_socket_and_existing_port_only():
     assert '"-localhost"' in source
     assert '"--unix-listen=' in source
     assert "--subfolder=/browser-control/remote" not in compose
-    assert "google-chrome-stable_current_${architecture}.deb" in dockerfile
+    assert "google-chrome-stable_current_amd64.deb" in dockerfile
+    assert "platforms: linux/amd64" in Path(".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "linux/arm64" not in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "AUTOSURF_BROWSER_CHANNEL=chrome" in dockerfile
     assert "playwright install chromium" not in entrypoint
     assert "playwright install chromium" not in upgrade

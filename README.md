@@ -55,7 +55,7 @@ The default Compose file downloads `ghcr.io/fengzhanhuaer/autosurf:latest`. Pin 
 
 The Docker image is a stable runtime shell and keeps its startup and upgrade helpers under `/usr/local/bin`, outside the writable application mount. The host's `./app` directory is mounted as the complete `/app` tree: persistent data lives in `./app/data`, application source and its Linux Python environment live in `./app/program`, and Google Chrome's persistent profile lives in `./app/browser`. These directories can be upgraded without replacing the container. The read-only shell also mounts host-visible temporary space from `./tmp` to `/tmp`; its contents are disposable and ignored by Git. On first start, the shell initializes the missing application subdirectories. Do not run `app/program/.venv` directly on a Windows host because that virtual environment belongs to Linux inside the container.
 
-AutoSurf pins the Playwright Python package and installs the current official Google Chrome stable package in the Docker image for both amd64 and arm64. The Web upgrade action updates application code and Python dependencies. Pull and recreate the container when the bundled Chrome version or its operating-system libraries change.
+AutoSurf pins the Playwright Python package and installs the current official Google Chrome stable amd64 package in the Docker image. The Web upgrade action updates application code and Python dependencies. Pull and recreate the container when the bundled Chrome version or its operating-system libraries change.
 
 For a host-only deployment, change the port mapping to `127.0.0.1:18980:8080`. This is recommended when a reverse proxy on the same machine provides HTTPS.
 

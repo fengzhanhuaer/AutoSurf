@@ -18,8 +18,8 @@ RUN apt-get update \
 
 RUN set -eux; \
     architecture="$(dpkg --print-architecture)"; \
-    case "$architecture" in amd64|arm64) ;; *) echo "Unsupported Chrome architecture: $architecture" >&2; exit 1 ;; esac; \
-    python -c "import urllib.request; urllib.request.urlretrieve('https://dl.google.com/linux/direct/google-chrome-stable_current_${architecture}.deb', '/tmp/google-chrome.deb')"; \
+    if [ "$architecture" != amd64 ]; then echo "AutoSurf Chrome image requires amd64" >&2; exit 1; fi; \
+    python -c "import urllib.request; urllib.request.urlretrieve('https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb', '/tmp/google-chrome.deb')"; \
     apt-get update; \
     apt-get install --no-install-recommends -y /tmp/google-chrome.deb; \
     rm -f /tmp/google-chrome.deb; \
