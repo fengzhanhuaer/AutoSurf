@@ -91,6 +91,35 @@ class CredentialService:
         user_agent = value.get("user_agent")
         return str(user_agent)[:1024] if isinstance(user_agent, str) and user_agent.strip() else None
 
+    def browser_bootstrap_contexts(self) -> list[tuple[str, RunContext]]:
+        result: list[tuple[str, RunContext]] = []
+        with self.sessions() as session:
+            records = session.scalars(
+                select(CredentialRecord).where(
+                    CredentialRecord.provider.in_(["cookiecloud", "manual", "web_storage"])
+                ).order_by(CredentialRecord.domain, CredentialRecord.name)
+            ).all()
+            for record in records:
+                try:
+                    cookies, browser_cookies = self.credential_values_from_payload(
+                        record.encrypted_payload
+                    )
+                except ValueError:
+                    continue
+                if not cookies:
+                    continue
+                result.append((
+                    f"https://{record.domain}/",
+                    RunContext(
+                        execution_id=f"browser-bootstrap:{record.id}",
+                        config={},
+                        cookies=cookies,
+                        browser_cookies=browser_cookies,
+                        user_agent=self.browser_user_agent_from_payload(record.encrypted_payload),
+                    ),
+                ))
+        return result
+
     def credential_values_from_payload(self, payload: str | None) -> tuple[dict[str, str], list[dict[str, Any]] | None]:
         if payload is None:
             return {}, None

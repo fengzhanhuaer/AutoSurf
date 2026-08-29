@@ -80,7 +80,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     automations = AutomationService(sessions, registry)
     queue = QueueService(sessions, settings.execution_lease_seconds, credentials)
     execution = ExecutionService(sessions, queue, credentials, registry)
-    browser_control = BrowserControlService()
+    browser_control = BrowserControlService(
+        credential_bootstrap=credentials.browser_bootstrap_contexts,
+    )
     reconcile_pt_site_aliases(sessions, credentials)
     reconcile_periodic_signin_templates(sessions)
     reconcile_signin_schedules(sessions)

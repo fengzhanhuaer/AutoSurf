@@ -30,6 +30,29 @@ def test_next_signin_run_uses_nine_am_taipei_anchor():
     assert next_signin_run_at(datetime(2026, 8, 20, 1)) == datetime(2026, 8, 21, 1)
 
 
+def test_browser_bootstrap_includes_cookie_and_web_storage_credentials(settings):
+    app = create_app(settings)
+    app.state.credentials.upsert_cookie_records(
+        "cookiecloud:test:tracker.example",
+        "tracker.example",
+        [{"name": "session", "value": "cookie-value", "domain": "tracker.example"}],
+    )
+    app.state.credentials.upsert_web_storage(
+        "web:kp.m-team.cc",
+        "kp.m-team.cc",
+        {"format": "web_storage_v1", "values": {"auth": "storage-value"}},
+    )
+
+    contexts = {
+        url: context for url, context in app.state.credentials.browser_bootstrap_contexts()
+    }
+
+    assert contexts["https://tracker.example/"].cookies == {"session": "cookie-value"}
+    assert contexts["https://tracker.example/"].browser_cookies is not None
+    assert contexts["https://kp.m-team.cc/"].cookies == {"auth": "storage-value"}
+    assert contexts["https://kp.m-team.cc/"].browser_cookies == []
+
+
 def test_reconcile_signin_schedules_preserves_execution_history(settings):
     app = create_app(settings)
     automation = app.state.automations.create(

@@ -3,7 +3,7 @@
 - 任务标识：`2026-08-28-browser-control`
 - 状态：`进行中`
 - 创建时间：`2026-08-28 16:46 +08:00`
-- 更新时间：`2026-08-29 00:45 +08:00`
+- 更新时间：`2026-08-29 01:20 +08:00`
 - 用户原始需求：在现有功能中添加一个专门显示并操作 Docker 内 Chrome 的界面。
 - 用户最新指令：展示并操作整个 Chromium 窗口，效果类似远程桌面；浏览器随 AutoSurf 常驻，不需要冷启动；不使用新端口；窗口支持全屏。
 - 启用方式：明确长任务条件（跨浏览器生命周期、后端接口、前端交互与渲染验证）。
@@ -37,6 +37,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-007 | 像远程桌面一样直接操作浏览器 | 鼠标移动、单/双击、滚轮、常用组合键及 ASCII 文字作用于 X11 Chromium 原生窗口，坐标按实际帧映射 | P0 | `进行中` | 用户最新纠正 |
 | REQ-008 | Chromium 始终打开且无冷启动 | AutoSurf 启动后自动准备浏览器；控制页无需启动按钮；异常退出自动恢复；签到结束不关闭进程 | P0 | `进行中` | 用户最新指令 |
 | REQ-009 | 远程浏览器窗口支持全屏 | 控制页可用明确按钮进入全屏；按钮状态随全屏进入、退出和 `Esc` 同步；不支持 Fullscreen API 时提示错误 | P1 | `已完成` | 用户最新指令“窗口应该支持全屏” |
+| REQ-010 | 容器首次启动时一次性初始化浏览器环境 | 共享 profile 尚未初始化时，容器启动先批量写入 Cookie 和 WebStorage 并落持久化标记；后续容器重启及签到任务只读取 Chromium 当前环境，API 适配器也不再回退旧凭据 | P0 | `已完成` | 用户明确首次容器启动自动注入，后续 Cookie/WebStorage/API 均按实际浏览器环境操作 |
 
 ## 二、总体架构
 
@@ -136,6 +137,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TASK-007 | 将管理页改为完整远程桌面 iframe | `已完成` | REQ-005/006/007/008 | admin.html/js/css | 无旧伪地址栏和启停流程；响应式预览通过 |
 | TASK-008 | Docker、完整回归与真实远程桌面 QA | `进行中` | 全部有效需求 | Dockerfile、tests、账本 | Docker 中完整 Chromium 可见可操作 |
 | TASK-009 | 增加远程桌面全屏切换并验证退出同步 | `已完成` | REQ-009 | admin.html/js/css、静态契约测试 | 桌面和移动端可进入/退出全屏，布局无溢出 |
+| TASK-010 | 在容器首次启动时一次性初始化 Cookie 与 WebStorage | `已完成` | REQ-010 | CredentialService、BrowserControlService、browser_session、pt_signin、tests | 启动时初始化并持久化完成标记；任务期从浏览器读取 Cookie 与 localStorage |
 
 ### 4.3 变更记录
 
@@ -159,6 +161,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | TEST-004 | 浏览器渲染与操作 | REQ-003/004/005 / TASK-004 | 常规 Playwright；桌面 1365×900、移动 390×844 | 非空、无控制台错误、启动/帧/点击状态可见 | 桌面点击并发送 `qa-user` 成功；移动图片 356px、无横向溢出、控制台零错误 | `通过` | Browser plugin not available，按 Skill 使用 regular Playwright |
 | TEST-005 | 完整回归 | 全部 / TASK-004 | `.venv\Scripts\python.exe -m pytest -q` | 全部通过 | 178 passed，1 个现有 SQLAlchemy/SQLite 弃用警告 | `通过` | 2026-08-28 17:32 +08:00 |
 | TEST-009 | 远程桌面全屏切换 | REQ-009 / TASK-009 | regular Playwright；1365×900、390×844 | 点击进入全屏，面板铺满视口；再次点击退出；状态同步；无溢出和控制台错误 | 两种视口均进入完整视口并可退出，零溢出、零控制台错误 | `通过` | 2026-08-29 运行 |
+| TEST-010 | Cookie/WebStorage 仅在首次容器启动初始化 | REQ-010 / TASK-010 | `.venv\Scripts\python.exe -m pytest -q` | 两类凭据均进入初始化源；首次启动注入并落标记；第二次启动不回填；任务/API 使用浏览器当前 Cookie 与 localStorage | 182 passed，1 个现有 SQLite 弃用警告 | `通过` | 2026-08-29 |
 
 ### 5.2 未执行测试
 
@@ -177,6 +180,7 @@ AutoSurf 当前以 `persistent_headful` 模式在任务期间启动 Xvfb 与 Chr
 | REQ-007 | 原生鼠标键盘远程控制 | UNIT-001/003 | TASK-006/007/008 | IF-006、noVNC | TEST-006/007/008 | 待验证 | `进行中` |
 | REQ-008 | 应用启动即常驻且自恢复 | UNIT-001/002 | TASK-006/008 | BrowserControlService、lifespan | TEST-006/008 | 待验证 | `进行中` |
 | REQ-009 | 全屏进入、退出和状态同步 | UNIT-003 | TASK-009 | `admin.html/js/css`、Fullscreen API | TEST-009 | 桌面与移动视口均通过 | `已完成` |
+| REQ-010 | 首次容器启动初始化 Cookie/WebStorage，后续任务和 API 只用浏览器环境 | UNIT-001/002 | TASK-010 | `services.py`、`browser_control.py`、`browser_session.py`、`pt_signin.py`、`main.py` | TEST-010 | 完整回归通过 | `已完成` |
 
 ## 七、决策与冲突记录
 

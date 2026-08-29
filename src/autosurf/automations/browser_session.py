@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import ParseResult, urlparse
@@ -210,12 +210,114 @@ async def prepare_browser_for_run(
     run_context: RunContext,
     url: str,
 ) -> None:
-    await _restore_waf_cookie_state(runtime.context, runtime.profile_path, url)
-    await supplement_playwright_cookies(runtime.context, run_context, url)
+    # The shared Chromium profile is the sole runtime source of session state.
+    del runtime, run_context
+    validated_http_url(url)
+
+
+async def bootstrap_browser_environment(
+    runtime: PersistentBrowserRuntime,
+    sources: list[tuple[str, RunContext]],
+) -> int:
+    state_path = runtime.profile_path / ".autosurf-environment-bootstrap.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("completed") is True:
+        return 0
+    if not sources:
+        return 0
+
+    initialized_domains: set[str] = set()
+    for url, context in sources:
+        initialized = False
+        if context.browser_cookies == []:
+            initialized = await _bootstrap_local_storage(runtime.context, context, url)
+        else:
+            initialized = await supplement_playwright_cookies(runtime.context, context, url)
+        if initialized:
+            hostname = (validated_http_url(url).hostname or "").casefold().rstrip(".")
+            initialized_domains.add(hostname)
+
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    pending = state_path.with_suffix(".tmp")
+    pending.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "completed": True,
+                "domains": sorted(initialized_domains),
+            },
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+    pending.replace(state_path)
+    return len(initialized_domains)
+
+
+async def browser_environment_run_context(
+    page: Any,
+    context: RunContext,
+    url: str,
+) -> RunContext:
+    parsed = validated_http_url(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}/"
+    values: dict[str, str] = {}
+    browser_cookies: list[dict[str, Any]] | None = None
+    environment_read = False
+    try:
+        records = await page.context.cookies([origin])
+        browser_cookies = [dict(item) for item in records if isinstance(item, dict)]
+        values.update({
+            str(item["name"]): str(item["value"])
+            for item in browser_cookies
+            if item.get("name") is not None and item.get("value") is not None
+        })
+        environment_read = True
+    except Exception:
+        pass
+    page_hostname = (urlparse(str(getattr(page, "url", ""))).hostname or "").casefold()
+    target_hostname = (parsed.hostname or "").casefold()
+    related_origin = (
+        page_hostname == target_hostname
+        or page_hostname.endswith(f".{target_hostname}")
+        or target_hostname.endswith(f".{page_hostname}")
+    ) if page_hostname and target_hostname else False
+    if related_origin:
+        try:
+            storage = await page.evaluate(
+                """() => ({
+                  autosurfBrowserEnvironment: true,
+                  values: Object.fromEntries(
+                    Array.from({length: localStorage.length}, (_, index) => {
+                      const key = localStorage.key(index);
+                      return [key, localStorage.getItem(key)];
+                    }).filter(([key, value]) => key !== null && value !== null)
+                  ),
+                })"""
+            )
+            if isinstance(storage, dict) and storage.get("autosurfBrowserEnvironment") is True:
+                stored_values = storage.get("values")
+                if isinstance(stored_values, dict):
+                    values.update({
+                        str(key): str(value)
+                        for key, value in stored_values.items()
+                        if isinstance(key, str) and isinstance(value, str)
+                    })
+                    environment_read = True
+        except Exception:
+            pass
+    if not environment_read:
+        return context
+    return replace(context, cookies=values, browser_cookies=browser_cookies)
 
 
 async def save_browser_after_run(runtime: PersistentBrowserRuntime, url: str) -> None:
-    await _save_waf_cookie_state(runtime.context, runtime.profile_path, url)
+    # Chromium persists cookies and storage in its profile without task-level exports.
+    del runtime
+    validated_http_url(url)
 
 
 async def close_persistent_browser(
@@ -232,20 +334,58 @@ async def close_persistent_browser(
         await _stop_virtual_display(runtime.display)
 
 
-async def supplement_playwright_cookies(browser_context: Any, context: RunContext, url: str) -> None:
+async def supplement_playwright_cookies(
+    browser_context: Any,
+    context: RunContext,
+    url: str,
+) -> bool:
     incoming = playwright_cookies(context, url)
     if not incoming:
-        return
+        return False
     parsed = validated_http_url(url)
     origin = f"{parsed.scheme}://{parsed.netloc}/"
     existing = await browser_context.cookies([origin])
     existing_keys = {_cookie_key(item) for item in existing}
-    updates = [
-        item for item in incoming
-        if item["name"].casefold() not in WAF_COOKIE_NAMES or _cookie_key(item) not in existing_keys
-    ]
+    updates = [item for item in incoming if _cookie_key(item) not in existing_keys]
     if updates:
         await browser_context.add_cookies(updates)
+    return True
+
+
+async def _bootstrap_local_storage(
+    browser_context: Any,
+    context: RunContext,
+    url: str,
+) -> bool:
+    values = {
+        str(key): str(value)
+        for key, value in context.cookies.items()
+        if isinstance(key, str) and isinstance(value, str) and value
+    }
+    if not values:
+        return False
+    parsed = validated_http_url(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}/"
+    page = await browser_context.new_page()
+
+    async def serve_origin(route: Any) -> None:
+        if route.request.is_navigation_request():
+            await route.fulfill(status=200, content_type="text/html", body="<!doctype html>")
+        else:
+            await route.abort()
+
+    try:
+        await page.route("**/*", serve_origin)
+        await page.goto(origin, wait_until="domcontentloaded", timeout=10_000)
+        await page.evaluate(
+            "values => Object.entries(values).forEach(([key, value]) => "
+            "localStorage.setItem(key, value))",
+            values,
+        )
+    finally:
+        with suppress(Exception):
+            await page.close()
+    return True
 
 
 def with_browser_details(result: RunResult, browser_session: PersistentBrowserSession) -> RunResult:

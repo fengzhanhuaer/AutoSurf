@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from autosurf.automations.browser_session import (
+    browser_environment_run_context,
     persistent_chromium_session,
     validated_http_url,
     with_browser_details,
@@ -291,10 +292,9 @@ class MTeamAdapter:
         return hostname == "kp.m-team.cc" or hostname.endswith(".kp.m-team.cc")
 
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
-        if not str(context.cookies.get("auth") or "").strip():
-            return RunResult(RunOutcome.AUTH_EXPIRED, "M-Team Web 凭据尚未同步")
-
-        profile = await _mteam_api(page, context, "/member/profile")
+        profile = await _mteam_api(page, "/member/profile")
+        if profile.get("missingAuth"):
+            return RunResult(RunOutcome.AUTH_EXPIRED, "M-Team 浏览器登录态不存在")
         failed = _mteam_api_failure(profile, page.url, "个人信息刷新")
         if failed:
             return failed
@@ -315,9 +315,9 @@ class MTeamAdapter:
         )
 
 
-async def _mteam_api(page: Any, context: RunContext, path: str) -> dict[str, Any]:
+async def _mteam_api(page: Any, path: str) -> dict[str, Any]:
     return await page.evaluate(
-        r"""async ({path, credentials, apiHosts, version, signatureKey}) => {
+        r"""async ({path, apiHosts, version, signatureKey}) => {
           const encode = new TextEncoder();
           const sign = async (value) => {
             const key = await crypto.subtle.importKey(
@@ -326,9 +326,12 @@ async def _mteam_api(page: Any, context: RunContext, path: str) -> dict[str, Any
             const bytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, encode.encode(value)));
             return btoa(String.fromCharCode(...bytes));
           };
-          const auth = localStorage.getItem("auth") || credentials.auth || "";
-          const did = localStorage.getItem("did") || credentials.did || "";
-          const visitorId = localStorage.getItem("visitorId") || credentials.visitorId || "";
+          const auth = localStorage.getItem("auth") || "";
+          const did = localStorage.getItem("did") || "";
+          const visitorId = localStorage.getItem("visitorId") || "";
+          if (!auth) {
+            return {status: 0, code: null, message: "", authenticated: false, missingAuth: true};
+          }
           let lastError = "";
           for (const apiHost of apiHosts) {
             const endpoint = `${apiHost.replace(/\/$/, "")}${path}`;
@@ -384,10 +387,6 @@ async def _mteam_api(page: Any, context: RunContext, path: str) -> dict[str, Any
         }""",
         {
             "path": path,
-            "credentials": {
-                key: str(context.cookies.get(key) or "")
-                for key in ("auth", "did", "visitorId")
-            },
             "apiHosts": list(MTEAM_API_HOSTS),
             "version": MTEAM_WEB_VERSION,
             "signatureKey": MTEAM_WEB_SIGNATURE_KEY,
@@ -1249,10 +1248,6 @@ class PtSignInHandler:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
                 page = await browser_context.new_page()
-                if discovery and discovery.strategy in {
-                    "web_storage_browser", "web_storage_profile_refresh_only",
-                }:
-                    await page.add_init_script(web_storage_init_script(url, context.cookies))
                 page.set_default_timeout(timeout_ms)
                 try:
                     origin = pt_home_url(url)
@@ -1275,6 +1270,7 @@ class PtSignInHandler:
                     except PlaywrightError as exc:
                         await _save_screenshot(page, screenshot)
                         home_error = playwright_error_result(page.url or url, exc, screenshot)
+                    context = await browser_environment_run_context(page, context, url)
                     sign_in_result = None
                     if sign_in_enabled:
                         sign_in_result = home_error

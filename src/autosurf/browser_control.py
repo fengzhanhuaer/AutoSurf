@@ -11,6 +11,7 @@ from playwright.async_api import async_playwright
 from autosurf.automations.browser_session import (
     PersistentBrowserRuntime,
     PersistentBrowserSession,
+    bootstrap_browser_environment,
     close_persistent_browser,
     launch_persistent_browser,
     prepare_browser_for_run,
@@ -45,12 +46,14 @@ class BrowserControlService:
         browser_closer: Callable[..., Any] = close_persistent_browser,
         process_factory: Callable[..., Any] = asyncio.create_subprocess_exec,
         socket_path: Path = DEFAULT_SOCKET_PATH,
+        credential_bootstrap: Callable[[], list[tuple[str, RunContext]]] | None = None,
     ) -> None:
         self._playwright_factory = playwright_factory
         self._browser_launcher = browser_launcher
         self._browser_closer = browser_closer
         self._process_factory = process_factory
         self._socket_path = socket_path
+        self._credential_bootstrap = credential_bootstrap or (lambda: [])
         self._lifecycle_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
@@ -314,6 +317,7 @@ class BrowserControlService:
                 context,
                 remote_desktop=True,
             )
+            await bootstrap_browser_environment(runtime, self._credential_bootstrap())
             if runtime.display is None:
                 raise BrowserControlError("完整浏览器控制需要 Docker 中的 Xvfb")
             runtime.context.on("close", lambda _context: closed.set())

@@ -1166,6 +1166,7 @@ class MTeamPage:
 
     async def evaluate(self, script, data):
         assert "authorization: auth" in script
+        assert "credentials.auth" not in script
         assert data["signatureKey"]
         self.paths.append(data["path"])
         return self.responses[data["path"]]
@@ -1213,15 +1214,19 @@ async def test_mteam_adapter_refreshes_profile_without_daily_hello():
 
 @pytest.mark.asyncio
 async def test_mteam_adapter_requires_synced_web_credential():
-    page = MTeamPage({})
+    page = MTeamPage({
+        "/member/profile": {
+            "status": 0, "authenticated": False, "missingAuth": True,
+        },
+    })
 
     result = await MTeamAdapter().refresh_profile(
         page, RunContext("test", {"url": page.url}, {}, []),
     )
 
     assert result.outcome == RunOutcome.AUTH_EXPIRED
-    assert result.message == "M-Team Web 凭据尚未同步"
-    assert page.paths == []
+    assert result.message == "M-Team 浏览器登录态不存在"
+    assert page.paths == ["/member/profile"]
 
 
 @pytest.mark.asyncio
