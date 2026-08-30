@@ -24,6 +24,8 @@ services:
       AUTOSURF_PASSWORD: "CHANGE-ME-strong-management-password"
     # Chrome's sandboxed internal and extension pages require container privileges.
     privileged: true
+    # Chrome creates many renderer threads when several sites open at once.
+    pids_limit: 4096
     read_only: true
     stop_grace_period: 30s
     healthcheck:
