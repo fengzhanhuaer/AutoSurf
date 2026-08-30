@@ -249,10 +249,49 @@ async def test_standalone_chrome_is_not_launched_with_playwright_automation_flag
     assert "--disable-setuid-sandbox" in args
     assert "--enable-automation" not in args
     assert "--remote-debugging-pipe" not in args
+    assert "--use-gl=angle" in args
+    assert "--use-angle=swiftshader-webgl" in args
+    assert "--enable-unsafe-swiftshader" in args
     assert kwargs["env"]["DISPLAY"] == ":99"
     assert kwargs["start_new_session"] is True
     assert runtime.context is None
     assert runtime.cdp_endpoint == "http://127.0.0.1:9222"
+
+
+def test_chrome_graphics_uses_vulkan_for_accessible_render_node(tmp_path, monkeypatch):
+    from autosurf.automations import browser_session
+
+    dri = tmp_path / "dri"
+    dri.mkdir()
+    render_node = dri / "renderD128"
+    render_node.touch()
+    icd = tmp_path / "icd.d"
+    icd.mkdir()
+    icd.joinpath("intel_icd.x86_64.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(browser_session.Path, "glob", lambda _self, _pattern: [render_node])
+    monkeypatch.setattr(browser_session, "VULKAN_ICD_DIRECTORIES", (icd,))
+    monkeypatch.setattr(browser_session.os, "access", lambda _path, _mode: True)
+    monkeypatch.delenv("AUTOSURF_BROWSER_GRAPHICS", raising=False)
+
+    args = browser_session._chrome_graphics_args()
+
+    assert "--enable-gpu" in args
+    assert "--use-angle=vulkan" in args
+    assert "--disable-vulkan-surface" in args
+    assert "--use-angle=swiftshader-webgl" not in args
+
+
+def test_chrome_graphics_can_force_software_fallback(monkeypatch):
+    from autosurf.automations.browser_session import _chrome_graphics_args
+
+    monkeypatch.setenv("AUTOSURF_BROWSER_GRAPHICS", "software")
+
+    args = _chrome_graphics_args()
+
+    assert "--use-angle=swiftshader-webgl" in args
+    assert "--enable-unsafe-swiftshader" in args
+    assert "--enable-gpu" not in args
 
 
 @pytest.mark.asyncio

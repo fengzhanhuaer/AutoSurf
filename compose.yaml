@@ -24,6 +24,10 @@ services:
       AUTOSURF_PASSWORD: "CHANGE-ME-strong-management-password"
     # Chrome's sandboxed internal and extension pages require container privileges.
     privileged: true
+    # HomePc exposes Intel DRM devices through these video/render group IDs.
+    group_add:
+      - "${AUTOSURF_VIDEO_GID:-44}"
+      - "${AUTOSURF_RENDER_GID:-110}"
     # Chrome creates many renderer threads when several sites open at once.
     pids_limit: 4096
     read_only: true

@@ -485,6 +485,8 @@ def test_browser_control_uses_unix_socket_and_existing_port_only():
     assert '"aiohttp>=3.11,<4"' in project
     assert '"0.0.0.0:18980:8080"' in compose
     assert "privileged: true" in compose
+    assert "AUTOSURF_RENDER_GID" in compose
+    assert "mesa-vulkan-drivers vulkan-tools" in dockerfile
     assert "no-new-privileges:true" not in compose
     assert "18981" not in compose
     assert "6080" not in compose

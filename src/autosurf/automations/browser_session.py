@@ -29,6 +29,10 @@ CHROME_SINGLETON_FILES = (
     "SingletonLock",
     "SingletonSocket",
 )
+VULKAN_ICD_DIRECTORIES = (
+    Path("/usr/share/vulkan/icd.d"),
+    Path("/etc/vulkan/icd.d"),
+)
 _PROFILE_LOCKS: dict[str, asyncio.Lock] = {}
 _SHARED_BROWSER_PROVIDER: "SharedBrowserProvider | None" = None
 
@@ -205,7 +209,7 @@ async def launch_persistent_browser(
         if mode == "persistent_headful":
             display = await _start_virtual_display(*display_size)
             launch_env["DISPLAY"] = display.name
-        args = ["--disable-dev-shm-usage"]
+        args = ["--disable-dev-shm-usage", *_chrome_graphics_args()]
         kwargs: dict[str, Any] = {
             "headless": mode == "persistent_headless",
             "locale": str(run_context.config.get("locale", "zh-CN")),
@@ -287,6 +291,7 @@ async def launch_standalone_browser(
             "--password-store=basic",
             "--disable-setuid-sandbox",
             f"--lang={str(run_context.config.get('locale', 'zh-CN'))}",
+            *_chrome_graphics_args(),
         ]
         if mode == "persistent_headless":
             args.append("--headless=new")
@@ -648,6 +653,39 @@ def _standalone_chrome_executable() -> str:
     if executable:
         return executable
     raise RuntimeError("Google Chrome executable was not found")
+
+
+def _chrome_graphics_args() -> list[str]:
+    """Select hardware WebGL when DRM and a Vulkan driver are usable."""
+    configured = os.environ.get("AUTOSURF_BROWSER_GRAPHICS", "auto").strip().casefold()
+    if configured not in {"auto", "hardware", "software"}:
+        configured = "auto"
+
+    render_nodes = sorted(Path("/dev/dri").glob("renderD*"))
+    has_render_node = any(os.access(node, os.R_OK | os.W_OK) for node in render_nodes)
+    has_vulkan_icd = any(
+        any(directory.glob("*.json"))
+        for directory in VULKAN_ICD_DIRECTORIES
+        if directory.is_dir()
+    )
+    use_hardware = configured == "hardware" or (
+        configured == "auto" and has_render_node and has_vulkan_icd
+    )
+    if use_hardware:
+        return [
+            "--enable-gpu",
+            "--use-gl=angle",
+            "--use-angle=vulkan",
+            "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
+            "--ignore-gpu-blocklist",
+            "--disable-vulkan-surface",
+            "--enable-unsafe-swiftshader",
+        ]
+    return [
+        "--use-gl=angle",
+        "--use-angle=swiftshader-webgl",
+        "--enable-unsafe-swiftshader",
+    ]
 
 
 async def _wait_for_standalone_cdp(process: Any, endpoint: str) -> None:

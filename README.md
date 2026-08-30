@@ -89,6 +89,12 @@ docker compose pull
 docker compose up -d
 ```
 
+The default Compose configuration grants Chrome access to Intel DRM render devices
+using host groups `44` (video) and `110` (render). Set `AUTOSURF_VIDEO_GID` or
+`AUTOSURF_RENDER_GID` before `docker compose up` when the host uses different IDs.
+Chrome automatically uses ANGLE/Vulkan hardware WebGL when a render node and Vulkan
+driver are available, and falls back to SwiftShader on hosts without a GPU.
+
 The command-line helper remains available:
 
 ```bash
