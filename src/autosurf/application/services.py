@@ -146,16 +146,26 @@ class QueueService:
         *, activate_existing: bool = True,
     ) -> tuple[ExecutionRecord, bool]:
         now = utc_now()
+        config_override_json = (
+            json.dumps(config_override, ensure_ascii=False) if config_override else None
+        )
         with self.sessions.begin() as session:
             automation = session.get(AutomationRecord, automation_id)
             if automation is None:
                 raise ValueError("automation does not exist")
-            existing = session.scalar(select(ExecutionRecord).where(
+            existing_query = select(ExecutionRecord).where(
                 ExecutionRecord.automation_id == automation.id,
                 ExecutionRecord.status.in_([
                     ExecutionStatus.PENDING, ExecutionStatus.RUNNING, ExecutionStatus.RETRY_WAIT,
                 ]),
-            ).order_by(ExecutionRecord.scheduled_at.desc()).limit(1))
+            )
+            if config_override_json is not None:
+                existing_query = existing_query.where(
+                    ExecutionRecord.config_override_json == config_override_json
+                )
+            existing = session.scalar(
+                existing_query.order_by(ExecutionRecord.scheduled_at.desc()).limit(1)
+            )
             if existing is not None:
                 if activate_existing and existing.status in {
                     ExecutionStatus.PENDING, ExecutionStatus.RETRY_WAIT,
@@ -165,10 +175,7 @@ class QueueService:
                 return existing, False
             execution = ExecutionRecord(id=str(uuid4()), automation_id=automation.id, scheduled_at=now,
                                         status=ExecutionStatus.PENDING, available_at=now, attempts=0,
-                                        config_override_json=(
-                                            json.dumps(config_override, ensure_ascii=False)
-                                            if config_override else None
-                                        ))
+                                        config_override_json=config_override_json)
             session.add(execution)
         return execution, True
 

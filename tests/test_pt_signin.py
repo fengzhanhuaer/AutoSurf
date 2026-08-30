@@ -2915,6 +2915,9 @@ async def test_pt_run_all_uses_action_overrides_and_skips_active_tasks(settings)
         sign_in_again = await client.post(
             "/api/v1/pt-signin/run-all", auth=auth, json={"action": "sign_in"},
         )
+        refresh = await client.post(
+            "/api/v1/pt-signin/run-all", auth=auth, json={"action": "profile_refresh"},
+        )
 
     assert sign_in.status_code == 202
     sign_payload = sign_in.json()
@@ -2929,12 +2932,6 @@ async def test_pt_run_all_uses_action_overrides_and_skips_active_tasks(settings)
     with app.state.sessions() as session:
         override = json.loads(session.get(ExecutionRecord, sign_execution_id).config_override_json)
         assert override == {"sign_in_enabled": True, "profile_refresh_enabled": False}
-    app.state.queue.succeed(sign_execution_id, {"outcome": "success", "message": "done"})
-
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        refresh = await client.post(
-            "/api/v1/pt-signin/run-all", auth=auth, json={"action": "profile_refresh"},
-        )
 
     assert refresh.status_code == 202
     assert {item["automation_id"] for item in refresh.json()["queued"]} == {
