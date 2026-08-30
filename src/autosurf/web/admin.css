@@ -264,20 +264,10 @@ td:first-child { color: var(--text); font-weight: 600; }
 .debug-log-output pre { max-height: 340px; margin: 0; overflow: auto; padding: 14px; border-radius: 5px; background: #20272e; color: #f2f5f7; font: 12px/1.55 Consolas, "Courier New", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .browser-control-panel { width: 100%; overflow: hidden; }
-.browser-control-panel:fullscreen,
-.browser-control-panel:-webkit-full-screen { display: flex; width: 100vw; height: 100vh; flex-direction: column; border: 0; border-radius: 0; background: var(--surface); }
-.browser-control-panel:fullscreen .browser-remote-shell,
-.browser-control-panel:-webkit-full-screen .browser-remote-shell { min-height: 0; flex: 1; aspect-ratio: auto; }
 .browser-control-heading { min-height: 68px; }
 .browser-control-actions { display: flex; align-items: center; gap: 8px; }
 .browser-control-actions select { width: 128px; min-height: 38px; }
 .browser-control-error { margin: 12px 14px 0; padding: 10px 12px; border: 1px solid #f1b7b2; border-radius: 5px; background: var(--danger-bg); color: var(--danger); overflow-wrap: anywhere; }
-.browser-remote-shell { position: relative; width: 100%; aspect-ratio: var(--browser-aspect-ratio, 1365 / 768); overflow: hidden; background: #161b20; }
-.browser-remote-shell iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #161b20; }
-.browser-remote-placeholder, .browser-remote-cover { position: absolute; inset: 0; display: grid; place-items: center; color: #f3f6f8; font-size: 15px; text-align: center; }
-.browser-remote-placeholder { background: #161b20; }
-.browser-remote-cover { background: rgb(22 27 32 / 82%); backdrop-filter: blur(2px); }
-.browser-remote-placeholder[hidden], .browser-remote-cover[hidden] { display: none; }
 
 @media (max-width: 1100px) {
   .periodic-grid { grid-template-columns: 1fr; }
@@ -334,9 +324,10 @@ td:first-child { color: var(--text); font-weight: 600; }
   .debug-log-meta div:nth-child(3) { padding-left: 0; }
   .debug-log-detail { padding: 16px; }
   .browser-control-heading { flex-direction: column; align-items: stretch; }
-  .browser-control-actions { width: 100%; }
-  .browser-control-actions select { width: auto; min-width: 0; flex: 1; }
-  .browser-control-actions .icon-button { width: 38px; flex: 0 0 38px; }
+  .browser-control-actions { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; }
+  .browser-control-actions #browser-open-window { grid-column: 1 / -1; }
+  .browser-control-actions select { width: 100%; min-width: 0; }
+  .browser-control-actions .status-badge { min-width: 58px; white-space: nowrap; }
 }
 
 @media (prefers-reduced-motion: reduce) {

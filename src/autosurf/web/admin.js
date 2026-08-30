@@ -27,16 +27,12 @@ const state = {
     supported_resolutions: [],
     audio_supported: false,
   },
-  browserAudioEnabled: false,
 };
 
 const ACTIVE_EXECUTION_STATUSES = new Set(["pending", "running", "retry_wait"]);
 let executionRefreshInFlight = false;
 let browserStatusTimer = null;
 let browserResolutionChanging = false;
-let browserAudioSocket = null;
-let browserAudioContext = null;
-let browserAudioNextStart = 0;
 
 const elements = {
   body: document.body,
@@ -58,16 +54,12 @@ const elements = {
   periodicHistoryPanel: document.querySelector("#periodic-history-panel"),
   browserControlPanel: document.querySelector("#browser-control-panel"),
   browserControlSurface: document.querySelector("#browser-control-surface"),
+  browserControlTitle: document.querySelector("#browser-control-title"),
   browserControlState: document.querySelector("#browser-control-state"),
   browserControlPageTitle: document.querySelector("#browser-control-page-title"),
   browserControlError: document.querySelector("#browser-control-error"),
+  browserOpenWindow: document.querySelector("#browser-open-window"),
   browserResolution: document.querySelector("#browser-resolution"),
-  browserAudio: document.querySelector("#browser-audio"),
-  browserFullscreen: document.querySelector("#browser-fullscreen"),
-  browserRemoteShell: document.querySelector("#browser-remote-shell"),
-  browserRemoteFrame: document.querySelector("#browser-remote-frame"),
-  browserRemotePlaceholder: document.querySelector("#browser-remote-placeholder"),
-  browserRemoteCover: document.querySelector("#browser-remote-cover"),
   ptStatsRows: document.querySelector("#pt-stats-rows"),
   siteSettingsPanel: document.querySelector("#site-settings-panel"),
   logsPanel: document.querySelector("#logs-settings-panel"),
@@ -263,7 +255,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
 
   if (browserView) {
     elements.pageTitle.textContent = "浏览器控制";
-    elements.pageDescription.textContent = "Chrome 远程桌面";
+    elements.pageDescription.textContent = "Windows 独立 Chrome 窗口";
   } else if (periodicView) {
     elements.pageTitle.textContent = "周期签到";
     elements.pageDescription.textContent = "普通站点周期任务";
@@ -350,6 +342,8 @@ function renderBrowserControl() {
   const starting = Boolean(browser.starting);
   const busy = Boolean(browser.busy);
   const changing = browserResolutionChanging;
+  const nativeWindow = Boolean(browser.native_window);
+  elements.browserControlTitle.textContent = "Chrome 浏览器";
   elements.browserControlState.textContent = changing ? "切换中" : (active ? "运行中" : (starting ? "恢复中" : "不可用"));
   elements.browserControlState.className = `status-badge ${active && !changing ? "succeeded" : (starting || changing ? "running" : "failed")}`;
   elements.browserControlPageTitle.textContent = browser.title || browser.url || "正在连接常驻浏览器";
@@ -359,20 +353,8 @@ function renderBrowserControl() {
   const resolutionValue = `${viewport.width}x${viewport.height}`;
   elements.browserResolution.value = resolutionValue;
   elements.browserResolution.disabled = busy || changing;
-  elements.browserAudio.disabled = !active || !browser.audio_supported;
-  elements.browserAudio.setAttribute("aria-pressed", String(state.browserAudioEnabled));
-  elements.browserAudio.title = state.browserAudioEnabled ? "关闭声音" : "开启声音";
-  elements.browserAudio.setAttribute("aria-label", elements.browserAudio.title);
-  elements.browserAudio.querySelector("span").textContent = state.browserAudioEnabled ? "静" : "音";
-  elements.browserRemoteShell.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
-  elements.browserRemotePlaceholder.hidden = active && !changing;
-  elements.browserRemoteCover.hidden = true;
-  if (active && !changing && state.activeView === "browser-control" && !document.hidden) {
-    const remoteUrl = browser.remote_url || "/browser-control/remote/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=websockify";
-    if (!elements.browserRemoteFrame.getAttribute("src")) {
-      elements.browserRemoteFrame.src = remoteUrl;
-    }
-  }
+  elements.browserOpenWindow.hidden = !nativeWindow;
+  elements.browserOpenWindow.disabled = starting;
 }
 
 function setBrowserControlState(payload) {
@@ -398,7 +380,6 @@ async function changeBrowserResolution() {
   const [width, height] = elements.browserResolution.value.split("x").map(Number);
   if (width === previous.width && height === previous.height) return;
   browserResolutionChanging = true;
-  elements.browserRemoteFrame.removeAttribute("src");
   renderBrowserControl();
   try {
     const status = await api("/api/v1/browser-control/resolution", {
@@ -407,7 +388,7 @@ async function changeBrowserResolution() {
       body: JSON.stringify({ width, height }),
     });
     setBrowserControlState(status);
-    showToast(`远程桌面已切换为 ${width} x ${height}`);
+    showToast(`浏览器窗口已切换为 ${width} x ${height}`);
   } catch (error) {
     elements.browserResolution.value = `${previous.width}x${previous.height}`;
     showToast(error.message || "无法切换分辨率", true);
@@ -418,117 +399,30 @@ async function changeBrowserResolution() {
   }
 }
 
-function scheduleBrowserAudio(arrayBuffer) {
-  const context = browserAudioContext;
-  if (!context || context.state === "closed") return;
-  const samples = new Int16Array(arrayBuffer);
-  const frames = Math.floor(samples.length / 2);
-  if (!frames) return;
-  const buffer = context.createBuffer(2, frames, 48_000);
-  const left = buffer.getChannelData(0);
-  const right = buffer.getChannelData(1);
-  for (let frame = 0; frame < frames; frame += 1) {
-    left[frame] = samples[frame * 2] / 32768;
-    right[frame] = samples[frame * 2 + 1] / 32768;
-  }
-  const source = context.createBufferSource();
-  source.buffer = buffer;
-  source.connect(context.destination);
-  const earliest = context.currentTime + 0.08;
-  if (browserAudioNextStart < earliest || browserAudioNextStart > context.currentTime + 1) {
-    browserAudioNextStart = earliest;
-  }
-  source.start(browserAudioNextStart);
-  browserAudioNextStart += buffer.duration;
-}
-
-async function startBrowserAudio() {
-  if (state.browserAudioEnabled || !state.browserControl.audio_supported) return;
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) throw new Error("当前浏览器不支持远程音频播放");
-  browserAudioContext = new AudioContextClass({ sampleRate: 48_000 });
-  await browserAudioContext.resume();
-  browserAudioNextStart = 0;
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  browserAudioSocket = new WebSocket(`${protocol}//${location.host}/browser-control/audio`);
-  browserAudioSocket.binaryType = "arraybuffer";
-  browserAudioSocket.addEventListener("message", (event) => {
-    if (event.data instanceof ArrayBuffer) scheduleBrowserAudio(event.data);
-  });
-  browserAudioSocket.addEventListener("close", () => {
-    if (state.browserAudioEnabled) stopBrowserAudio();
-  }, { once: true });
-  state.browserAudioEnabled = true;
-  renderBrowserControl();
-}
-
-function stopBrowserAudio() {
-  state.browserAudioEnabled = false;
-  const socket = browserAudioSocket;
-  const context = browserAudioContext;
-  browserAudioSocket = null;
-  browserAudioContext = null;
-  browserAudioNextStart = 0;
-  if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
-  if (context && context.state !== "closed") context.close();
-  renderBrowserControl();
-}
-
-async function toggleBrowserAudio() {
-  try {
-    if (state.browserAudioEnabled) stopBrowserAudio();
-    else await startBrowserAudio();
-  } catch (error) {
-    stopBrowserAudio();
-    showToast(error.message || "无法开启远程声音", true);
-  }
-}
-
 function setBrowserControlPolling(enabled) {
   window.clearInterval(browserStatusTimer);
   browserStatusTimer = null;
-  if (!enabled) {
-    stopBrowserAudio();
-    elements.browserRemoteFrame.removeAttribute("src");
-    return;
-  }
+  if (!enabled) return;
   loadBrowserControlStatus({ quiet: true });
   browserStatusTimer = window.setInterval(() => loadBrowserControlStatus({ quiet: true }), 2_000);
 }
 
-function browserControlIsFullscreen() {
-  return (document.fullscreenElement || document.webkitFullscreenElement) === elements.browserControlSurface;
-}
-
-function renderBrowserFullscreenState() {
-  const active = browserControlIsFullscreen();
-  const label = active ? "退出全屏" : "全屏";
-  elements.browserFullscreen.title = label;
-  elements.browserFullscreen.setAttribute("aria-label", label);
-  elements.browserFullscreen.setAttribute("aria-pressed", String(active));
-}
-
-async function toggleBrowserFullscreen() {
+async function openBrowserWindow() {
+  elements.browserOpenWindow.disabled = true;
   try {
-    if (browserControlIsFullscreen()) {
-      const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
-      if (!exitFullscreen) throw new Error("当前浏览器不支持退出全屏");
-      await exitFullscreen.call(document);
-    } else {
-      const requestFullscreen = elements.browserControlSurface.requestFullscreen
-        || elements.browserControlSurface.webkitRequestFullscreen;
-      if (!requestFullscreen) throw new Error("当前浏览器不支持全屏");
-      await requestFullscreen.call(elements.browserControlSurface);
-    }
+    setBrowserControlState(await api("/api/v1/browser-control/open", {
+      method: "POST",
+      body: "{}",
+    }));
   } catch (error) {
-    showToast(error.message || "无法切换全屏", true);
+    showToast(error.message || "无法打开浏览器", true);
+  } finally {
+    elements.browserOpenWindow.disabled = false;
   }
 }
 
-elements.browserFullscreen.addEventListener("click", toggleBrowserFullscreen);
+elements.browserOpenWindow.addEventListener("click", openBrowserWindow);
 elements.browserResolution.addEventListener("change", changeBrowserResolution);
-document.addEventListener("fullscreenchange", renderBrowserFullscreenState);
-document.addEventListener("webkitfullscreenchange", renderBrowserFullscreenState);
 
 function statusLabel(status) {
   return ({
@@ -1354,20 +1248,21 @@ function renderUpgradeStatus(status) {
   const browserVersion = browser.browser_version || browser.chromium_version
     || browser.chromium_revision || "已安装";
   elements.upgradeBrowser.textContent = browser.installed
-    ? `${browserName} ${browserVersion} · ${browserMode}` : "未安装";
+    ? `${browserName} ${browserVersion} · 本机 ${browserMode}` : "未找到本机 Chrome";
+  elements.upgradeBrowser.title = "独立 Chrome 仅在发布版本调整锁定值后随 AutoSurf 升级";
   const lastState = status.last_upgrade?.state;
   elements.upgradeState.textContent = status.running ? "升级中"
     : status.version_check_error ? status.version_check_error
       : status.update_available ? "发现新版本"
         : dependencies.checked && !dependencies.satisfied ? "Python 依赖需要修复"
-          : !browser.installed ? "浏览器运行时缺失"
+          : !browser.installed ? "未找到本机 Chrome"
             : !dependencies.checked ? dependencies.error || "Python 依赖检查失败"
               : lastState === "failed" ? "上次升级失败，当前已是最新版本" : "已是最新版本";
   elements.upgradeStartButton.disabled = !status.can_upgrade || status.running;
   elements.upgradeStartButton.textContent = status.running ? "升级中..."
     : status.update_available ? "升级到新版本"
       : dependencies.checked && !dependencies.satisfied ? "修复 Python 依赖"
-        : !browser.installed ? "安装浏览器运行时" : "已是最新版本";
+        : !browser.installed ? "检查本机浏览器" : "已是最新版本";
 }
 
 async function loadUpgradeStatus() {
@@ -1686,7 +1581,6 @@ elements.refreshButton.addEventListener("click", () => {
   else if (state.activeView === "browser-control") loadBrowserControlStatus();
   else refresh();
 });
-elements.browserAudio.addEventListener("click", toggleBrowserAudio);
 
 elements.siteBackupButton.addEventListener("click", async () => {
   setBusy(true);

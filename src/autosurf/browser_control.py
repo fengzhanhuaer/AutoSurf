@@ -276,6 +276,13 @@ class BrowserControlService:
     async def shutdown(self) -> None:
         await self.stop()
 
+    async def open_window(self) -> dict[str, Any]:
+        status = await self.start()
+        runtime = self._runtime
+        if os.name == "nt" and runtime is not None and runtime.browser_process is not None:
+            await asyncio.to_thread(_activate_windows_process, runtime.browser_process.pid)
+        return status
+
     async def set_resolution(self, width: int, height: int) -> dict[str, Any]:
         resolution = validate_browser_resolution(width, height)
         if resolution == self._resolution:
@@ -294,15 +301,21 @@ class BrowserControlService:
     async def status(self, *, touch: bool = False) -> dict[str, Any]:
         del touch
         runtime = self._runtime
+        native_window = os.name == "nt"
         active = (
             runtime is not None
             and (
                 runtime.browser_process is None
                 or runtime.browser_process.returncode is None
             )
-            and self._vnc_process is not None
-            and self._remote_process is not None
-            and self._socket_path.exists()
+            and (
+                native_window
+                or (
+                    self._vnc_process is not None
+                    and self._remote_process is not None
+                    and self._socket_path.exists()
+                )
+            )
         )
         url = ""
         title = ""
@@ -347,14 +360,16 @@ class BrowserControlService:
             "always_on": True,
             "busy": self._operation_lock.locked() or database_owner is not None,
             "automation_owner": automation_owner,
-            "remote_url": (
+            "native_window": native_window,
+            "remote_url": None if native_window else (
                 f"{REMOTE_DESKTOP_PREFIX}/vnc.html"
                 f"?autoconnect=1&resize=scale&reconnect=1&reconnect_delay=2000"
                 f"&path=websockify"
             ),
             "restart_count": self._restart_count,
             "stream_log": self._stream_log,
-            "audio_supported": shutil.which("parec") is not None,
+            "audio_supported": not native_window and shutil.which("parec") is not None,
+            "native_audio": native_window,
             "audio_format": {
                 "sample_rate": AUDIO_SAMPLE_RATE,
                 "channels": AUDIO_CHANNELS,
@@ -560,6 +575,9 @@ class BrowserControlService:
                 pass
 
     async def _run_once(self, stop_event: asyncio.Event) -> None:
+        if os.name == "nt":
+            await self._run_native_once(stop_event)
+            return
         runtime = None
         vnc = None
         remote = None
@@ -642,6 +660,57 @@ class BrowserControlService:
             if runtime is not None:
                 await self._browser_closer(runtime)
             self._socket_path.unlink(missing_ok=True)
+
+    async def _run_native_once(self, stop_event: asyncio.Event) -> None:
+        runtime = None
+        log_tasks: list[asyncio.Task[None]] = []
+        try:
+            context = RunContext(
+                execution_id="browser-control",
+                config={"locale": "zh-CN"},
+                cookies={},
+            )
+            runtime = await self._browser_launcher(
+                None,
+                context,
+                remote_desktop=True,
+                display_size=self._resolution,
+                process_factory=self._process_factory,
+            )
+            self._runtime = runtime
+            process = runtime.browser_process
+            if process is not None:
+                if process.stdout is not None:
+                    log_tasks.append(asyncio.create_task(self._drain_stream(process.stdout)))
+                if process.stderr is not None:
+                    log_tasks.append(asyncio.create_task(self._drain_stream(process.stderr)))
+            self._error = None
+            self._starting = False
+            self._initial_ready.set()
+
+            stop_wait = asyncio.create_task(stop_event.wait())
+            if process is None:
+                await stop_wait
+                return
+            browser_wait = asyncio.create_task(process.wait())
+            done, pending = await asyncio.wait(
+                {stop_wait, browser_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if browser_wait in done and not stop_event.is_set():
+                raise BrowserControlError(
+                    f"Google Chrome 意外退出，状态码 {browser_wait.result()}",
+                )
+        finally:
+            self._runtime = None
+            for task in log_tasks:
+                task.cancel()
+            await asyncio.gather(*log_tasks, return_exceptions=True)
+            if runtime is not None:
+                await self._browser_closer(runtime)
 
     @asynccontextmanager
     async def _connected_runtime(
@@ -764,6 +833,32 @@ def _proxy_headers(headers: Any, *, include_cookie: bool = True) -> dict[str, st
         for key, value in headers.items()
         if str(key).lower() not in excluded
     }
+
+
+def _activate_windows_process(process_id: int) -> bool:
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(window: int, _parameter: int) -> bool:
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == process_id and user32.IsWindowVisible(window):
+            found.append(window)
+            return False
+        return True
+
+    user32.EnumWindows(visit, 0)
+    if not found:
+        return False
+    window = found[0]
+    user32.ShowWindow(window, 9)
+    return bool(user32.SetForegroundWindow(window))
 
 
 def _response_headers(headers: Any) -> dict[str, str]:

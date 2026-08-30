@@ -1,10 +1,16 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import hashlib
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import inspect
+import json
 from pathlib import Path
 import re
+import subprocess
+import threading
 from types import SimpleNamespace
+import zipfile
 
 import httpx
 import pytest
@@ -337,8 +343,8 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     assert started["active"] is True, started["error"]
     assert started["starting"] is False
     assert started["always_on"] is True
-    assert started["remote_url"].startswith("/browser-control/remote/vnc.html?")
-    assert "path=websockify" in started["remote_url"]
+    assert started["native_window"] is True
+    assert started["remote_url"] is None
     assert launched == [("browser-control", True, (1365, 768))]
 
     resized = await service.set_resolution(1920, 1080)
@@ -437,9 +443,12 @@ class FakeBrowserControlApi:
         self.viewport = {"width": width, "height": height}
         return await self.status()
 
+    async def open_window(self):
+        return await self.status()
+
 
 @pytest.mark.asyncio
-async def test_browser_control_status_and_remote_proxy_require_login(settings):
+async def test_browser_control_status_and_native_window_actions_require_login(settings):
     app = create_app(settings)
     app.state.browser_control = FakeBrowserControlApi()
     transport = httpx.ASGITransport(app=app)
@@ -450,6 +459,9 @@ async def test_browser_control_status_and_remote_proxy_require_login(settings):
         status = await client.get("/api/v1/browser-control", auth=auth)
         assert status.status_code == 200
         assert status.json()["always_on"] is True
+
+        opened = await client.post("/api/v1/browser-control/open", auth=auth)
+        assert opened.status_code == 200
 
         denied_resize = await client.patch(
             "/api/v1/browser-control/resolution",
@@ -470,79 +482,102 @@ async def test_browser_control_status_and_remote_proxy_require_login(settings):
         )
         assert unsupported.status_code == 422
 
-        assert (await client.get("/browser-control/remote/")).status_code == 401
-        unavailable = await client.get("/browser-control/remote/", auth=auth)
-        assert unavailable.status_code == 503
+        assert (await client.get("/browser-control/remote/")).status_code == 404
 
 
-def test_browser_control_uses_unix_socket_and_existing_port_only():
-    compose = Path("compose.yaml").read_text(encoding="utf-8")
-    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
-    entrypoint = Path("docker/entrypoint.sh").read_text(encoding="utf-8")
-    upgrade = Path("docker/autosurf-upgrade").read_text(encoding="utf-8")
-    project = Path("pyproject.toml").read_text(encoding="utf-8")
-    source = Path("src/autosurf/browser_control.py").read_text(encoding="utf-8")
-    assert '"aiohttp>=3.11,<4"' in project
-    assert '"0.0.0.0:18980:8080"' in compose
-    assert "privileged: true" in compose
-    assert "AUTOSURF_RENDER_GID" in compose
-    assert "mesa-vulkan-drivers vulkan-tools" in dockerfile
-    assert "no-new-privileges:true" not in compose
-    assert "18981" not in compose
-    assert "6080" not in compose
-    assert "5900" not in compose
-    assert '"-localhost"' in source
-    assert '"--unix-listen=' in source
-    assert "--subfolder=/browser-control/remote" not in compose
-    assert "google-chrome-stable_current_amd64.deb" in dockerfile
-    assert "platforms: linux/amd64" in Path(".github/workflows/ci.yml").read_text(
-        encoding="utf-8"
+def test_windows_installation_uses_localhost_without_docker_artifacts():
+    install = Path("scripts/install.ps1").read_text(encoding="utf-8")
+    browser_install = Path("scripts/install-browser.ps1").read_text(encoding="utf-8")
+    browser_manifest = json.loads(Path("browser-runtime.json").read_text(encoding="utf-8"))
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert '"C:\\Tools\\AutoSurf"' in install
+    assert "AUTOSURF_HOST=127.0.0.1" in install
+    assert "AUTOSURF_PORT=18980" in install
+    assert "AUTOSURF_BROWSER_PROFILE_DIR" in install
+    assert "AUTOSURF_BROWSER_EXECUTABLE_PATH=$rootEnv/runtime/chrome/chrome.exe" in install
+    assert "Invoke-WebRequest" in browser_install
+    assert "System.Security.Cryptography.MD5" in browser_install
+    assert browser_manifest == {
+        "version": "152.0.7977.64",
+        "platform": "win64",
+        "archive_url": (
+            "https://storage.googleapis.com/chrome-for-testing-public/"
+            "152.0.7977.64/win64/chrome-win64.zip"
+        ),
+        "archive_size": 202713690,
+        "archive_md5": "fb058f51b0b74259c94148f9ac569040",
+        "archive_root": "chrome-win64",
+        "executable": "chrome.exe",
+    }
+    assert not Path("Dockerfile").exists()
+    assert not Path("compose.yaml").exists()
+    assert "docker/build-push-action" not in workflow
+
+
+def test_pinned_browser_installer_verifies_extracts_and_reuses_runtime(tmp_path):
+    download_root = tmp_path / "downloads"
+    download_root.mkdir()
+    archive = download_root / "chrome.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("chrome-win64/chrome.exe", b"test-browser")
+
+    handler = lambda *args, **kwargs: SimpleHTTPRequestHandler(  # noqa: E731
+        *args, directory=str(download_root), **kwargs,
     )
-    assert "linux/arm64" not in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "AUTOSURF_BROWSER_CHANNEL=chrome" in dockerfile
-    assert "pulseaudio pulseaudio-utils" in dockerfile
-    assert "module-null-sink" in entrypoint
-    assert "pulseaudio --daemonize=no" in entrypoint
-    assert "pulseaudio --start" not in entrypoint
-    assert 'export PULSE_SERVER="unix:$pulse_socket"' in entrypoint
-    assert 'kill -0 "$pulse_pid"' in entrypoint
-    assert 'if [ "$pulse_ready" -ne 1 ]' in entrypoint
-    assert "AUTOSURF_AUDIO_SOURCE" in entrypoint
-    assert "playwright install chromium" not in entrypoint
-    assert "playwright install chromium" not in upgrade
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = tmp_path / "AutoSurf"
+    program = root / "program"
+    program.mkdir(parents=True)
+    manifest = {
+        "version": "test-version",
+        "platform": "win64",
+        "archive_url": f"http://127.0.0.1:{server.server_port}/chrome.zip",
+        "archive_size": archive.stat().st_size,
+        "archive_md5": hashlib.md5(archive.read_bytes()).hexdigest(),  # noqa: S324
+        "archive_root": "chrome-win64",
+        "executable": "chrome.exe",
+    }
+    program.joinpath("browser-runtime.json").write_text(
+        json.dumps(manifest), encoding="utf-8",
+    )
+    command = [
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        str(Path("scripts/install-browser.ps1").resolve()), "-InstallDir", str(root),
+    ]
+    try:
+        installed = subprocess.run(command, capture_output=True, text=True, check=False)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert installed.returncode == 0, installed.stderr
+    executable = root / "runtime" / "chrome" / "chrome.exe"
+    assert executable.read_bytes() == b"test-browser"
+    assert root.joinpath("runtime/chrome/.autosurf-version").read_text().strip() == "test-version"
+
+    reused = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert reused.returncode == 0, reused.stderr
+    assert "already installed" in reused.stdout
 
 
-def test_browser_control_management_ui_embeds_full_remote_desktop():
+def test_browser_control_management_ui_opens_a_native_window_without_embedding_video():
     html = Path("src/autosurf/web/admin.html").read_text(encoding="utf-8")
     javascript = Path("src/autosurf/web/admin.js").read_text(encoding="utf-8")
-    css = Path("src/autosurf/web/admin.css").read_text(encoding="utf-8")
-
     assert 'data-view="browser-control"' in html
     assert 'id="browser-control-panel"' in html
     assert 'id="browser-control-surface"' in html
-    assert 'id="browser-remote-frame"' in html
-    assert 'id="browser-fullscreen"' in html
+    assert 'id="browser-open-window"' in html
     assert 'id="browser-resolution"' in html
-    assert 'id="browser-audio"' in html
     assert 'value="1920x1080"' in html
-    assert 'title="Chrome 远程桌面"' in html
-    assert 'id="browser-remote-cover"' in html
-    assert 'id="browser-address-form"' not in html
-    assert 'id="browser-start"' not in html
-    assert 'id="browser-frame"' not in html
+    assert 'id="browser-remote-frame"' not in html
+    assert 'id="browser-fullscreen"' not in html
+    assert 'id="browser-audio"' not in html
     assert 'api("/api/v1/browser-control"' in javascript
-    assert '"/browser-control/remote/vnc.html?' in javascript
-    assert "path=websockify" in javascript
-    assert "/browser-control/audio" in javascript
-    assert "new AudioContextClass" in javascript
-    assert "requestFullscreen" in javascript
+    assert 'api("/api/v1/browser-control/open"' in javascript
     assert 'method: "PATCH"' in javascript
-    assert 'browserRemoteShell: document.querySelector("#browser-remote-shell")' in javascript
-    assert 'style.aspectRatio' in javascript
-    assert 'document.addEventListener("fullscreenchange"' in javascript
-    assert "/api/v1/browser-control/frame" not in javascript
-    assert "aspect-ratio: var(--browser-aspect-ratio, 1365 / 768)" in css
-    assert ".browser-control-panel:fullscreen" in css
 
 
 def test_management_javascript_only_references_registered_elements():

@@ -1,0 +1,9 @@
+{
+  "version": "152.0.7977.64",
+  "platform": "win64",
+  "archive_url": "https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.64/win64/chrome-win64.zip",
+  "archive_size": 202713690,
+  "archive_md5": "fb058f51b0b74259c94148f9ac569040",
+  "archive_root": "chrome-win64",
+  "executable": "chrome.exe"
+}

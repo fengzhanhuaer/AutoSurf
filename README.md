@@ -1,135 +1,85 @@
 # AutoSurf
 
-AutoSurf is a Docker-first web automation service for PT sign-in and ordinary periodic site tasks. A persistent Google Chrome profile is the only browser login-state source: sign in once through the built-in remote desktop, then tasks reuse the same cookies, localStorage, sessionStorage, and browser environment.
+AutoSurf is a Windows-native browser automation service for PT sign-in and ordinary periodic site tasks. It starts an independent, visible Google Chrome window and keeps all browser login state in one persistent local profile.
 
-## Features
+## Requirements
 
-- Persistent Google Chrome with an embedded noVNC remote desktop
-- Optional remote Chrome audio over the existing management port
-- PT site catalog, daily sign-in, profile refresh, history, and statistics
-- Ordinary periodic browser tasks, including NodeSeek
-- Execution records, sanitized debug output, and failure screenshots
-- Task backup and restore as a ZIP archive
-- Management login and LAN-only access enabled by default
-- Authenticated in-app program upgrades
+- Windows 10 or Windows 11
+- Python 3.13 (`py.exe` launcher available)
+- Git for Windows
+- PowerShell 5.1 or later
 
-CookieCloud and Web credential synchronization are not used. Tasks do not store credential IDs or copy login snapshots into execution records.
+Docker is not used or supported.
 
-## Docker installation
+## Install
 
-AutoSurf publishes an amd64 image. Create a directory, place [compose.yaml](compose.yaml) in it, and change these values before starting:
+Run PowerShell from a source checkout:
 
-- `AUTOSURF_SECRET_KEY`: at least 32 random characters
-- `AUTOSURF_USERNAME`: management username
-- `AUTOSURF_PASSWORD`: strong management password
-
-Start the service:
-
-```bash
-docker compose pull
-docker compose up -d
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-Open `http://<host>:18980/`. The default Compose file exposes only port `18980`; no VNC, audio, or debugging port is published separately.
+The default installation directory is `C:\Tools\AutoSurf`. The installer creates:
 
-The image is amd64-only and installs Google Chrome stable, Xvfb, noVNC, x11vnc, PulseAudio, and the Python runtime. Persistent state is stored under the host's `./app` directory:
+- `C:\Tools\AutoSurf\program`: program checkout and Python environment
+- `C:\Tools\AutoSurf\data`: database, logs, backups, and screenshots
+- `C:\Tools\AutoSurf\runtime\chrome`: repository-pinned independent Chrome runtime
+- `C:\Tools\AutoSurf\browser\profiles`: persistent Chrome profile and website logins
+- `C:\Tools\AutoSurf\.env`: local service configuration
 
-- `./app/program`: checked-out AutoSurf source and its Linux virtual environment
-- `./app/data`: SQLite database, settings, logs, and screenshots
-- `./app/browser`: persistent Google Chrome profile, including Google/website logins
+It also creates Startup and Desktop shortcuts. AutoSurf starts after Windows login and listens only at [http://127.0.0.1:18980/](http://127.0.0.1:18980/).
 
-Do not run `app/program/.venv` directly on Windows; it belongs to Linux inside the container.
+To choose the initial management password:
 
-## Browser login and remote desktop
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Password "replace-with-a-strong-password"
+```
 
-Open **浏览器控制** in the management page. The Chrome process stays open and uses one persistent profile. Log in to Google and sites directly in this browser; later PT and periodic tasks operate in that same environment.
+When no password is supplied, the installer generates one and prints it once.
 
-The toolbar supports 1280 x 720, 1365 x 768, 1600 x 900, and 1920 x 1080. Changing resolution restarts Chrome while preserving its profile. Fullscreen scales the remote desktop but does not change the configured virtual resolution.
+## Browser
 
-### Audio
+Open **浏览器控制** and choose **打开浏览器**. AutoSurf launches or restores a separate Windows Chrome window; the management webpage does not embed or relay its picture.
 
-Choose the **音** button in the remote Chrome toolbar to start sound. Audio is disabled by default and stops when the button is turned off or the browser-control page is left.
-
-Chrome writes audio to an internal PulseAudio sink. AutoSurf reads its monitor source as 48 kHz stereo PCM and sends it through an authenticated, same-origin WebSocket at `/browser-control/audio`. This uses the existing management port.
-
-Audio requires the updated Docker image because PulseAudio is an operating-system package. An in-app program upgrade cannot add that package to an older container; pull and recreate the container once for this release.
+The browser executable is an official, version-pinned Chrome for Testing build installed under `C:\Tools\AutoSurf\runtime\chrome`. It is separate from the system browser and does not auto-update. Browser sign-in state is stored under `C:\Tools\AutoSurf\browser\profiles` and is reused by all automated tasks. It uses the normal Windows graphics driver, extensions, audio, and network environment.
 
 ## PT sign-in
 
-Open **PT 站点 > 站点签到**. Candidates come from the built-in PT site catalog and can be added without selecting credentials. Tasks start at 09:00 Asia/Taipei, with the configured random delay and retry policy.
+Open **PT 站点 > 站点签到**. Tasks start at 09:00 Asia/Taipei with the configured random delay and retry policy. At execution time AutoSurf connects to the persistent Chrome window and uses its current cookies and Web Storage.
 
-At execution time AutoSurf opens the site in the persistent Chrome profile and reads the current browser cookies and Web Storage. Rousi reads its token from Chrome localStorage. M-Team has no daily sign-in action and is handled as a profile-refresh-only site using its current Chrome login.
-
-The history and statistics pages are populated from execution results. A site with no sign-in entry can still refresh profile/statistical data when its adapter supports that action.
+M-Team has no daily sign-in action and is handled as a profile-refresh-only site. Sites without a sign-in entry can still refresh profile and statistical data when their adapter supports it.
 
 ## Periodic tasks
 
-Open **周期签到** for ordinary sites. Built-in candidates are independent of PT candidates. NodeSeek runs its attendance request inside the persistent browser with `credentials: include`, so it uses the real Chrome session rather than a copied cookie.
+Open **周期签到** for ordinary sites. Built-in candidates are independent of PT candidates. Each task has its own interval, timeout, random delay, retry interval, and retry count. The execution-history tab records pending, running, retrying, completed, blocked, and failed runs.
 
-Each task has its own interval, timeout, random delay, retry interval, and retry count. The execution-history tab shows pending, running, retrying, completed, blocked, and failed runs.
+## Backup
 
-## Site settings
+**系统设置 > 站点设置** provides task backup and restore. The backup ZIP contains task configuration only. Back up `C:\Tools\AutoSurf\browser` separately when browser login state must also be protected.
 
-**系统设置 > 站点设置** includes:
+## Upgrade
 
-- LAN-only access, enabled by default
-- One-click task backup
-- One-click task restore
+**系统设置 > 系统升级** updates the program checkout and its repository-pinned Python dependencies only after the user starts an upgrade. If that release pins a different browser build, the Windows supervisor also replaces the independent browser runtime with that exact version. It does not follow the latest Chrome release automatically, and Windows is never updated by AutoSurf.
 
-LAN-only mode allows loopback, private LAN ranges, and `198.18.0.0/15`. The task backup ZIP contains automation configuration only. It does not contain the Chrome profile or login data. Back up the host's `./app/browser` directory separately when browser login persistence must also be protected.
-
-## Online upgrade
-
-Open **系统设置 > 系统升级** to update the program checkout, Python dependencies, and browser automation runtime. The Docker base system remains unchanged.
-
-Use a Docker image update instead when the release changes operating-system packages or bundled Chrome:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-The default Compose configuration grants Chrome access to Intel DRM render devices
-using host groups `44` (video) and `110` (render). Set `AUTOSURF_VIDEO_GID` or
-`AUTOSURF_RENDER_GID` before `docker compose up` when the host uses different IDs.
-Chrome automatically uses ANGLE/Vulkan hardware WebGL when a render node and Vulkan
-driver are available, and falls back to SwiftShader on hosts without a GPU.
-
-The command-line helper remains available:
-
-```bash
-docker exec autosurf autosurf-upgrade
-```
-
-Only one upgrade can run at a time. Runtime data and the Chrome profile remain outside the program checkout.
-
-## API and access control
-
-The dedicated `/login` page creates a signed HttpOnly session cookie. The management UI, `/docs`, `/openapi.json`, and `/api/v1` require that session or HTTP Basic authentication.
-
-Remote desktop and audio WebSockets enforce the same management session, LAN policy, and same-origin checks. The service should still be placed behind HTTPS when accessed beyond a trusted LAN.
-
-## Local development
-
-AutoSurf requires Python 3.13.
+The command-line upgrade remains available:
 
 ```powershell
-python -m venv .venv
+C:\Tools\AutoSurf\program\.venv\Scripts\python.exe -m autosurf.main upgrade --repository C:\Tools\AutoSurf\program
+```
+
+## Stop and start
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Tools\AutoSurf\program\scripts\stop.ps1
+powershell -ExecutionPolicy Bypass -File C:\Tools\AutoSurf\program\scripts\run.ps1
+```
+
+## Development
+
+```powershell
+py -3.13 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .[dev]
 .venv\Scripts\python.exe -m pytest
 ```
 
-Run locally:
-
-```powershell
-$env:AUTOSURF_SECRET_KEY = "replace-with-at-least-32-random-characters"
-$env:AUTOSURF_USERNAME = "admin"
-$env:AUTOSURF_PASSWORD = "replace-with-a-strong-password"
-.venv\Scripts\autosurf.exe serve
-```
-
-The full remote desktop and audio path are intended for the Docker image because they require Xvfb, noVNC, x11vnc, Google Chrome, and PulseAudio.
-
-## Database
-
-Alembic migrations run automatically at application startup. The browser-only session migration removes legacy credential and CookieCloud tables and removes credential snapshot columns from tasks and executions. This migration is intentionally one-way; make a SQLite backup before upgrading an older installation.
+Development configuration must bind `AUTOSURF_HOST=127.0.0.1`. The browser window and automation worker share the same persistent Chrome process but use separate pages for task execution.

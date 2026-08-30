@@ -433,38 +433,21 @@
         <section class="panel browser-control-panel" id="browser-control-surface" aria-labelledby="browser-control-title">
           <div class="panel-heading browser-control-heading">
             <div>
-              <h2 id="browser-control-title">Chrome 远程桌面</h2>
+              <h2 id="browser-control-title">Chrome 浏览器</h2>
               <p id="browser-control-page-title">正在连接常驻浏览器</p>
             </div>
             <div class="browser-control-actions">
-              <select id="browser-resolution" aria-label="远程桌面分辨率" title="远程桌面分辨率">
+              <button class="button secondary" id="browser-open-window" type="button">打开浏览器</button>
+              <select id="browser-resolution" aria-label="浏览器窗口尺寸" title="浏览器窗口尺寸">
                 <option value="1280x720">1280 x 720</option>
                 <option value="1365x768" selected>1365 x 768</option>
                 <option value="1600x900">1600 x 900</option>
                 <option value="1920x1080">1920 x 1080</option>
               </select>
-              <button class="icon-button" id="browser-audio" type="button" title="开启声音"
-                      aria-label="开启声音" aria-pressed="false" disabled>
-                <span aria-hidden="true">音</span>
-              </button>
               <span class="status-badge running" id="browser-control-state">连接中</span>
-              <button class="icon-button" id="browser-fullscreen" type="button" title="全屏"
-                      aria-label="全屏" aria-pressed="false">
-                <span aria-hidden="true">⛶</span>
-              </button>
             </div>
           </div>
           <div class="browser-control-error" id="browser-control-error" role="alert" hidden></div>
-          <div class="browser-remote-shell" id="browser-remote-shell">
-            <iframe id="browser-remote-frame" title="Chrome 远程桌面"
-                    allow="clipboard-read; clipboard-write; fullscreen"></iframe>
-            <div class="browser-remote-placeholder" id="browser-remote-placeholder">
-              <strong>正在连接远程桌面</strong>
-            </div>
-            <div class="browser-remote-cover" id="browser-remote-cover" hidden>
-              <strong>自动任务正在操作浏览器</strong>
-            </div>
-          </div>
         </section>
       </section>
 
@@ -507,7 +490,7 @@
           <div class="upgrade-heading">
             <div>
               <h2 id="upgrade-title">系统升级</h2>
-              <p>升级程序、Python 依赖与浏览器运行时</p>
+              <p>升级程序与 Python 依赖</p>
             </div>
           </div>
           <div class="upgrade-components">
@@ -532,7 +515,7 @@
               <strong id="upgrade-state" aria-live="polite">检查中</strong>
             </div>
           </div>
-          <p class="upgrade-boundary">Docker 基础系统库保持不变。</p>
+          <p class="upgrade-boundary">独立 Chrome 使用仓库锁定版本，不会自行跟随最新版更新。</p>
           <div class="upgrade-actions">
             <button class="button primary" id="upgrade-start-button" type="button" disabled>开始升级</button>
           </div>

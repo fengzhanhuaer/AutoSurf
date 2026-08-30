@@ -9,22 +9,21 @@ description = "A small, durable web automation platform"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "alembic>=1.14,<2",
-  "aiohttp>=3.11,<4",
-  "ddddocr>=1.6.1,<2",
-  "fastapi>=0.115,<1",
-  "httpx>=0.28,<1",
-  "packaging>=24,<26",
-  "pydantic-settings>=2.7,<3",
+  "alembic==1.19.1",
+  "ddddocr==1.6.1",
+  "fastapi==0.141.1",
+  "httpx==0.28.1",
+  "packaging==25.0",
+  "pydantic-settings==2.15.0",
   "playwright==1.61.0",
-  "sqlalchemy>=2.0,<3",
-  "uvicorn[standard]>=0.34,<1",
+  "sqlalchemy==2.0.52",
+  "uvicorn[standard]==0.52.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.3,<9",
-  "pytest-asyncio>=0.25,<1",
+  "pytest==8.4.2",
+  "pytest-asyncio==0.26.0",
 ]
 
 [project.scripts]

@@ -29,7 +29,10 @@ from autosurf.domain.models import ExecutionStatus, RunOutcome, utc_now
 from autosurf.domain.scheduling import SIGNIN_START_TIME, next_signin_run_at
 from autosurf.application.services import align_all_signin_schedules
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
-from autosurf.automations.browser_session import persistent_browser_mode
+from autosurf.automations.browser_session import (
+    _standalone_chrome_executable,
+    persistent_browser_mode,
+)
 from autosurf.browser_control import BrowserControlBusy
 from autosurf.infrastructure.database import (
     AutomationRecord,
@@ -234,6 +237,11 @@ async def browser_control_status(request: Request) -> dict[str, Any]:
     return await request.app.state.browser_control.status()
 
 
+@router.post("/browser-control/open")
+async def open_browser_control_window(request: Request) -> dict[str, Any]:
+    return await request.app.state.browser_control.open_window()
+
+
 @router.patch("/browser-control/resolution")
 async def set_browser_control_resolution(
     data: BrowserResolutionInput,
@@ -255,9 +263,24 @@ def _program_repository() -> Path:
 def _upgrade_command() -> list[str] | None:
     configured = os.environ.get("AUTOSURF_UPGRADE_SCRIPT")
     if configured and Path(configured).is_file():
+        if os.name == "nt" and configured.lower().endswith(".ps1"):
+            return [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", configured,
+            ]
         return ["/bin/sh", configured]
     executable = shutil.which("autosurf-upgrade")
     return [executable] if executable else None
+
+
+def _upgrade_request_file() -> Path | None:
+    configured = os.environ.get("AUTOSURF_UPGRADE_REQUEST_FILE", "").strip()
+    return Path(configured) if configured else None
+
+
+def _upgrade_lock_file() -> Path:
+    configured = os.environ.get("AUTOSURF_UPGRADE_LOCK_FILE", "").strip()
+    return Path(configured) if configured else Path("/tmp/autosurf-upgrade-in-progress")
 
 
 def _program_revision(repository: Path) -> str | None:
@@ -295,7 +318,12 @@ def _remote_revision(repository: Path, branch: str) -> tuple[str | None, str | N
 def _upgrade_running(request: Request) -> bool:
     process = getattr(request.app.state, "upgrade_process", None)
     process_running = process is not None and process.poll() is None
-    return process_running or Path("/tmp/autosurf-upgrade-in-progress").exists()
+    request_file = _upgrade_request_file()
+    return (
+        process_running
+        or _upgrade_lock_file().exists()
+        or bool(request_file is not None and request_file.exists())
+    )
 
 
 def _last_upgrade(request: Request) -> dict[str, str] | None:
@@ -336,6 +364,11 @@ def _settle_stale_upgrade(request: Request, last: dict[str, str] | None, *, runn
 def _browser_runtime() -> dict[str, Any]:
     browser_root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""))
     configured_executable = os.environ.get("AUTOSURF_BROWSER_EXECUTABLE_PATH", "").strip()
+    if not configured_executable and (
+        os.name == "nt" or os.environ.get("AUTOSURF_BROWSER_CHANNEL", "").strip() == "chrome"
+    ):
+        with suppress(RuntimeError):
+            configured_executable = _standalone_chrome_executable()
     try:
         playwright_version = version("playwright")
     except PackageNotFoundError:
@@ -356,9 +389,13 @@ def _browser_runtime() -> dict[str, Any]:
     if configured_executable:
         executable = Path(configured_executable)
         installed = executable.is_file()
-        browser_name = "Google Chrome"
-        browser_version = None
-        if installed:
+        browser_name = (
+            "Chrome for Testing"
+            if "runtime" in {part.casefold() for part in executable.parts}
+            else "Google Chrome"
+        )
+        browser_version = _windows_file_version(executable) if os.name == "nt" else None
+        if installed and not browser_version:
             with suppress(OSError, subprocess.SubprocessError):
                 output = subprocess.run(
                     [str(executable), "--version"],
@@ -380,11 +417,61 @@ def _browser_runtime() -> dict[str, Any]:
         "browser_name": browser_name,
         "browser_version": browser_version,
         "playwright_version": playwright_version,
-        "persistent": bool(os.environ.get("PLAYWRIGHT_BROWSERS_PATH")),
+        "persistent": bool(
+            os.environ.get("AUTOSURF_BROWSER_PROFILE_DIR")
+            or os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        ),
         "session_mode": persistent_browser_mode(),
         "chromium_revision": chromium_revision,
         "chromium_version": chromium_version,
     }
+
+
+def _windows_file_version(path: Path) -> str | None:
+    if os.name != "nt" or not path.is_file():
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FixedFileInfo(ctypes.Structure):
+            _fields_ = [
+                ("signature", wintypes.DWORD),
+                ("struct_version", wintypes.DWORD),
+                ("file_version_ms", wintypes.DWORD),
+                ("file_version_ls", wintypes.DWORD),
+                ("product_version_ms", wintypes.DWORD),
+                ("product_version_ls", wintypes.DWORD),
+                ("file_flags_mask", wintypes.DWORD),
+                ("file_flags", wintypes.DWORD),
+                ("file_os", wintypes.DWORD),
+                ("file_type", wintypes.DWORD),
+                ("file_subtype", wintypes.DWORD),
+                ("file_date_ms", wintypes.DWORD),
+                ("file_date_ls", wintypes.DWORD),
+            ]
+
+        version_api = ctypes.windll.version
+        size = version_api.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version_api.GetFileVersionInfoW(str(path), 0, size, buffer):
+            return None
+        pointer = ctypes.c_void_p()
+        length = wintypes.UINT()
+        if not version_api.VerQueryValueW(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)):
+            return None
+        info = ctypes.cast(pointer, ctypes.POINTER(FixedFileInfo)).contents
+        values = (
+            info.file_version_ms >> 16,
+            info.file_version_ms & 0xFFFF,
+            info.file_version_ls >> 16,
+            info.file_version_ls & 0xFFFF,
+        )
+        return ".".join(str(value) for value in values)
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 def _python_dependencies(repository: Path) -> dict[str, Any]:
@@ -456,9 +543,10 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
     remote_revision, check_error = (None, None) if running else _remote_revision(repository, branch)
     browser = _browser_runtime()
     python_dependencies = _python_dependencies(repository)
-    environment_available = command is not None and repository.joinpath(".git").is_dir()
+    environment_available = (
+        command is not None or _upgrade_request_file() is not None
+    ) and repository.joinpath(".git").is_dir()
     update_available = bool(local_revision and remote_revision and local_revision != remote_revision)
-    browser_missing = not browser["installed"]
     dependency_repair_needed = python_dependencies["checked"] and not python_dependencies["satisfied"]
     last_upgrade = _settle_stale_upgrade(
         request, _last_upgrade(request), running=running,
@@ -468,7 +556,7 @@ def _upgrade_status(request: Request) -> dict[str, Any]:
     return {
         "available": environment_available,
         "can_upgrade": environment_available and check_error is None and (
-            update_available or browser_missing or dependency_repair_needed
+            update_available or dependency_repair_needed
         ),
         "running": running,
         "revision": local_revision,
@@ -506,8 +594,9 @@ def update_system_access_settings(
 def start_upgrade(request: Request) -> dict[str, Any]:
     repository = _program_repository()
     command = _upgrade_command()
+    request_file = _upgrade_request_file()
     with request.app.state.upgrade_guard:
-        if command is None or not repository.joinpath(".git").is_dir():
+        if (command is None and request_file is None) or not repository.joinpath(".git").is_dir():
             raise HTTPException(status_code=409, detail="当前运行环境不支持网页升级")
         if _upgrade_running(request):
             raise HTTPException(status_code=409, detail="升级正在进行")
@@ -516,6 +605,14 @@ def start_upgrade(request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=503, detail=current["version_check_error"])
         if not current["can_upgrade"]:
             raise HTTPException(status_code=409, detail="当前已是最新版本")
+
+        if request_file is not None:
+            request_file.parent.mkdir(parents=True, exist_ok=True)
+            request_file.write_text(
+                json.dumps({"requested_at": utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")}) + "\n",
+                encoding="utf-8",
+            )
+            return {**current, "running": True, "accepted": True}
 
         if os.name != "nt":
             command = ["/bin/sh", "-c", 'sleep 1; exec "$@"', "autosurf-upgrade", *command]

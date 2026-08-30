@@ -150,7 +150,8 @@ def browser_profile_path() -> Path:
 def persistent_browser_mode() -> str:
     configured = os.environ.get("AUTOSURF_BROWSER_HEADLESS", "").strip().casefold()
     force_headless = configured in {"1", "true", "yes", "on"}
-    return "persistent_headless" if force_headless or not shutil.which("Xvfb") else "persistent_headful"
+    native_headful = os.name == "nt"
+    return "persistent_headless" if force_headless or not (native_headful or shutil.which("Xvfb")) else "persistent_headful"
 
 
 @asynccontextmanager
@@ -206,7 +207,7 @@ async def launch_persistent_browser(
     browser_context = None
     try:
         launch_env = dict(os.environ)
-        if mode == "persistent_headful":
+        if mode == "persistent_headful" and os.name != "nt":
             display = await _start_virtual_display(*display_size)
             launch_env["DISPLAY"] = display.name
         args = ["--disable-dev-shm-usage", *_chrome_graphics_args()]
@@ -270,26 +271,29 @@ async def launch_standalone_browser(
     await _remove_stale_chrome_singletons(profile_path)
     mode = persistent_browser_mode()
     if remote_desktop and mode != "persistent_headful":
-        raise RuntimeError("完整浏览器控制需要 Docker 中的 Xvfb")
+        raise RuntimeError("独立浏览器窗口需要有头模式")
 
     display = None
     browser_process = None
     try:
         launch_env = dict(os.environ)
-        if mode == "persistent_headful":
+        if mode == "persistent_headful" and os.name != "nt":
             display = await _start_virtual_display(*display_size)
             launch_env["DISPLAY"] = display.name
         executable = _standalone_chrome_executable()
+        platform_args = [] if os.name == "nt" else [
+            "--disable-dev-shm-usage",
+            "--password-store=basic",
+            "--disable-setuid-sandbox",
+        ]
         args = [
             executable,
             f"--user-data-dir={profile_path}",
             "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={urlparse(STANDALONE_CDP_ENDPOINT).port}",
-            "--disable-dev-shm-usage",
             "--no-first-run",
             "--no-default-browser-check",
-            "--password-store=basic",
-            "--disable-setuid-sandbox",
+            *platform_args,
             f"--lang={str(run_context.config.get('locale', 'zh-CN'))}",
             *_chrome_graphics_args(),
         ]
@@ -648,7 +652,15 @@ async def _stop_virtual_display(display: VirtualDisplay) -> None:
 def _standalone_chrome_executable() -> str:
     configured = os.environ.get("AUTOSURF_BROWSER_EXECUTABLE_PATH", "").strip()
     if configured:
-        return configured
+        if Path(configured).is_file():
+            return configured
+        raise RuntimeError(f"AutoSurf browser runtime was not found: {configured}")
+    if os.name == "nt":
+        managed = Path(os.environ.get("AUTOSURF_INSTALL_DIR", r"C:\Tools\AutoSurf"))
+        candidate = managed / "runtime" / "chrome" / "chrome.exe"
+        if candidate.is_file():
+            return str(candidate)
+        raise RuntimeError(f"AutoSurf browser runtime was not found: {candidate}")
     executable = shutil.which("google-chrome-stable") or shutil.which("google-chrome")
     if executable:
         return executable
@@ -660,6 +672,9 @@ def _chrome_graphics_args() -> list[str]:
     configured = os.environ.get("AUTOSURF_BROWSER_GRAPHICS", "auto").strip().casefold()
     if configured not in {"auto", "hardware", "software"}:
         configured = "auto"
+
+    if os.name == "nt" and configured != "software":
+        return [] if configured == "auto" else ["--enable-gpu", "--ignore-gpu-blocklist"]
 
     render_nodes = sorted(Path("/dev/dri").glob("renderD*"))
     has_render_node = any(os.access(node, os.R_OK | os.W_OK) for node in render_nodes)

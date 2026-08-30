@@ -1,7 +1,0 @@
-services:
-  autosurf:
-    build:
-      context: .
-    image: autosurf:local
-    pull_policy: never
-

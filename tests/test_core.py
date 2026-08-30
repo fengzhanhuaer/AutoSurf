@@ -473,6 +473,36 @@ async def test_authenticated_web_upgrade_is_fixed_and_single_flight(settings, tm
 
 
 @pytest.mark.asyncio
+async def test_windows_supervisor_receives_upgrade_request(settings, tmp_path, monkeypatch):
+    repository = tmp_path / "program"
+    repository.joinpath(".git").mkdir(parents=True)
+    request_file = tmp_path / "data" / "upgrade-request.json"
+    monkeypatch.setenv("AUTOSURF_UPGRADE_REQUEST_FILE", str(request_file))
+    monkeypatch.setenv("AUTOSURF_UPGRADE_LOCK_FILE", str(tmp_path / "data" / "upgrade.lock"))
+    monkeypatch.setattr("autosurf.api._program_repository", lambda: repository)
+    monkeypatch.setattr("autosurf.api._upgrade_command", lambda: None)
+    monkeypatch.setattr("autosurf.api._program_revision", lambda _repository: "a" * 40)
+    monkeypatch.setattr("autosurf.api._remote_revision", lambda _repository, _branch: ("b" * 40, None))
+    monkeypatch.setattr("autosurf.api._browser_runtime", lambda: {"installed": True})
+    monkeypatch.setattr("autosurf.api._python_dependencies", lambda _repository: {
+        "checked": True, "satisfied": True, "total": 9,
+        "issue_count": 0, "issues": [], "error": None,
+    })
+
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        started = await client.post("/api/v1/system/upgrade", auth=auth)
+        duplicate = await client.post("/api/v1/system/upgrade", auth=auth)
+
+    assert started.status_code == 202
+    assert duplicate.status_code == 409
+    assert request_file.is_file()
+    assert "requested_at" in json.loads(request_file.read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
 async def test_web_upgrade_settles_stale_running_status(settings, tmp_path, monkeypatch):
     repository = tmp_path / "program"
     repository.joinpath(".git").mkdir(parents=True)

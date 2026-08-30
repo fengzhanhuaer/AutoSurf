@@ -9,16 +9,14 @@ import sys
 import threading
 
 import uvicorn
-from fastapi import Depends, FastAPI, Request, WebSocket
+from fastapi import Depends, FastAPI, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from autosurf import __version__
-from autosurf.access import LanAccessMiddleware, LanAccessPolicy, is_lan_address
+from autosurf.access import LanAccessMiddleware, LanAccessPolicy
 from autosurf.api import (
-    SESSION_COOKIE,
     auth_router,
-    authenticated_session_username,
     require_login,
     router,
 )
@@ -34,7 +32,6 @@ from autosurf.browser_control import (
     BrowserControlService,
     BrowserDisplaySettings,
     CdpAutomationProvider,
-    REMOTE_DESKTOP_PREFIX,
 )
 from autosurf.automations.browser_session import register_shared_browser_provider
 from autosurf.automations.http_signin import HttpSignInHandler
@@ -148,61 +145,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     management_login = [Depends(require_login)]
 
-    @app.api_route(
-        f"{REMOTE_DESKTOP_PREFIX}/",
-        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        dependencies=management_login,
-        include_in_schema=False,
-    )
-    @app.api_route(
-        f"{REMOTE_DESKTOP_PREFIX}/{{path:path}}",
-        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        dependencies=management_login,
-        include_in_schema=False,
-    )
-    async def browser_remote_http(request: Request, path: str = ""):
-        return await browser_control.proxy_http(request, path)
-
-    @app.websocket(f"{REMOTE_DESKTOP_PREFIX}/websockify")
-    async def browser_remote_websocket(websocket: WebSocket) -> None:
-        client_host = websocket.client.host if websocket.client else None
-        if lan_access.lan_only and not is_lan_address(client_host):
-            await websocket.close(code=4403, reason="LAN access required")
-            return
-        username = authenticated_session_username(
-            settings,
-            websocket.cookies.get(SESSION_COOKIE),
-        )
-        if not username:
-            await websocket.close(code=4401, reason="login required")
-            return
-        origin = websocket.headers.get("origin")
-        host = websocket.headers.get("host")
-        if origin and host and origin.split("://", 1)[-1].rstrip("/") != host:
-            await websocket.close(code=4403, reason="same origin required")
-            return
-        await browser_control.proxy_websocket(websocket)
-
-    @app.websocket("/browser-control/audio")
-    async def browser_audio_websocket(websocket: WebSocket) -> None:
-        client_host = websocket.client.host if websocket.client else None
-        if lan_access.lan_only and not is_lan_address(client_host):
-            await websocket.close(code=4403, reason="LAN access required")
-            return
-        username = authenticated_session_username(
-            settings,
-            websocket.cookies.get(SESSION_COOKIE),
-        )
-        if not username:
-            await websocket.close(code=4401, reason="login required")
-            return
-        origin = websocket.headers.get("origin")
-        host = websocket.headers.get("host")
-        if origin and host and origin.split("://", 1)[-1].rstrip("/") != host:
-            await websocket.close(code=4403, reason="same origin required")
-            return
-        await browser_control.stream_audio(websocket)
-
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse(url="/app")
@@ -218,6 +160,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        return Response(status_code=204)
 
     return app
 

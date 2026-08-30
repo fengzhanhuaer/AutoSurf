@@ -149,10 +149,10 @@ async def test_shared_browser_profile_removes_only_stale_chrome_singletons(tmp_p
     assert profile.joinpath("Profile 1", "Sync Data").read_text(encoding="utf-8") == "kept"
 
 
-def test_browser_mode_falls_back_to_persistent_headless_without_xvfb(monkeypatch):
+def test_browser_mode_uses_a_native_headful_window_on_windows(monkeypatch):
     monkeypatch.delenv("AUTOSURF_BROWSER_HEADLESS", raising=False)
     monkeypatch.setattr("autosurf.automations.browser_session.shutil.which", lambda _name: None)
-    assert persistent_browser_mode() == "persistent_headless"
+    assert persistent_browser_mode() == "persistent_headful"
 
     monkeypatch.setenv("AUTOSURF_BROWSER_HEADLESS", "true")
     monkeypatch.setattr("autosurf.automations.browser_session.shutil.which", lambda _name: "Xvfb")
@@ -246,19 +246,17 @@ async def test_standalone_chrome_is_not_launched_with_playwright_automation_flag
     assert "--window-size=1920,1080" in args
     assert not any(value.startswith("--profile-directory") for value in args)
     assert "--no-sandbox" not in args
-    assert "--disable-setuid-sandbox" in args
+    assert "--disable-setuid-sandbox" not in args
     assert "--enable-automation" not in args
     assert "--remote-debugging-pipe" not in args
-    assert "--use-gl=angle" in args
-    assert "--use-angle=swiftshader-webgl" in args
-    assert "--enable-unsafe-swiftshader" in args
-    assert kwargs["env"]["DISPLAY"] == ":99"
+    assert "--use-gl=angle" not in args
+    assert "DISPLAY" not in kwargs["env"]
     assert kwargs["start_new_session"] is True
     assert runtime.context is None
     assert runtime.cdp_endpoint == "http://127.0.0.1:9222"
 
 
-def test_chrome_graphics_uses_vulkan_for_accessible_render_node(tmp_path, monkeypatch):
+def test_windows_auto_graphics_uses_native_chrome_defaults(tmp_path, monkeypatch):
     from autosurf.automations import browser_session
 
     dri = tmp_path / "dri"
@@ -276,10 +274,7 @@ def test_chrome_graphics_uses_vulkan_for_accessible_render_node(tmp_path, monkey
 
     args = browser_session._chrome_graphics_args()
 
-    assert "--enable-gpu" in args
-    assert "--use-angle=vulkan" in args
-    assert "--disable-vulkan-surface" in args
-    assert "--use-angle=swiftshader-webgl" not in args
+    assert args == []
 
 
 def test_chrome_graphics_can_force_software_fallback(monkeypatch):
