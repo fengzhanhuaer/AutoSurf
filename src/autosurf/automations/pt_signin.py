@@ -160,7 +160,10 @@ class RousiAdapter:
             await button.wait_for(state="visible", timeout=5_000)
         if not await button.is_visible():
             return RunResult(RunOutcome.FAILED, "Rousi 首页没有找到签到按钮", {"url": page.url})
-        await button.click()
+        try:
+            await button.click(timeout=5_000)
+        except Exception:
+            await button.click(force=True, timeout=5_000)
         after = {"status": 0, "body": None}
         for _ in range(10):
             await page.wait_for_timeout(500)

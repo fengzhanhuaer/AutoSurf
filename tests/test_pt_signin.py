@@ -579,13 +579,17 @@ async def test_rousi_adapter_uses_current_cookie_session_api_and_browser_button(
         async def is_visible(self):
             return True
 
-        async def click(self):
+        async def click(self, **kwargs):
+            self.page.clicks.append(kwargs)
+            if not kwargs.get("force"):
+                raise RuntimeError("button is covered by a transient overlay")
             self.page.claimed = True
 
     class Page:
         url = "https://rousi.pro/"
         claimed = False
         waits = 0
+        clicks = []
 
         async def evaluate(self, _script, path):
             if path == "/api/v1/session":
@@ -613,6 +617,7 @@ async def test_rousi_adapter_uses_current_cookie_session_api_and_browser_button(
     assert result.message == "Rousi 签到成功"
     assert result.details["site_history"] == [{"date": "2026-08-30", "reward": "10"}]
     assert page.waits == 1
+    assert page.clicks == [{"timeout": 5_000}, {"force": True, "timeout": 5_000}]
 
 
 @pytest.mark.asyncio
