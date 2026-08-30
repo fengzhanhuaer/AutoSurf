@@ -21,6 +21,7 @@ from autosurf.periodic_templates import apply_periodic_template
 
 
 PT_PROFILE_REFRESH_DEFAULT_VERSION = 1
+PT_CATALOG_CORRECTION_VERSION = 1
 
 
 class AutomationService:
@@ -69,7 +70,7 @@ def reconcile_signin_schedules(sessions: sessionmaker[Session]) -> int:
 
 
 def reconcile_pt_profile_refresh_defaults(sessions: sessionmaker[Session]) -> int:
-    """Apply the refresh-by-default policy once without overriding later user choices."""
+    """Apply one-time PT defaults without overriding later user choices."""
     changed = 0
     with sessions.begin() as session:
         automations = session.scalars(select(AutomationRecord).where(
@@ -80,13 +81,36 @@ def reconcile_pt_profile_refresh_defaults(sessions: sessionmaker[Session]) -> in
                 config = json.loads(automation.config_json)
             except (TypeError, ValueError):
                 continue
-            if config.get("profile_refresh_default_version") == PT_PROFILE_REFRESH_DEFAULT_VERSION:
+            refresh_current = (
+                config.get("profile_refresh_default_version") == PT_PROFILE_REFRESH_DEFAULT_VERSION
+            )
+            catalog_current = (
+                config.get("catalog_correction_version") == PT_CATALOG_CORRECTION_VERSION
+            )
+            if refresh_current and catalog_current:
                 continue
-            config.update({
-                "profile_refresh_enabled": True,
-                "profile_refresh_supported": True,
-                "profile_refresh_default_version": PT_PROFILE_REFRESH_DEFAULT_VERSION,
-            })
+            if not refresh_current:
+                config.update({
+                    "profile_refresh_enabled": True,
+                    "profile_refresh_supported": True,
+                    "profile_refresh_default_version": PT_PROFILE_REFRESH_DEFAULT_VERSION,
+                })
+            if not catalog_current:
+                if config.get("url") == "https://www.hdfans.org/attendance.php":
+                    config["url"] = "https://hdfans.org/attendance.php"
+                    config["site_domain"] = "hdfans.org"
+                elif config.get("url") == "https://springsunday.net/attendance.php":
+                    config.update({
+                        "url": "https://springsunday.net/",
+                        "sign_in_enabled": False,
+                        "sign_in_supported": False,
+                    })
+                if (
+                    config.get("site_domain") == "jpopsuki.eu"
+                    and not config.get("profile_url")
+                ):
+                    config["profile_url"] = "https://jpopsuki.eu/bonus.php"
+                config["catalog_correction_version"] = PT_CATALOG_CORRECTION_VERSION
             automation.config_json = json.dumps(config, ensure_ascii=False)
             changed += 1
     return changed

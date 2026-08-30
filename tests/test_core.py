@@ -102,6 +102,42 @@ def test_reconcile_pt_profile_refresh_defaults_runs_once(settings):
         assert config["profile_refresh_enabled"] is False
 
 
+def test_reconcile_pt_catalog_corrections_updates_known_legacy_urls(settings):
+    app = create_app(settings)
+    sites = {
+        "hdfans": app.state.automations.create(
+            "HDFans", "pt_signin", 86400, {
+                "url": "https://www.hdfans.org/attendance.php", "site_domain": "www.hdfans.org",
+                "profile_refresh_default_version": 1,
+            },
+        ),
+        "ssd": app.state.automations.create(
+            "SSD", "pt_signin", 86400, {
+                "url": "https://springsunday.net/attendance.php",
+                "site_domain": "springsunday.net", "profile_refresh_default_version": 1,
+            },
+        ),
+        "jpopsuki": app.state.automations.create(
+            "JPopsuki", "pt_signin", 86400, {
+                "url": "https://jpopsuki.eu/", "site_domain": "jpopsuki.eu",
+                "profile_refresh_default_version": 1,
+            },
+        ),
+    }
+
+    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 3
+
+    with app.state.sessions() as session:
+        configs = {
+            key: json.loads(session.get(AutomationRecord, record.id).config_json)
+            for key, record in sites.items()
+        }
+    assert configs["hdfans"]["url"] == "https://hdfans.org/attendance.php"
+    assert configs["ssd"]["url"] == "https://springsunday.net/"
+    assert configs["ssd"]["sign_in_supported"] is False
+    assert configs["jpopsuki"]["profile_url"] == "https://jpopsuki.eu/bonus.php"
+
+
 @pytest.mark.asyncio
 async def test_web_api_aligns_all_signin_schedules_without_deleting_history(settings):
     app = create_app(settings)
