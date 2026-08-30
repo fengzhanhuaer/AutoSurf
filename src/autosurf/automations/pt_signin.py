@@ -130,22 +130,20 @@ class RousiAdapter:
         return hostname == "rousi.pro" or hostname.endswith(".rousi.pro")
 
     async def sign_in(self, page: Any, context: RunContext) -> RunResult:
-        token = context.cookies.get("token", "")
-        if not token:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Chrome 中未找到 Rousi Token")
-
-        me = await _rousi_api(page, "/api/me", token)
-        if me["status"] in {401, 403}:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 已失效", {"url": page.url})
-        if me["status"] < 200 or me["status"] >= 300:
+        session = await _rousi_v1_api(page, "/api/v1/session")
+        session_body = session.get("body")
+        user = session_body.get("user") if isinstance(session_body, dict) else None
+        if session["status"] in {401, 403} or not isinstance(user, dict):
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi 浏览器登录已失效", {"url": page.url})
+        if session["status"] < 200 or session["status"] >= 300:
             return RunResult(
                 RunOutcome.FAILED, "Rousi 登录状态检查失败",
-                {"url": page.url, "status_code": me["status"]},
+                {"url": page.url, "status_code": session["status"]},
             )
 
-        before = await _rousi_api(page, "/api/points/init", token)
+        before = await _rousi_v1_api(page, "/api/v1/me/attendance")
         if before["status"] in {401, 403}:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 已失效", {"url": page.url})
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi 浏览器登录已失效", {"url": page.url})
         if before["status"] < 200 or before["status"] >= 300:
             return RunResult(
                 RunOutcome.FAILED, "Rousi 签到状态读取失败",
@@ -166,7 +164,7 @@ class RousiAdapter:
         after = {"status": 0, "body": None}
         for _ in range(10):
             await page.wait_for_timeout(500)
-            after = await _rousi_api(page, "/api/points/init", token)
+            after = await _rousi_v1_api(page, "/api/v1/me/attendance")
             if 200 <= after["status"] < 300 and _rousi_attended_today(after["body"]):
                 return RunResult(
                     RunOutcome.SUCCESS, "Rousi 签到成功",
@@ -178,75 +176,81 @@ class RousiAdapter:
         )
 
     async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
-        token = context.cookies.get("token", "")
-        if not token:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Chrome 中未找到 Rousi Token")
-
-        response = await _rousi_api(page, "/api/me", token)
-        if response["status"] in {401, 403}:
-            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi Token 已失效", {"url": page.url})
-        if response["status"] < 200 or response["status"] >= 300:
+        session = await _rousi_v1_api(page, "/api/v1/session")
+        session_body = session.get("body")
+        user = session_body.get("user") if isinstance(session_body, dict) else None
+        if session["status"] in {401, 403} or not isinstance(user, dict):
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi 浏览器登录已失效", {"url": page.url})
+        if session["status"] < 200 or session["status"] >= 300:
             return RunResult(
                 RunOutcome.FAILED, "Rousi 个人信息刷新失败",
-                {"url": page.url, "status_code": response["status"]},
+                {"url": page.url, "status_code": session["status"]},
             )
 
-        body = response.get("body")
-        stats = body.get("stats") if isinstance(body, dict) else None
-        if not isinstance(stats, dict):
+        traffic = await _rousi_v1_api(page, "/api/v1/me/traffic")
+        economy = await _rousi_v1_api(page, "/api/v1/me/economy")
+        if any(item["status"] in {401, 403} for item in (traffic, economy)):
             return RunResult(
-                RunOutcome.FAILED, "Rousi 个人信息接口未返回统计数据",
-                {"url": page.url, "status_code": response["status"]},
+                RunOutcome.AUTH_EXPIRED, "Rousi 浏览器登录已失效", {"url": page.url},
             )
-        activity = body.get("seeding_leeching_data")
-        if not isinstance(activity, dict):
-            activity = {}
+        failed = next(
+            (item for item in (traffic, economy) if item["status"] < 200 or item["status"] >= 300),
+            None,
+        )
+        if failed is not None:
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 个人信息刷新失败",
+                {"url": page.url, "status_code": failed["status"]},
+            )
+
+        traffic_body = traffic.get("body")
+        totals = traffic_body.get("totals") if isinstance(traffic_body, dict) else None
+        totals = totals if isinstance(totals, dict) else {}
+        economy_body = economy.get("body") if isinstance(economy.get("body"), dict) else {}
+        progress = economy_body.get("progress")
+        progress = progress if isinstance(progress, dict) else {}
+        uploaded = totals.get("credited_uploaded_bytes") or totals.get("raw_uploaded_bytes")
+        downloaded = totals.get("charged_downloaded_bytes") or totals.get("raw_downloaded_bytes")
         profile_stats = sanitize_pt_profile_stats({
-            "username": stats.get("username"),
+            "username": user.get("username") or user.get("display_name"),
             "user_level": (
-                stats.get("level") if stats.get("level") is not None else body.get("role")
+                f"Lv. {progress['level']}" if progress.get("level") is not None else None
             ),
-            "uploaded": _format_byte_size(stats.get("uploaded")),
-            "downloaded": _format_byte_size(stats.get("downloaded")),
-            "ratio": stats.get("ratio"),
-            "bonus": stats.get("karma"),
-            "seeding_count": activity.get("seeding_count"),
-            "seeding_size": _format_byte_size(activity.get("seeding_size")),
+            "uploaded": _format_byte_size(uploaded),
+            "downloaded": _format_byte_size(downloaded),
+            "ratio": _ratio_text(uploaded, downloaded),
+            "bonus": economy_body.get("magic_balance"),
         })
         return RunResult(
             RunOutcome.SUCCESS, "Rousi 个人信息刷新成功",
             {
                 "url": page.url,
-                "status_code": response["status"],
+                "status_code": 200,
                 "profile_stats": profile_stats,
             },
         )
 
 
-async def _rousi_api(page: Any, path: str, token: str) -> dict[str, Any]:
+async def _rousi_v1_api(page: Any, path: str) -> dict[str, Any]:
     return await page.evaluate(
-        """async ({path, token}) => {
-          const response = await fetch(path, {
-            headers: {Authorization: `Bearer ${token}`},
-            credentials: "same-origin",
-          });
+        """async (path) => {
+          const response = await fetch(path, {credentials: "same-origin"});
           let payload = null;
           try { payload = await response.json(); } catch (_) {}
-          const wrapped = payload && typeof payload === "object" && "data" in payload;
           return {
             status: response.status,
-            code: wrapped ? payload.code : null,
-            message: wrapped ? payload.message : null,
-            body: wrapped ? payload.data : payload,
+            body: payload,
           };
         }""",
-        {"path": path, "token": token},
+        path,
     )
 
 
 def _rousi_attended_today(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
+    if isinstance(value.get("claimed_today"), bool):
+        return value["claimed_today"]
     attendance = value.get("attendance")
     if not isinstance(attendance, dict):
         return False
@@ -256,12 +260,29 @@ def _rousi_attended_today(value: Any) -> bool:
 
 
 def _rousi_history(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, dict) and isinstance(value.get("history"), list):
+        return [{
+            "date": str(item.get("attendance_date") or ""),
+            "reward": str(item.get("total_reward") or ""),
+        } for item in value["history"][-31:]
+            if isinstance(item, dict) and item.get("attendance_date")]
     if not isinstance(value, dict) or not isinstance(value.get("attendance"), dict):
         return []
     dates = value["attendance"].get("attended_dates")
     if not isinstance(dates, list):
         return []
     return [{"date": str(item), "reward": ""} for item in dates[-31:] if item]
+
+
+def _ratio_text(uploaded: Any, downloaded: Any) -> str | None:
+    try:
+        uploaded_value = float(str(uploaded).replace(",", "").strip())
+        downloaded_value = float(str(downloaded).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if downloaded_value <= 0:
+        return "∞" if uploaded_value > 0 else None
+    return f"{uploaded_value / downloaded_value:.3f}".rstrip("0").rstrip(".")
 
 
 def _format_byte_size(value: Any) -> str | None:
@@ -1787,6 +1808,10 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
         discovery = discover_pt_site(urlparse(site_url).hostname or "", set(context.cookies))
         configured = discovery.profile_url if discovery and discovery.profile_url else ""
     profile_url = urljoin(site_url, configured) if configured else await discover_pt_profile_url(page)
+    site_target = validated_http_url(site_url)
+    if not profile_url and site_target.path not in {"", "/"}:
+        await page.goto(site_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        profile_url = await discover_pt_profile_url(page)
     if not profile_url:
         profile_url = profile_url_from_cookies(site_url, context.cookies)
     if not profile_url:

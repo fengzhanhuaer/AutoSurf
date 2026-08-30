@@ -14,6 +14,7 @@ from autosurf.automations.pt_signin import (
     OpenCdAdapter,
     OshenPtAdapter,
     PtSignInHandler,
+    RousiAdapter,
     SoulVoiceAdapter,
     SunnyPtAdapter,
     TjuptAdapter,
@@ -561,6 +562,154 @@ def test_pt_profile_url_and_combined_action_results():
     assert result.details["actions"]["sign_in"]["enabled"] is True
     assert result.details["actions"]["profile_refresh"]["outcome"] == RunOutcome.SUCCESS
     assert result.details["site_history"][0]["reward"] == "81"
+
+
+@pytest.mark.asyncio
+async def test_rousi_adapter_uses_current_cookie_session_api_and_browser_button():
+    class Button:
+        first = None
+
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def wait_for(self, **kwargs):
+            assert kwargs == {"state": "visible", "timeout": 5_000}
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.page.claimed = True
+
+    class Page:
+        url = "https://rousi.pro/"
+        claimed = False
+        waits = 0
+
+        async def evaluate(self, _script, path):
+            if path == "/api/v1/session":
+                return {"status": 200, "body": {"user": {"username": "fenger"}}}
+            if path == "/api/v1/me/attendance":
+                return {"status": 200, "body": {
+                    "claimed_today": self.claimed,
+                    "history": [{"attendance_date": "2026-08-30", "total_reward": "10"}],
+                }}
+            raise AssertionError(path)
+
+        def get_by_role(self, role, *, name):
+            assert role == "button"
+            assert name.search("签到")
+            return Button(self)
+
+        async def wait_for_timeout(self, timeout_ms):
+            assert timeout_ms == 500
+            self.waits += 1
+
+    page = Page()
+    result = await RousiAdapter().sign_in(page, RunContext("rousi", {}, {}))
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.message == "Rousi 签到成功"
+    assert result.details["site_history"] == [{"date": "2026-08-30", "reward": "10"}]
+    assert page.waits == 1
+
+
+@pytest.mark.asyncio
+async def test_rousi_adapter_reads_current_profile_apis():
+    class Page:
+        url = "https://rousi.pro/"
+
+        async def evaluate(self, _script, path):
+            responses = {
+                "/api/v1/session": {
+                    "status": 200, "body": {"user": {"username": "fenger"}},
+                },
+                "/api/v1/me/traffic": {"status": 200, "body": {"totals": {
+                    "credited_uploaded_bytes": str(2 * 1024**4),
+                    "charged_downloaded_bytes": str(256 * 1024**3),
+                }}},
+                "/api/v1/me/economy": {"status": 200, "body": {
+                    "magic_balance": "2345.6", "progress": {"level": 2},
+                }},
+            }
+            return responses[path]
+
+    result = await RousiAdapter().refresh_profile(Page(), RunContext("rousi", {}, {}))
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["profile_stats"] == {
+        "username": "fenger",
+        "user_level": "Lv. 2",
+        "uploaded": "2 TiB",
+        "downloaded": "256 GiB",
+        "ratio": "8",
+        "bonus": "2345.6",
+    }
+
+
+@pytest.mark.asyncio
+async def test_profile_refresh_opens_signin_page_before_discovering_qingwa_profile():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Response:
+        status = 200
+
+    class Page:
+        url = "https://wiki.qingwapt.org/docs"
+        body = "Qingwa Wiki"
+        visited = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        async def goto(self, url, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60_000}
+            self.visited.append(url)
+            self.url = url
+            if "attendance.php" in url:
+                self.body = "欢迎回来 签到"
+            else:
+                self.body = "分享率: 8.708 上传量: 546.92 GB 下载量: 62.81 GB"
+            return Response()
+
+        async def evaluate(self, script):
+            if "candidates.sort" in script:
+                return (
+                    "https://www.qingwapt.org/userdetails.php?id=7"
+                    if "attendance.php" in self.url else None
+                )
+            return {
+                "pairs": [
+                    ["分享率", "8.708"],
+                    ["上传量", "546.92 GB"],
+                    ["下载量", "62.81 GB"],
+                ],
+                "body": self.body,
+                "title": "用户详情",
+            }
+
+    page = Page()
+    result = await refresh_pt_profile_page(
+        page,
+        RunContext("qingwa", {"url": "https://www.qingwapt.org/attendance.php"}, {}),
+        "https://www.qingwapt.org/attendance.php",
+        "qingwapt.org",
+        60_000,
+    )
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert page.visited == [
+        "https://www.qingwapt.org/attendance.php",
+        "https://www.qingwapt.org/userdetails.php?id=7",
+    ]
+    assert result.details["profile_stats"]["uploaded"] == "546.92 GB"
 
 
 @pytest.mark.asyncio
