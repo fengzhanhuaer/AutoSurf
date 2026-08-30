@@ -2473,8 +2473,11 @@ async def _click_common_signin_control_in(root: Any) -> bool:
               && rect.width > 0 && rect.height > 0;
             const enabled = !element.disabled && element.getAttribute('aria-disabled') !== 'true';
             if (!visible || !enabled) continue;
+            const directText = [...element.childNodes]
+              .filter((node) => node.nodeType === Node.TEXT_NODE)
+              .map((node) => node.textContent || '').join(' ').trim();
             const text = String(
-              element.innerText || element.value || element.getAttribute('aria-label')
+              directText || element.innerText || element.value || element.getAttribute('aria-label')
               || element.getAttribute('title') || element.querySelector('img[alt]')?.alt || ''
             ).trim();
             if (!patterns.some((pattern) => pattern.test(text))) continue;
