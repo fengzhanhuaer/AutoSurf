@@ -155,15 +155,14 @@ class RousiAdapter:
                 {"url": page.url, "clicked": False, "site_history": _rousi_history(before["body"])},
             )
 
-        button = page.get_by_role("button", name=re.compile(r"^\s*签到\s*$")).first
-        with suppress(Exception):
-            await button.wait_for(state="visible", timeout=5_000)
-        if not await button.is_visible():
-            return RunResult(RunOutcome.FAILED, "Rousi 首页没有找到签到按钮", {"url": page.url})
-        try:
-            await button.click(timeout=5_000)
-        except Exception:
-            await button.click(force=True, timeout=5_000)
+        csrf_token = str(session_body.get("csrf_token") or "")
+        if not csrf_token:
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 登录会话没有返回签到令牌", {"url": page.url},
+            )
+        claim = await _rousi_claim_attendance(page, csrf_token)
+        if claim["status"] in {401, 403}:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "Rousi 浏览器登录已失效", {"url": page.url})
         after = {"status": 0, "body": None}
         for _ in range(10):
             await page.wait_for_timeout(500)
@@ -173,8 +172,13 @@ class RousiAdapter:
                     RunOutcome.SUCCESS, "Rousi 签到成功",
                     {"url": page.url, "clicked": True, "site_history": _rousi_history(after["body"])},
                 )
+        if claim["status"] < 200 or claim["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "Rousi 签到接口请求失败",
+                {"url": page.url, "clicked": True, "status_code": claim["status"]},
+            )
         return RunResult(
-            RunOutcome.FAILED, "Rousi 点击签到后未确认当天记录",
+            RunOutcome.FAILED, "Rousi 提交签到后未确认当天记录",
             {"url": page.url, "clicked": True, "status_code": after["status"]},
         )
 
@@ -246,6 +250,27 @@ async def _rousi_v1_api(page: Any, path: str) -> dict[str, Any]:
           };
         }""",
         path,
+    )
+
+
+async def _rousi_claim_attendance(page: Any, csrf_token: str) -> dict[str, Any]:
+    return await page.evaluate(
+        """async (csrfToken) => {
+          const response = await fetch("/api/v1/me/attendance", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": csrfToken,
+              "Idempotency-Key": crypto.randomUUID(),
+            },
+            body: JSON.stringify({mode: "fixed"}),
+          });
+          let payload = null;
+          try { payload = await response.json(); } catch (_) {}
+          return {status: response.status, body: payload};
+        }""",
+        csrf_token,
     )
 
 

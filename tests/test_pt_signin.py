@@ -565,46 +565,29 @@ def test_pt_profile_url_and_combined_action_results():
 
 
 @pytest.mark.asyncio
-async def test_rousi_adapter_uses_current_cookie_session_api_and_browser_button():
-    class Button:
-        first = None
-
-        def __init__(self, page):
-            self.page = page
-            self.first = self
-
-        async def wait_for(self, **kwargs):
-            assert kwargs == {"state": "visible", "timeout": 5_000}
-
-        async def is_visible(self):
-            return True
-
-        async def click(self, **kwargs):
-            self.page.clicks.append(kwargs)
-            if not kwargs.get("force"):
-                raise RuntimeError("button is covered by a transient overlay")
-            self.page.claimed = True
-
+async def test_rousi_adapter_uses_current_cookie_session_and_csrf_api():
     class Page:
         url = "https://rousi.pro/"
         claimed = False
         waits = 0
-        clicks = []
+        claims = []
 
-        async def evaluate(self, _script, path):
+        async def evaluate(self, script, argument):
+            if "Idempotency-Key" in script:
+                self.claims.append(argument)
+                self.claimed = True
+                return {"status": 200, "body": {"claimed_today": True}}
+            path = argument
             if path == "/api/v1/session":
-                return {"status": 200, "body": {"user": {"username": "fenger"}}}
+                return {"status": 200, "body": {
+                    "csrf_token": "csrf-value", "user": {"username": "fenger"},
+                }}
             if path == "/api/v1/me/attendance":
                 return {"status": 200, "body": {
                     "claimed_today": self.claimed,
                     "history": [{"attendance_date": "2026-08-30", "total_reward": "10"}],
                 }}
             raise AssertionError(path)
-
-        def get_by_role(self, role, *, name):
-            assert role == "button"
-            assert name.search("签到")
-            return Button(self)
 
         async def wait_for_timeout(self, timeout_ms):
             assert timeout_ms == 500
@@ -617,7 +600,7 @@ async def test_rousi_adapter_uses_current_cookie_session_api_and_browser_button(
     assert result.message == "Rousi 签到成功"
     assert result.details["site_history"] == [{"date": "2026-08-30", "reward": "10"}]
     assert page.waits == 1
-    assert page.clicks == [{"timeout": 5_000}, {"force": True, "timeout": 5_000}]
+    assert page.claims == ["csrf-value"]
 
 
 @pytest.mark.asyncio
