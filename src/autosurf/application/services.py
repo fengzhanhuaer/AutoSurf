@@ -136,7 +136,15 @@ class QueueService:
                     automation.next_run_at += timedelta(seconds=automation.interval_seconds)
         return count
 
-    def enqueue_now(self, automation_id: str) -> ExecutionRecord:
+    def enqueue_now(
+        self, automation_id: str, config_override: dict[str, Any] | None = None,
+    ) -> ExecutionRecord:
+        return self.enqueue_now_with_status(automation_id, config_override)[0]
+
+    def enqueue_now_with_status(
+        self, automation_id: str, config_override: dict[str, Any] | None = None,
+        *, activate_existing: bool = True,
+    ) -> tuple[ExecutionRecord, bool]:
         now = utc_now()
         with self.sessions.begin() as session:
             automation = session.get(AutomationRecord, automation_id)
@@ -149,14 +157,20 @@ class QueueService:
                 ]),
             ).order_by(ExecutionRecord.scheduled_at.desc()).limit(1))
             if existing is not None:
-                if existing.status in {ExecutionStatus.PENDING, ExecutionStatus.RETRY_WAIT}:
+                if activate_existing and existing.status in {
+                    ExecutionStatus.PENDING, ExecutionStatus.RETRY_WAIT,
+                }:
                     existing.available_at = now
                 session.flush()
-                return existing
+                return existing, False
             execution = ExecutionRecord(id=str(uuid4()), automation_id=automation.id, scheduled_at=now,
-                                        status=ExecutionStatus.PENDING, available_at=now, attempts=0)
+                                        status=ExecutionStatus.PENDING, available_at=now, attempts=0,
+                                        config_override_json=(
+                                            json.dumps(config_override, ensure_ascii=False)
+                                            if config_override else None
+                                        ))
             session.add(execution)
-        return execution
+        return execution, True
 
     def claim(self) -> ExecutionRecord | None:
         now = utc_now()
@@ -227,6 +241,11 @@ class ExecutionService:
                     raise RuntimeError("claimed execution disappeared")
                 automation = execution.automation
                 automation_config = json.loads(automation.config_json)
+                if execution.config_override_json:
+                    config_override = json.loads(execution.config_override_json)
+                    if not isinstance(config_override, dict):
+                        raise RuntimeError("execution configuration override must be an object")
+                    automation_config.update(config_override)
                 if (
                     automation.handler_type == "pt_signin"
                     or "max_retries" in automation_config

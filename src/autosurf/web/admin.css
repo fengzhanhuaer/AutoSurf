@@ -141,6 +141,7 @@ form { padding: 20px; }
 
 .table-section { min-width: 0; margin-top: 18px; }
 .section-heading { padding: 0 0 12px; display: flex; align-items: flex-end; justify-content: space-between; }
+.section-actions { display: flex; align-items: center; gap: 8px; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 table { width: 100%; border-collapse: collapse; }
 th, td { height: 46px; padding: 0 16px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
@@ -305,6 +306,8 @@ td:first-child { color: var(--text); font-weight: 600; }
   .discovery-settings label { grid-template-columns: 54px minmax(0, 1fr); }
   .discovery-settings select, .discovery-settings input { width: 100%; }
   .discovery-actions { align-items: stretch; flex-direction: column; }
+  .section-heading { align-items: stretch; flex-direction: column; gap: 12px; }
+  .section-actions { align-items: stretch; flex-direction: column; }
   .form-actions { flex-direction: column; }
   .form-grid { grid-template-columns: 1fr; gap: 0; }
   .scheduling-grid, .dialog-fields { grid-template-columns: 1fr; }

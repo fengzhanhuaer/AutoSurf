@@ -90,6 +90,10 @@ class PtSignInCollectInput(BaseModel):
     profile_refresh_enabled: bool = True
 
 
+class PtBatchRunInput(BaseModel):
+    action: Literal["sign_in", "profile_refresh"]
+
+
 class PtSignInScheduleInput(BaseModel):
     interval_hours: int = Field(default=24, ge=1, le=720)
     timeout_seconds: int = Field(default=60, ge=5, le=180)
@@ -1052,6 +1056,20 @@ def run_periodic_signin_site(automation_id: str, request: Request) -> dict[str, 
     return {"execution_id": execution.id, "status": execution.status}
 
 
+@router.post("/periodic-signin/run-all", status_code=202)
+def run_all_periodic_tasks(request: Request) -> dict[str, Any]:
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type.in_(["browser_signin", "http_signin"])
+        ).order_by(AutomationRecord.name)).all()
+        eligible = [(record.id, record.name) for record in records if record.enabled]
+        skipped = [
+            {"automation_id": record.id, "name": record.name, "reason": "disabled"}
+            for record in records if not record.enabled
+        ]
+    return _enqueue_automation_batch(request, eligible, skipped=skipped)
+
+
 @router.get("/periodic-signin/executions")
 def list_periodic_signin_executions(request: Request, limit: int = 50) -> dict[str, Any]:
     limit = min(max(limit, 1), 200)
@@ -1269,6 +1287,49 @@ def run_pt_signin_site(automation_id: str, request: Request) -> dict[str, str]:
         _require_pt_automation(session.get(AutomationRecord, automation_id))
     execution = request.app.state.queue.enqueue_now(automation_id)
     return {"execution_id": execution.id, "status": execution.status}
+
+
+@router.post("/pt-signin/run-all", status_code=202)
+def run_all_pt_actions(data: PtBatchRunInput, request: Request) -> dict[str, Any]:
+    eligible: list[tuple[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    with request.app.state.sessions() as session:
+        records = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        ).order_by(AutomationRecord.name)).all()
+        for record in records:
+            try:
+                config = json.loads(record.config_json)
+            except (TypeError, ValueError):
+                skipped.append({
+                    "automation_id": record.id, "name": record.name, "reason": "invalid_config",
+                })
+                continue
+            sign_in_supported, profile_refresh_supported = _pt_site_capabilities(record, config)
+            if data.action == "sign_in":
+                action_enabled = bool(config.get("sign_in_enabled", True)) and sign_in_supported
+            else:
+                action_enabled = (
+                    bool(config.get("profile_refresh_enabled", False))
+                    and profile_refresh_supported
+                )
+            if record.enabled and action_enabled:
+                eligible.append((record.id, record.name))
+            else:
+                skipped.append({
+                    "automation_id": record.id,
+                    "name": record.name,
+                    "reason": "disabled" if not record.enabled else "action_disabled",
+                })
+
+    config_override = {
+        "sign_in_enabled": data.action == "sign_in",
+        "profile_refresh_enabled": data.action == "profile_refresh",
+    }
+    return _enqueue_automation_batch(
+        request, eligible, config_override=config_override, skipped=skipped,
+        action=data.action,
+    )
 
 
 @router.get("/pt-signin/executions")
@@ -1514,6 +1575,35 @@ def _pt_signin_candidates(request: Request, include_unknown: bool) -> list[dict[
     return sorted(items, key=lambda item: (
         not item["supported"], item["name"].casefold(), item["domain"],
     ))
+
+
+def _enqueue_automation_batch(
+    request: Request,
+    automations: list[tuple[str, str]],
+    *,
+    config_override: dict[str, Any] | None = None,
+    skipped: list[dict[str, str]] | None = None,
+    action: str | None = None,
+) -> dict[str, Any]:
+    queued: list[dict[str, str]] = []
+    skipped_active: list[dict[str, str]] = []
+    for automation_id, name in automations:
+        execution, created = request.app.state.queue.enqueue_now_with_status(
+            automation_id, config_override, activate_existing=False,
+        )
+        item = {
+            "automation_id": automation_id,
+            "name": name,
+            "execution_id": execution.id,
+            "status": execution.status,
+        }
+        (queued if created else skipped_active).append(item)
+    return {
+        "action": action,
+        "queued": queued,
+        "skipped_active": skipped_active,
+        "skipped": skipped or [],
+    }
 
 
 def _require_pt_automation(record: AutomationRecord | None) -> AutomationRecord:

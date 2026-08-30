@@ -246,6 +246,58 @@ async def test_periodic_candidates_collect_templates_and_expose_execution_histor
     assert configured.json()["items"][0]["configured"] is True
 
 
+@pytest.mark.asyncio
+async def test_periodic_run_all_queues_enabled_tasks_once(settings):
+    app = create_app(settings)
+    enabled = app.state.automations.create(
+        "Enabled", "http_signin", 86400, {"url": "https://enabled.test/"},
+    )
+    disabled = app.state.automations.create(
+        "Disabled", "http_signin", 86400, {"url": "https://disabled.test/"},
+    )
+    with app.state.sessions.begin() as session:
+        session.get(AutomationRecord, disabled.id).enabled = False
+
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post("/api/v1/periodic-signin/run-all", auth=auth)
+        second = await client.post("/api/v1/periodic-signin/run-all", auth=auth)
+
+    assert first.status_code == 202
+    assert [item["automation_id"] for item in first.json()["queued"]] == [enabled.id]
+    assert [item["automation_id"] for item in first.json()["skipped"]] == [disabled.id]
+    assert second.json()["queued"] == []
+    assert [item["automation_id"] for item in second.json()["skipped_active"]] == [enabled.id]
+
+
+@pytest.mark.asyncio
+async def test_execution_config_override_is_applied_without_changing_automation(settings):
+    seen = []
+
+    class CaptureHandler:
+        type = "capture_override"
+
+        async def run(self, context):
+            seen.append(context.config)
+            return RunResult(RunOutcome.SUCCESS, "done")
+
+    app = create_app(settings)
+    app.state.registry.register(CaptureHandler())
+    automation = app.state.automations.create(
+        "capture", "capture_override", 86400, {"mode": "scheduled", "kept": True},
+    )
+    execution = app.state.queue.enqueue_now(automation.id, {"mode": "batch"})
+
+    assert await app.state.execution.run_one() is True
+    assert seen == [{"mode": "batch", "kept": True}]
+    with app.state.sessions() as session:
+        stored_execution = session.get(ExecutionRecord, execution.id)
+        stored_automation = session.get(AutomationRecord, automation.id)
+        assert json.loads(stored_execution.config_override_json) == {"mode": "batch"}
+        assert json.loads(stored_automation.config_json) == {"mode": "scheduled", "kept": True}
+
+
 def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
     app = create_app(settings)
     nodeseek = app.state.automations.create(
@@ -416,7 +468,8 @@ async def test_management_session_login_and_logout(settings):
         assert "CookieCloud" not in app_page.text
         assert "PT 站点" in app_page.text
         assert "站点签到" in app_page.text
-        assert "周期签到" in app_page.text
+        assert "周期任务" in app_page.text
+        assert "周期签到" not in app_page.text
         assert "系统升级" in app_page.text
         assert "系统设置" in app_page.text
         assert 'id="settings-tab-cookiecloud"' not in app_page.text
@@ -431,6 +484,9 @@ async def test_management_session_login_and_logout(settings):
         assert 'id="periodic-site-rows"' in app_page.text
         assert 'id="periodic-candidate-rows"' in app_page.text
         assert 'id="periodic-history-rows"' in app_page.text
+        assert 'id="pt-run-all-signin"' in app_page.text
+        assert 'id="pt-run-all-refresh"' in app_page.text
+        assert 'id="periodic-run-all"' in app_page.text
         assert 'id="token-sync-base-url"' not in app_page.text
         assert 'id="token-script-button"' not in app_page.text
         assert 'id="token-script-copy-button"' not in app_page.text

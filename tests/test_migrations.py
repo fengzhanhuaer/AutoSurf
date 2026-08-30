@@ -6,6 +6,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
 from autosurf.infrastructure.migrations import (
+    BROWSER_ONLY_REVISION,
     COOKIECLOUD_REVISION,
     HEAD_REVISION,
     INITIAL_REVISION,
@@ -44,6 +45,7 @@ def test_empty_database_upgrades_to_head(tmp_path):
             column["name"] for column in inspector.get_columns("automations")
         }
         execution_columns = {column["name"] for column in inspector.get_columns("executions")}
+        assert "config_override_json" in execution_columns
         assert "credential_payload" not in execution_columns
         assert "credential_version" not in execution_columns
         assert revision(url) == HEAD_REVISION
@@ -87,6 +89,26 @@ def test_unversioned_current_database_is_adopted(tmp_path):
 
     upgrade_database(url)
     assert revision(url) == HEAD_REVISION
+
+
+def test_unversioned_browser_only_database_adds_execution_overrides(tmp_path):
+    url = f"sqlite:///{(tmp_path / 'browser-only.db').as_posix()}"
+    config = migration_config(url)
+    command.upgrade(config, BROWSER_ONLY_REVISION)
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+
+    upgrade_database(url)
+
+    engine = create_engine(url)
+    try:
+        columns = {column["name"] for column in inspect(engine).get_columns("executions")}
+        assert "config_override_json" in columns
+        assert revision(url) == HEAD_REVISION
+    finally:
+        engine.dispose()
 
 
 def test_unversioned_cookiecloud_database_upgrades_to_head(tmp_path):

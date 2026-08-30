@@ -21,7 +21,7 @@
         </a>
         <a class="nav-item" href="/app#periodic-signin" data-view="periodic-signin">
           <span class="nav-icon" aria-hidden="true">C</span>
-          <span>周期签到</span>
+          <span>周期任务</span>
         </a>
         <a class="nav-item" href="/app#browser-control" data-view="browser-control">
           <span class="nav-icon" aria-hidden="true">B</span>
@@ -229,6 +229,10 @@
         <section class="table-section" aria-labelledby="pt-sites-title">
           <div class="section-heading">
             <div><h2 id="pt-sites-title">签到任务</h2></div>
+            <div class="section-actions">
+              <button class="button secondary" id="pt-run-all-signin" type="button">一键签到</button>
+              <button class="button secondary" id="pt-run-all-refresh" type="button">一键刷新</button>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
@@ -295,13 +299,13 @@
       </dialog>
 
       <section class="settings-panel" id="periodic-signin-panel" hidden>
-        <section class="summary-strip" aria-label="周期签到概况">
+        <section class="summary-strip" aria-label="周期任务概况">
           <div class="summary-item"><span class="summary-label">普通站点</span><strong id="periodic-site-count">0</strong></div>
           <div class="summary-item"><span class="summary-label">已启用</span><strong id="periodic-enabled-count">0</strong></div>
           <div class="summary-item status-summary"><span class="summary-label">最近执行</span><strong id="periodic-recent-state">暂无记录</strong></div>
         </section>
 
-        <div class="settings-tabs signin-tabs" id="periodic-signin-tabs" role="tablist" aria-label="周期签到">
+        <div class="settings-tabs signin-tabs" id="periodic-signin-tabs" role="tablist" aria-label="周期任务">
           <button class="settings-tab active" id="periodic-signin-tab-tasks" type="button" role="tab"
                   aria-selected="true" aria-controls="periodic-tasks-panel" data-periodic-tab="tasks">
             周期任务
@@ -392,7 +396,12 @@
           </details>
 
           <section class="panel periodic-task-panel" aria-labelledby="periodic-task-title">
-            <div class="panel-heading"><div><h2 id="periodic-task-title">周期任务</h2><p>普通站点与 PT 站点相互独立。</p></div></div>
+            <div class="panel-heading">
+              <div><h2 id="periodic-task-title">周期任务</h2><p>普通站点与 PT 站点相互独立。</p></div>
+              <div class="section-actions">
+                <button class="button secondary" id="periodic-run-all" type="button">一键执行</button>
+              </div>
+            </div>
             <div class="table-wrap periodic-table-wrap">
               <table><thead><tr><th>站点</th><th>域名</th><th>周期</th><th>下次执行</th><th>状态</th><th>启用</th><th>操作</th></tr></thead>
                 <tbody id="periodic-site-rows"><tr><td class="empty" colspan="7">暂无普通站点任务</td></tr></tbody>

@@ -2888,6 +2888,80 @@ async def test_pt_signin_api_creates_manual_site_without_credential(settings):
     assert listed.json()["items"][0]["domain"] == "tracker.test"
     assert deleted.status_code == 204
 
+
+@pytest.mark.asyncio
+async def test_pt_run_all_uses_action_overrides_and_skips_active_tasks(settings):
+    app = create_app(settings)
+    regular = app.state.automations.create(
+        "Regular", "pt_signin", 86400, {
+            "url": "https://hdvideo.top/attendance.php",
+            "site_domain": "hdvideo.top",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+            "sign_in_supported": True,
+            "profile_refresh_supported": True,
+        },
+    )
+    refresh_only = app.state.automations.create(
+        "U2", "pt_signin", 86400, {
+            "url": "https://u2.dmhy.org/",
+            "site_domain": "u2.dmhy.org",
+            "sign_in_enabled": False,
+            "profile_refresh_enabled": True,
+            "sign_in_supported": False,
+            "profile_refresh_supported": True,
+        },
+    )
+    disabled = app.state.automations.create(
+        "Disabled", "pt_signin", 86400, {
+            "url": "https://tracker.test/attendance.php",
+            "site_domain": "tracker.test",
+            "sign_in_enabled": True,
+            "profile_refresh_enabled": True,
+        },
+    )
+    with app.state.sessions.begin() as session:
+        session.get(AutomationRecord, disabled.id).enabled = False
+
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        sign_in = await client.post(
+            "/api/v1/pt-signin/run-all", auth=auth, json={"action": "sign_in"},
+        )
+        sign_in_again = await client.post(
+            "/api/v1/pt-signin/run-all", auth=auth, json={"action": "sign_in"},
+        )
+
+    assert sign_in.status_code == 202
+    sign_payload = sign_in.json()
+    assert [item["automation_id"] for item in sign_payload["queued"]] == [regular.id]
+    assert {item["automation_id"] for item in sign_payload["skipped"]} == {
+        refresh_only.id, disabled.id,
+    }
+    assert sign_in_again.json()["queued"] == []
+    assert sign_in_again.json()["skipped_active"][0]["automation_id"] == regular.id
+
+    sign_execution_id = sign_payload["queued"][0]["execution_id"]
+    with app.state.sessions() as session:
+        override = json.loads(session.get(ExecutionRecord, sign_execution_id).config_override_json)
+        assert override == {"sign_in_enabled": True, "profile_refresh_enabled": False}
+    app.state.queue.succeed(sign_execution_id, {"outcome": "success", "message": "done"})
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        refresh = await client.post(
+            "/api/v1/pt-signin/run-all", auth=auth, json={"action": "profile_refresh"},
+        )
+
+    assert refresh.status_code == 202
+    assert {item["automation_id"] for item in refresh.json()["queued"]} == {
+        regular.id, refresh_only.id,
+    }
+    with app.state.sessions() as session:
+        for item in refresh.json()["queued"]:
+            override = json.loads(session.get(ExecutionRecord, item["execution_id"]).config_override_json)
+            assert override == {"sign_in_enabled": False, "profile_refresh_enabled": True}
+
 @pytest.mark.asyncio
 async def test_pt_signin_history_groups_latest_execution_by_local_day(settings):
     app = create_app(settings)

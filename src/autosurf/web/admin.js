@@ -82,6 +82,8 @@ const elements = {
   ptCandidateRows: document.querySelector("#pt-candidate-rows"),
   ptSelectAllButton: document.querySelector("#pt-select-all-button"),
   ptCollectButton: document.querySelector("#pt-collect-button"),
+  ptRunAllSignin: document.querySelector("#pt-run-all-signin"),
+  ptRunAllRefresh: document.querySelector("#pt-run-all-refresh"),
   ptCollectInterval: document.querySelector("#pt-collect-interval"),
   ptCollectTimeout: document.querySelector("#pt-collect-timeout"),
   ptCollectRandomDelay: document.querySelector("#pt-collect-random-delay"),
@@ -132,6 +134,7 @@ const elements = {
   periodicCandidateRows: document.querySelector("#periodic-candidate-rows"),
   periodicSelectAllButton: document.querySelector("#periodic-select-all-button"),
   periodicCollectButton: document.querySelector("#periodic-collect-button"),
+  periodicRunAll: document.querySelector("#periodic-run-all"),
   periodicCollectInterval: document.querySelector("#periodic-collect-interval"),
   periodicCollectTimeout: document.querySelector("#periodic-collect-timeout"),
   periodicCollectRandomDelay: document.querySelector("#periodic-collect-random-delay"),
@@ -257,7 +260,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
     elements.pageTitle.textContent = "浏览器控制";
     elements.pageDescription.textContent = "Windows 独立 Chrome 窗口";
   } else if (periodicView) {
-    elements.pageTitle.textContent = "周期签到";
+    elements.pageTitle.textContent = "周期任务";
     elements.pageDescription.textContent = "普通站点周期任务";
   } else if (systemView) {
     elements.pageTitle.textContent = "系统设置";
@@ -268,7 +271,7 @@ async function setActiveView(value, { syncHash = true } = {}) {
   }
   const refreshLabels = {
     "pt-signin": "刷新签到任务",
-    "periodic-signin": "刷新周期签到任务",
+    "periodic-signin": "刷新周期任务",
     "browser-control": "刷新浏览器状态",
     "site-settings": "刷新站点设置",
     logs: "刷新运行日志",
@@ -330,6 +333,13 @@ function setBusy(busy) {
   elements.ptCollectButton.disabled = busy || state.ptSelection.size === 0;
   elements.periodicSelectAllButton.disabled = busy || selectablePeriodicCandidates().length === 0;
   elements.periodicCollectButton.disabled = busy || state.periodicSelection.size === 0;
+  elements.ptRunAllSignin.disabled = busy || !state.ptSites.some(
+    (site) => site.enabled && site.config.sign_in_enabled && site.config.sign_in_supported,
+  );
+  elements.ptRunAllRefresh.disabled = busy || !state.ptSites.some(
+    (site) => site.enabled && site.config.profile_refresh_enabled && site.config.profile_refresh_supported,
+  );
+  elements.periodicRunAll.disabled = busy || !state.periodicSites.some((site) => site.enabled);
   elements.refreshButton.disabled = busy;
   elements.siteBackupButton.disabled = busy;
   elements.siteRestoreButton.disabled = busy;
@@ -735,6 +745,21 @@ async function runPeriodicSite(site) {
   }
 }
 
+async function runAllPeriodicTasks() {
+  setBusy(true);
+  try {
+    const result = await api("/api/v1/periodic-signin/run-all", {
+      method: "POST", body: "{}",
+    });
+    await refresh({ quiet: true });
+    showToast(batchRunMessage("周期任务", result));
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function deletePeriodicSite(site) {
   if (!window.confirm(`删除周期任务“${site.name}”及其执行记录？`)) return;
   setBusy(true);
@@ -1096,6 +1121,30 @@ async function runPtSite(id) {
   }
 }
 
+function batchRunMessage(label, result) {
+  const parts = [`${label}已入队 ${result.queued.length} 个`];
+  if (result.skipped_active.length) parts.push(`执行中跳过 ${result.skipped_active.length} 个`);
+  if (result.skipped.length) parts.push(`未启用跳过 ${result.skipped.length} 个`);
+  return parts.join("，");
+}
+
+async function runAllPtActions(action) {
+  const label = action === "sign_in" ? "签到" : "刷新";
+  setBusy(true);
+  try {
+    const result = await api("/api/v1/pt-signin/run-all", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    await refresh({ quiet: true });
+    showToast(batchRunMessage(label, result));
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function deletePtSite(site) {
   if (!window.confirm(`删除签到任务“${site.name}”及其执行记录？`)) return;
   setBusy(true);
@@ -1373,6 +1422,10 @@ async function refreshExecutionStates() {
   }
 }
 
+elements.ptRunAllSignin.addEventListener("click", () => runAllPtActions("sign_in"));
+elements.ptRunAllRefresh.addEventListener("click", () => runAllPtActions("profile_refresh"));
+elements.periodicRunAll.addEventListener("click", runAllPeriodicTasks);
+
 elements.ptSelectAllButton.addEventListener("click", () => {
   const selectable = selectablePtCandidates();
   const allSelected = selectable.length > 0 && selectable.every((item) => state.ptSelection.has(item.site_key));
@@ -1567,7 +1620,7 @@ elements.periodicForm.addEventListener("submit", async (event) => {
     elements.periodicForm.reset();
     applyPeriodicTemplate();
     await refresh({ quiet: true });
-    showToast("周期签到任务已创建");
+    showToast("周期任务已创建");
   } catch (error) {
     showToast(error.message, true);
   } finally {

@@ -34,6 +34,7 @@ class ExecutionRecord(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    config_override_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

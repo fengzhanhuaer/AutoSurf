@@ -10,7 +10,8 @@ from sqlalchemy import create_engine, inspect
 INITIAL_REVISION = "0001_initial"
 COOKIECLOUD_REVISION = "0002_cookiecloud_import"
 SYSTEM_SETTINGS_REVISION = "0003_system_settings"
-HEAD_REVISION = "0004_browser_only_sessions"
+BROWSER_ONLY_REVISION = "0004_browser_only_sessions"
+HEAD_REVISION = "0005_execution_config_override"
 LEGACY_CORE_TABLES = {"credentials", "automations", "executions", "cookiecloud_blobs"}
 BROWSER_ONLY_CORE_TABLES = {"automations", "executions", "system_settings"}
 
@@ -33,7 +34,9 @@ def _adopt_unversioned_database(config: Config, database_url: str) -> None:
         if BROWSER_ONLY_CORE_TABLES.issubset(tables) and not (
             {"credentials", "cookiecloud_blobs", "cookiecloud_sources"} & tables
         ):
-            command.stamp(config, HEAD_REVISION)
+            execution_columns = {item["name"] for item in inspector.get_columns("executions")}
+            revision = HEAD_REVISION if "config_override_json" in execution_columns else BROWSER_ONLY_REVISION
+            command.stamp(config, revision)
             return
         present_core = tables & LEGACY_CORE_TABLES
         if present_core != LEGACY_CORE_TABLES:
