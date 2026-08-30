@@ -1701,32 +1701,22 @@ async def test_common_signin_control_searches_child_frames():
             self.found = found
             self.clicked = False
 
-        async def count(self):
-            return 1 if self.found else 0
+        async def evaluate_all(self, script, marker):
+            assert "elements.slice(0, 120)" in script
+            assert marker == "data-autosurf-signin-target"
+            return self.found
 
-        def nth(self, _index):
-            return self
-
-        async def is_visible(self):
-            return True
-
-        async def is_enabled(self):
-            return True
-
-        async def inner_text(self):
-            return "Check in"
-
-        async def get_attribute(self, _name):
-            return None
-
-        async def click(self):
+        async def click(self, **kwargs):
+            assert kwargs == {"timeout": 5_000}
             self.clicked = True
 
     class Root:
         def __init__(self, found):
             self.controls = Controls(found)
 
-        def locator(self, _selector):
+        def locator(self, selector):
+            if selector == '[data-autosurf-signin-target="true"]':
+                self.controls.first = self.controls
             return self.controls
 
     page = Root(False)
@@ -1748,25 +1738,15 @@ async def test_generic_signin_continues_with_captcha_after_click(monkeypatch, tm
             return 0
 
     class Control:
-        async def count(self):
-            return 1
+        first = None
 
-        def nth(self, _index):
-            return self
+        def __init__(self):
+            self.first = self
 
-        async def is_visible(self):
+        async def evaluate_all(self, _script, _marker):
             return True
 
-        async def is_enabled(self):
-            return True
-
-        async def inner_text(self):
-            return "签到"
-
-        async def get_attribute(self, _name):
-            return None
-
-        async def click(self):
+        async def click(self, **_kwargs):
             return None
 
     class Page:
@@ -1777,6 +1757,8 @@ async def test_generic_signin_continues_with_captcha_after_click(monkeypatch, tm
             if selector == "body":
                 return Body()
             if selector.startswith("button, a"):
+                return Control()
+            if selector == '[data-autosurf-signin-target="true"]':
                 return Control()
             return Missing()
 

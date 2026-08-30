@@ -2456,15 +2456,39 @@ async def _click_common_signin_control_in(root: Any) -> bool:
         "button, a, input[type=button], input[type=submit], input[type=image], "
         "[role=button], [onclick]"
     )
-    for index in range(min(await controls.count(), 120)):
-        control = controls.nth(index)
-        if not await control.is_visible() or not await control.is_enabled():
-            continue
-        text = await _signin_control_text(control)
-        if any(pattern.search(text) for pattern in COMMON_BUTTON_PATTERNS):
-            await control.click()
-            return True
-    return False
+    marker = "data-autosurf-signin-target"
+    try:
+        found = await controls.evaluate_all(r"""(elements, marker) => {
+          const patterns = [
+            /^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$/i,
+            /^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$/i,
+          ];
+          for (const element of elements.slice(0, 120)) {
+            element.removeAttribute(marker);
+          }
+          for (const element of elements.slice(0, 120)) {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            const visible = style.display !== 'none' && style.visibility !== 'hidden'
+              && rect.width > 0 && rect.height > 0;
+            const enabled = !element.disabled && element.getAttribute('aria-disabled') !== 'true';
+            if (!visible || !enabled) continue;
+            const text = String(
+              element.innerText || element.value || element.getAttribute('aria-label')
+              || element.getAttribute('title') || element.querySelector('img[alt]')?.alt || ''
+            ).trim();
+            if (!patterns.some((pattern) => pattern.test(text))) continue;
+            element.setAttribute(marker, 'true');
+            return true;
+          }
+          return false;
+        }""", marker)
+        if not found:
+            return False
+        await root.locator(f'[{marker}="true"]').first.click(timeout=5_000)
+        return True
+    except Exception:
+        return False
 
 
 async def _signin_control_text(control: Any) -> str:
