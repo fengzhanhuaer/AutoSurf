@@ -10,7 +10,6 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         git tini novnc websockify x11vnc wmctrl x11-utils x11-xkb-utils x11-xserver-utils \
         pulseaudio pulseaudio-utils \
-        mesa-vulkan-drivers vulkan-tools \
         libx11-xcb1 libxcb-dri3-0 libxkbcommon0 libxdamage1 libxfixes3 \
         libxtst6 libxext6 libpulse0 \
     && pip install --no-cache-dir playwright==1.61.0 \
@@ -26,6 +25,11 @@ RUN set -eux; \
     apt-get install --no-install-recommends -y /tmp/google-chrome.deb; \
     rm -f /tmp/google-chrome.deb; \
     rm -rf /var/lib/apt/lists/*
+
+# Keep GPU support in an additive layer so Chrome/base dependency updates stay cached.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y mesa-vulkan-drivers vulkan-tools \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV AUTOSURF_BROWSER_CHANNEL=chrome \
     AUTOSURF_BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
