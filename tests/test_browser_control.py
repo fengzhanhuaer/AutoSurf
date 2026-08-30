@@ -491,12 +491,19 @@ def test_windows_installation_uses_localhost_without_docker_artifacts():
     browser_manifest = json.loads(Path("browser-runtime.json").read_text(encoding="utf-8"))
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert '"C:\\Tools\\AutoSurf"' in install
+    assert '[string]$Username = "adminforautosurf"' in install
     assert "AUTOSURF_HOST=127.0.0.1" in install
     assert "AUTOSURF_PORT=18980" in install
     assert "AUTOSURF_BROWSER_PROFILE_DIR" in install
+    assert "fetch --prune origin" in install
+    assert 'reset --hard "refs/remotes/origin/$Branch"' in install
     assert "AUTOSURF_BROWSER_EXECUTABLE_PATH=$rootEnv/runtime/chrome/chrome.exe" in install
-    assert "Invoke-WebRequest" in browser_install
+    assert "HttpWebRequest" in browser_install
+    assert "AddRange" in browser_install
+    assert "maximumAttempts = 8" in browser_install
     assert "System.Security.Cryptography.MD5" in browser_install
+    assert 'Join-Path $data "install.log"' in install
+    assert "if ($createdPassword)" in install
     assert browser_manifest == {
         "version": "152.0.7977.64",
         "platform": "win64",

@@ -2,7 +2,7 @@ param(
     [string]$InstallDir = "C:\Tools\AutoSurf",
     [string]$Repository = "https://github.com/fengzhanhuaer/AutoSurf.git",
     [string]$Branch = "main",
-    [string]$Username = "admin",
+    [string]$Username = "adminforautosurf",
     [string]$Password = ""
 )
 
@@ -32,6 +32,12 @@ if (-not (Test-Path -LiteralPath $program)) {
     if ($LASTEXITCODE -ne 0) { throw "Cannot clone AutoSurf." }
 } elseif (-not (Test-Path -LiteralPath (Join-Path $program ".git"))) {
     throw "Program directory is not an AutoSurf Git checkout: $program"
+} else {
+    & git.exe -c "safe.directory=$program" -C $program fetch --prune origin `
+        "+refs/heads/${Branch}:refs/remotes/origin/${Branch}"
+    if ($LASTEXITCODE -ne 0) { throw "Cannot update the existing AutoSurf checkout." }
+    & git.exe -c "safe.directory=$program" -C $program reset --hard "refs/remotes/origin/$Branch"
+    if ($LASTEXITCODE -ne 0) { throw "Cannot switch AutoSurf to the requested branch." }
 }
 
 New-Item -ItemType Directory -Path $data, $browser -Force | Out-Null
@@ -68,6 +74,15 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
         "AUTOSURF_UPGRADE_REQUEST_FILE=$rootEnv/data/upgrade-request.json"
         "AUTOSURF_UPGRADE_LOCK_FILE=$rootEnv/data/upgrade-in-progress.lock"
     ) | Set-Content -LiteralPath $envFile -Encoding ascii
+    if ($createdPassword) {
+        $installedAt = [DateTimeOffset]::Now.ToString("yyyy-MM-dd HH:mm:ss zzz")
+        @(
+            "[$installedAt] AutoSurf generated initial management credentials"
+            "Username: $Username"
+            "Password: $Password"
+            ""
+        ) | Add-Content -LiteralPath (Join-Path $data "install.log") -Encoding utf8
+    }
 }
 
 $shell = New-Object -ComObject WScript.Shell

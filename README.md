@@ -35,7 +35,7 @@ To choose the initial management password:
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Password "replace-with-a-strong-password"
 ```
 
-When no password is supplied, the installer generates one and prints it once.
+The default management username is `adminforautosurf`. When no password is supplied, the installer generates one, prints it, and records it in `C:\Tools\AutoSurf\data\install.log`. A password supplied explicitly on the command line is not written to this log.
 
 ## Browser
 
