@@ -124,6 +124,118 @@ class PtSiteAdapter(Protocol):
     async def sign_in(self, page: Any, context: RunContext) -> RunResult: ...
 
 
+class YemaPtAdapter:
+    def matches(self, url: str) -> bool:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+        return hostname == "yemapt.org" or hostname.endswith(".yemapt.org")
+
+    async def sign_in(self, page: Any, context: RunContext) -> RunResult:
+        profile = await _yema_api(page, "/api/user/profile")
+        authentication = _yema_authentication_failure(profile, page.url)
+        if authentication:
+            return authentication
+        attendance = await _yema_api(page, "/attendance.php")
+        body = attendance.get("body")
+        message = _yema_message(body)
+        if attendance["status"] in {401, 403}:
+            return RunResult(RunOutcome.AUTH_EXPIRED, "YemaPT 浏览器登录已失效", {"url": page.url})
+        if _matches(message, DEFAULT_ALREADY_PATTERNS):
+            return RunResult(RunOutcome.ALREADY_DONE, "YemaPT 今日已经签到", {"url": page.url})
+        if isinstance(body, dict) and body.get("success") is True:
+            return RunResult(RunOutcome.SUCCESS, "YemaPT 签到成功", {"url": page.url})
+        return RunResult(
+            RunOutcome.FAILED, "YemaPT 签到接口未确认成功",
+            {"url": page.url, "status_code": attendance["status"]},
+        )
+
+    async def refresh_profile(self, page: Any, context: RunContext) -> RunResult:
+        profile = await _yema_api(page, "/api/user/profile")
+        authentication = _yema_authentication_failure(profile, page.url)
+        if authentication:
+            return authentication
+        if profile["status"] < 200 or profile["status"] >= 300:
+            return RunResult(
+                RunOutcome.FAILED, "YemaPT 个人信息刷新失败",
+                {"url": page.url, "status_code": profile["status"]},
+            )
+        return RunResult(
+            RunOutcome.SUCCESS, "YemaPT 个人信息刷新成功",
+            {
+                "url": page.url,
+                "status_code": profile["status"],
+                "profile_stats": _yema_profile_stats(profile.get("body")),
+            },
+        )
+
+
+async def _yema_api(page: Any, path: str) -> dict[str, Any]:
+    hostname = (urlparse(page.url).hostname or "").lower().rstrip(".")
+    if hostname != "www.yemapt.org":
+        await page.goto("https://www.yemapt.org/", wait_until="domcontentloaded")
+    return await page.evaluate(
+        """async (path) => {
+          const response = await fetch(path, {credentials: "same-origin"});
+          let payload = null;
+          try { payload = await response.json(); } catch (_) {}
+          return {status: response.status, body: payload};
+        }""",
+        path,
+    )
+
+
+def _yema_authentication_failure(response: dict[str, Any], url: str) -> RunResult | None:
+    body = response.get("body")
+    if response.get("status") in {401, 403}:
+        return RunResult(RunOutcome.AUTH_EXPIRED, "YemaPT 浏览器登录已失效", {"url": url})
+    if isinstance(body, dict) and body.get("success") is False:
+        error_code = str(body.get("errorCode") or body.get("code") or "")
+        if error_code in {"400", "401", "403"}:
+            return RunResult(
+                RunOutcome.AUTH_EXPIRED, "YemaPT 浏览器登录已失效", {"url": url},
+            )
+    return None
+
+
+def _yema_message(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return " ".join(str(value.get(key) or "") for key in (
+        "message", "errorMessage", "msg", "showMessage",
+    ))
+
+
+def _yema_profile_stats(value: Any) -> dict[str, str]:
+    fields: dict[str, Any] = {}
+
+    def collect(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+                if normalized and normalized not in fields and not isinstance(child, (dict, list)):
+                    fields[normalized] = child
+                collect(child)
+        elif isinstance(item, list):
+            for child in item[:100]:
+                collect(child)
+
+    def first(*keys: str) -> Any:
+        return next((fields[key] for key in keys if fields.get(key) not in {None, ""}), None)
+
+    collect(value)
+    uploaded = first("uploaded", "upload", "uploadedbytes", "uploadbytes")
+    downloaded = first("downloaded", "download", "downloadedbytes", "downloadbytes")
+    return sanitize_pt_profile_stats({
+        "username": first("username", "user", "nickname", "displayname"),
+        "user_level": first("classname", "userlevel", "levelname", "groupname", "level"),
+        "uploaded": _normalize_profile_size(uploaded),
+        "downloaded": _normalize_profile_size(downloaded),
+        "ratio": first("ratio", "shareratio"),
+        "bonus": first("bonus", "seedbonus", "magic", "points", "point"),
+        "seeding_count": first("seeding", "seedingcount", "seedcount"),
+        "seeding_size": _normalize_profile_size(first("seedingsize", "seedsize")),
+    })
+
+
 class RousiAdapter:
     def matches(self, url: str) -> bool:
         hostname = (urlparse(url).hostname or "").lower().rstrip(".")

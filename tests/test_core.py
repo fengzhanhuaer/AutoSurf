@@ -123,9 +123,22 @@ def test_reconcile_pt_catalog_corrections_updates_known_legacy_urls(settings):
                 "profile_refresh_default_version": 1,
             },
         ),
+        "yemapt": app.state.automations.create(
+            "YemaPT", "pt_signin", 86400, {
+                "url": "https://yemapt.org/attendance.php", "site_domain": "yemapt.org",
+                "profile_refresh_default_version": 1, "catalog_correction_version": 1,
+            },
+        ),
+        "hares": app.state.automations.create(
+            "Hares", "pt_signin", 86400, {
+                "url": "https://club.hares.top/attendance.php?action=sign",
+                "site_domain": "club.hares.top", "profile_refresh_default_version": 1,
+                "catalog_correction_version": 1,
+            },
+        ),
     }
 
-    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 3
+    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 5
 
     with app.state.sessions() as session:
         configs = {
@@ -136,6 +149,12 @@ def test_reconcile_pt_catalog_corrections_updates_known_legacy_urls(settings):
     assert configs["ssd"]["url"] == "https://springsunday.net/"
     assert configs["ssd"]["sign_in_supported"] is False
     assert configs["jpopsuki"]["profile_url"] == "https://jpopsuki.eu/bonus.php"
+    assert configs["yemapt"]["url"] == "https://www.yemapt.org/attendance.php"
+    assert configs["yemapt"]["site_domain"] == "yemapt.org"
+    assert configs["hares"]["sign_in_enabled"] is False
+    assert configs["hares"]["profile_refresh_enabled"] is False
+    with app.state.sessions() as session:
+        assert session.get(AutomationRecord, sites["hares"].id).enabled is False
 
 
 @pytest.mark.asyncio

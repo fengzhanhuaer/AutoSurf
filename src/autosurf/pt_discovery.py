@@ -16,6 +16,7 @@ PT_COOKIE_MARKERS = frozenset({
     "torrent_pass",
 })
 PT_IGNORED_DOMAINS = frozenset({
+    "club.hares.top",
     "gtk.pw",
     "lemonhd.club",
     "ptlover.cc",
@@ -43,7 +44,6 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("agsvpt.com", "Arctic Global Seed Vault", target_domain="www.agsvpt.com"),
     PtSiteDefinition("audiences.me", "Audiences"),
     PtSiteDefinition("carpt.net", "CarPT"),
-    PtSiteDefinition("club.hares.top", "Hares", "/attendance.php?action=sign"),
     PtSiteDefinition("crabpt.vip", "CrabPT"),
     PtSiteDefinition("cyanbug.net", "CyanBug"),
     PtSiteDefinition("discfan.net", "DiscFan"),
@@ -105,7 +105,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("ubits.club", "UBits"),
     PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
     PtSiteDefinition("xingtan.one", "XingTan"),
-    PtSiteDefinition("yemapt.org", "YemaPT"),
+    PtSiteDefinition("yemapt.org", "YemaPT", target_domain="www.yemapt.org"),
     PtSiteDefinition(
         "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
     ),

@@ -21,7 +21,7 @@ from autosurf.periodic_templates import apply_periodic_template
 
 
 PT_PROFILE_REFRESH_DEFAULT_VERSION = 1
-PT_CATALOG_CORRECTION_VERSION = 1
+PT_CATALOG_CORRECTION_VERSION = 2
 
 
 class AutomationService:
@@ -110,6 +110,20 @@ def reconcile_pt_profile_refresh_defaults(sessions: sessionmaker[Session]) -> in
                     and not config.get("profile_url")
                 ):
                     config["profile_url"] = "https://jpopsuki.eu/bonus.php"
+                site_domain = str(config.get("site_domain") or "").lower().lstrip(".")
+                if site_domain in {"yemapt.org", "www.yemapt.org", "web.yemapt.org"}:
+                    config.update({
+                        "url": "https://www.yemapt.org/attendance.php",
+                        "site_domain": "yemapt.org",
+                    })
+                if site_domain == "club.hares.top":
+                    config.update({
+                        "sign_in_enabled": False,
+                        "profile_refresh_enabled": False,
+                        "sign_in_supported": False,
+                        "profile_refresh_supported": False,
+                    })
+                    automation.enabled = False
                 config["catalog_correction_version"] = PT_CATALOG_CORRECTION_VERSION
             automation.config_json = json.dumps(config, ensure_ascii=False)
             changed += 1

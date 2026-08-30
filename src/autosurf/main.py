@@ -49,6 +49,7 @@ from autosurf.automations.pt_signin import (
     SoulVoiceAdapter,
     SunnyPtAdapter,
     TjuptAdapter,
+    YemaPtAdapter,
     ZhuqueAdapter,
 )
 from autosurf.config import Settings, get_settings
@@ -66,7 +67,7 @@ def build_handler_registry() -> HandlerRegistry:
         FiftyTwoPtAdapter(), ChdBitsAdapter(), BtschoolAdapter(), OpenCdAdapter(),
         OshenPtAdapter(), SoulVoiceAdapter(),
         TjuptAdapter(), RousiAdapter(),
-        MTeamAdapter(), SunnyPtAdapter(), ZhuqueAdapter(),
+        MTeamAdapter(), SunnyPtAdapter(), YemaPtAdapter(), ZhuqueAdapter(),
     ]))
     return registry
 

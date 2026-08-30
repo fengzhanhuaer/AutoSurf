@@ -18,6 +18,7 @@ from autosurf.automations.pt_signin import (
     SoulVoiceAdapter,
     SunnyPtAdapter,
     TjuptAdapter,
+    YemaPtAdapter,
     ZhuqueAdapter,
     _click_common_signin_control,
     _classify_pt_homepage,
@@ -601,6 +602,79 @@ async def test_rousi_adapter_uses_current_cookie_session_and_csrf_api():
     assert result.details["site_history"] == [{"date": "2026-08-30", "reward": "10"}]
     assert page.waits == 1
     assert page.claims == ["csrf-value"]
+
+
+@pytest.mark.asyncio
+async def test_yemapt_adapter_uses_current_profile_api_and_canonical_host():
+    class Page:
+        url = "https://web.yemapt.org/"
+        visited = []
+
+        async def goto(self, url, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded"}
+            self.url = url
+            self.visited.append(url)
+
+        async def evaluate(self, _script, path):
+            assert path == "/api/user/profile"
+            return {"status": 200, "body": {
+                "success": True,
+                "data": {
+                    "userName": "fenger",
+                    "levelName": "Power User",
+                    "uploadedBytes": 1099511627776,
+                    "downloadedBytes": 107374182400,
+                    "bonus": "1234.5",
+                },
+            }}
+
+    page = Page()
+    result = await YemaPtAdapter().refresh_profile(page, RunContext("yema", {}, {}))
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.message == "YemaPT 个人信息刷新成功"
+    assert result.details["profile_stats"] == {
+        "username": "fenger",
+        "user_level": "Power User",
+        "uploaded": "1 TiB",
+        "downloaded": "100 GiB",
+        "bonus": "1234.5",
+    }
+    assert page.visited == ["https://www.yemapt.org/"]
+
+
+@pytest.mark.asyncio
+async def test_yemapt_adapter_reports_api_login_failure_as_auth_expired():
+    class Page:
+        url = "https://www.yemapt.org/"
+
+        async def evaluate(self, _script, path):
+            assert path == "/api/user/profile"
+            return {"status": 200, "body": {
+                "success": False, "showType": 2, "errorCode": 400,
+            }}
+
+    result = await YemaPtAdapter().refresh_profile(Page(), RunContext("yema", {}, {}))
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
+    assert result.message == "YemaPT 浏览器登录已失效"
+
+
+@pytest.mark.asyncio
+async def test_yemapt_adapter_uses_attendance_api_after_authentication():
+    class Page:
+        url = "https://www.yemapt.org/"
+
+        async def evaluate(self, _script, path):
+            if path == "/api/user/profile":
+                return {"status": 200, "body": {"success": True, "data": {"id": 7}}}
+            assert path == "/attendance.php"
+            return {"status": 200, "body": {"success": True, "showType": 0}}
+
+    result = await YemaPtAdapter().sign_in(Page(), RunContext("yema", {}, {}))
+
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.message == "YemaPT 签到成功"
 
 
 @pytest.mark.asyncio
@@ -1287,14 +1361,18 @@ def test_pt_discovery_uses_catalog_and_cookie_signatures_without_guessing_unknow
     catalog = discover_pt_site(".club.hares.top", {"sid"})
     signature = discover_pt_site("tracker.test", {"C_SECURE_UID", "session"})
 
-    assert catalog is not None
-    assert catalog.name == "Hares"
-    assert catalog.url == "https://club.hares.top/attendance.php?action=sign"
-    assert catalog.supported is True
+    assert catalog is None
     assert signature is not None
     assert signature.reason == "cookie_signature"
     assert signature.url == "https://tracker.test/attendance.php"
     assert discover_pt_site("example.com", {"sid", "theme"}) is None
+
+
+def test_yemapt_discovery_uses_current_www_host():
+    discovery = discover_pt_site("yemapt.org", {"sid"})
+
+    assert discovery is not None
+    assert discovery.url == "https://www.yemapt.org/attendance.php"
 
 
 def test_pt_signin_urls_keep_homepage_as_the_first_navigation():
