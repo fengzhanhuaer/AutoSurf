@@ -2463,10 +2463,10 @@ async def _click_common_signin_control_in(root: Any) -> bool:
             /^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$/i,
             /^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$/i,
           ];
-          for (const element of elements.slice(0, 120)) {
+          for (const element of elements.slice(0, 500)) {
             element.removeAttribute(marker);
           }
-          for (const element of elements.slice(0, 120)) {
+          for (const element of elements.slice(0, 500)) {
             const style = getComputedStyle(element);
             const rect = element.getBoundingClientRect();
             const visible = style.display !== 'none' && style.visibility !== 'hidden'

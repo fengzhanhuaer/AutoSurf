@@ -1702,7 +1702,7 @@ async def test_common_signin_control_searches_child_frames():
             self.clicked = False
 
         async def evaluate_all(self, script, marker):
-            assert "elements.slice(0, 120)" in script
+            assert "elements.slice(0, 500)" in script
             assert marker == "data-autosurf-signin-target"
             return self.found
 
