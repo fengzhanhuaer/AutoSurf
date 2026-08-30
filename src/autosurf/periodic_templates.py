@@ -31,7 +31,7 @@ NODESEEK_TEMPLATE_CONFIG: dict[str, Any] = {
     "click_exact": False,
     "wait_after_click_ms": 0,
     "success_patterns": [r'"success"\s*:\s*true', "签到成功"],
-    "already_patterns": ["今日已签到", "已经签到", "重复签到"],
+    "already_patterns": [r"今日签到获得鸡腿\d+个", "今日已签到", "已经签到", "重复签到"],
     "auth_expired_patterns": ["请先登录", "未登录", "登录后"],
 }
 

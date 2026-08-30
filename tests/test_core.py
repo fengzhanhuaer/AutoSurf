@@ -317,6 +317,7 @@ def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
         assert migrated.handler_type == "browser_signin"
         assert migrated_config["url"] == "https://www.nodeseek.com/board"
         assert migrated_config["browser_request"]["method"] == "POST"
+        assert r"今日签到获得鸡腿\d+个" in migrated_config["already_patterns"]
         assert untouched.handler_type == "http_signin"
         assert json.loads(untouched.config_json) == {"url": "https://example.test/checkin"}
 
