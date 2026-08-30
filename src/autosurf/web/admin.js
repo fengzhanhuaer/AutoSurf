@@ -459,7 +459,7 @@ function renderPtSummary() {
 }
 
 function candidateReasonLabel(candidate) {
-  if (["profile_refresh_only", "web_storage_profile_refresh_only"].includes(candidate.strategy)) {
+  if (!candidate.sign_in_supported && candidate.profile_refresh_supported) {
     return "仅刷新个人信息";
   }
   return ({
@@ -520,7 +520,7 @@ function renderPtCandidates() {
     badge.className = `candidate-state ${candidate.configured ? "configured" : candidate.supported ? "available" : "unsupported"}`;
     badge.textContent = candidate.configured
       ? "已添加"
-      : ["profile_refresh_only", "web_storage_profile_refresh_only"].includes(candidate.strategy)
+      : !candidate.sign_in_supported && candidate.profile_refresh_supported
         ? "可添加（仅刷新）"
         : candidate.supported ? "可添加" : "待专用适配";
     statusCell.append(badge);

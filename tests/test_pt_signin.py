@@ -54,7 +54,24 @@ from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.domain.models import utc_now
 from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
 from autosurf.main import create_app
-from autosurf.pt_discovery import discover_pt_site, pt_site_domain_aliases
+from autosurf.pt_discovery import PT_SITE_CATALOG, discover_pt_site, pt_site_domain_aliases
+
+
+BOOKMARK_PT_DOMAINS = {
+    "1ptba.com", "52pt.site", "audiences.me", "carpt.net", "crabpt.vip",
+    "cyanbug.net", "discfan.net", "et8.org", "hdarea.club", "hdcity.city",
+    "hdfans.org", "hdhome.org", "hdsky.me", "hdtime.org", "hdvideo.top",
+    "hhanclub.net", "jpopsuki.eu", "kp.m-team.cc", "kufei.org",
+    "monikadesign.uk", "nanyangpt.com", "open.cd", "ourbits.club", "pandapt.net",
+    "piggo.me", "pt.0ff.cc", "pt.btschool.club", "pt.eastgame.org",
+    "pt.keepfrds.com", "pt.soulvoice.club", "pt.xingyungept.org", "ptcafe.club",
+    "ptchdbits.co", "pterclub.net", "pthome.net", "ptlgs.org", "ptsbao.club",
+    "rousi.pro", "sewerpt.com", "springsunday.net", "sunnypt.top", "tjupt.org",
+    "totheglory.im", "u2.dmhy.org", "ubits.club", "xingtan.one", "zhuque.in",
+    "zmpt.cc", "www.agsvpt.com", "www.gamegamept.com", "www.hddolby.com",
+    "www.haidan.cc", "www.hdkyl.in", "www.htpt.cc", "www.hxpt.org", "www.oshen.win",
+    "www.ptskit.org", "www.pttime.org", "www.qingwapt.org", "www.tangpt.top",
+}
 
 
 @pytest.fixture
@@ -689,8 +706,8 @@ async def test_handler_keeps_profile_refresh_after_signin_navigation_error(monke
     result = await PtSignInHandler().run(RunContext(
         "navigation-error",
         {
-            "url": "https://u2.dmhy.org/attendance.php",
-            "site_domain": "u2.dmhy.org",
+            "url": "https://hdvideo.top/attendance.php",
+            "site_domain": "hdvideo.top",
             "profile_url": "/userdetails.php?id=7",
             "sign_in_enabled": True,
             "profile_refresh_enabled": True,
@@ -702,7 +719,7 @@ async def test_handler_keeps_profile_refresh_after_signin_navigation_error(monke
     assert result.outcome == RunOutcome.FAILED
     assert result.details["actions"]["sign_in"]["outcome"] == RunOutcome.FAILED
     assert result.details["actions"]["profile_refresh"]["outcome"] == RunOutcome.SUCCESS
-    assert page.visited == ["https://u2.dmhy.org/userdetails.php?id=7"]
+    assert page.visited == ["https://hdvideo.top/userdetails.php?id=7"]
 
 
 @pytest.mark.asyncio
@@ -2677,6 +2694,27 @@ def test_pt_discovery_distinguishes_refresh_only_and_dedicated_adapter_sites():
     assert mteam_authenticated.profile_refresh_supported is True
     assert mteam_authenticated.default_profile_refresh_enabled is True
 
+    nexus = discover_pt_site("v6.nexushd.org", set())
+    assert nexus is not None
+    assert nexus.sign_in_supported is False
+    assert nexus.profile_refresh_supported is True
+    assert nexus.default_profile_refresh_enabled is True
+
+
+def test_fixed_pt_catalog_covers_bookmark_domains_and_defaults_to_refresh():
+    missing = {
+        domain for domain in BOOKMARK_PT_DOMAINS
+        if discover_pt_site(domain, set()) is None
+    }
+
+    assert missing == set()
+    assert len(BOOKMARK_PT_DOMAINS) == 60
+    assert len({item.domain for item in PT_SITE_CATALOG}) == len(PT_SITE_CATALOG)
+    discoveries = [discover_pt_site(item.domain, set()) for item in PT_SITE_CATALOG]
+    assert all(discovery is not None for discovery in discoveries)
+    assert all(discovery.profile_refresh_supported for discovery in discoveries if discovery)
+    assert all(discovery.default_profile_refresh_enabled for discovery in discoveries if discovery)
+
 
 def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
     ttg = discover_pt_site("totheglory.im", {"c_secure_uid"})
@@ -2796,6 +2834,8 @@ async def test_pt_signin_api_uses_catalog_without_credentials(settings):
         assert "zhuque.in" in by_key
         assert "rousi.pro" in by_key
         assert "kp.m-team.cc" in by_key
+        assert all(item["default_profile_refresh_enabled"] for item in items)
+        assert all(item["profile_refresh_supported"] for item in items)
         assert not any(item["site_key"] in {"lemonhd.club", "pt.gtk.pw"} for item in items)
 
         collected = await client.post(
@@ -2817,6 +2857,7 @@ async def test_pt_signin_api_uses_catalog_without_credentials(settings):
     assert collected.status_code == 201
     assert len(collected.json()["created"]) == 2
     assert {item["domain"] for item in collected.json()["created"]} == {"tjupt.org", "zhuque.in"}
+    assert all(item["config"]["profile_refresh_enabled"] for item in collected.json()["created"])
     assert collected_again.json()["created"] == []
     assert len(collected_again.json()["skipped"]) == 2
     assert len(listed.json()["items"]) == 2
@@ -2842,6 +2883,7 @@ async def test_pt_signin_api_creates_manual_site_without_credential(settings):
 
     assert created.status_code == 201
     assert created.json()["domain"] == "tracker.test"
+    assert created.json()["config"]["profile_refresh_enabled"] is True
     assert started.status_code == 202
     assert listed.json()["items"][0]["domain"] == "tracker.test"
     assert deleted.status_code == 204

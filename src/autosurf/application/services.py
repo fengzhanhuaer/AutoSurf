@@ -20,6 +20,9 @@ from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
 from autosurf.periodic_templates import apply_periodic_template
 
 
+PT_PROFILE_REFRESH_DEFAULT_VERSION = 1
+
+
 class AutomationService:
     def __init__(self, sessions: sessionmaker[Session], registry: HandlerRegistry) -> None:
         self.sessions = sessions
@@ -63,6 +66,30 @@ def _align_signin_schedules(
 
 def reconcile_signin_schedules(sessions: sessionmaker[Session]) -> int:
     return _align_signin_schedules(sessions, only_missing=True)[0]
+
+
+def reconcile_pt_profile_refresh_defaults(sessions: sessionmaker[Session]) -> int:
+    """Apply the refresh-by-default policy once without overriding later user choices."""
+    changed = 0
+    with sessions.begin() as session:
+        automations = session.scalars(select(AutomationRecord).where(
+            AutomationRecord.handler_type == "pt_signin"
+        )).all()
+        for automation in automations:
+            try:
+                config = json.loads(automation.config_json)
+            except (TypeError, ValueError):
+                continue
+            if config.get("profile_refresh_default_version") == PT_PROFILE_REFRESH_DEFAULT_VERSION:
+                continue
+            config.update({
+                "profile_refresh_enabled": True,
+                "profile_refresh_supported": True,
+                "profile_refresh_default_version": PT_PROFILE_REFRESH_DEFAULT_VERSION,
+            })
+            automation.config_json = json.dumps(config, ensure_ascii=False)
+            changed += 1
+    return changed
 
 
 def align_all_signin_schedules(sessions: sessionmaker[Session]) -> tuple[int, datetime]:

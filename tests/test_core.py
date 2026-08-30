@@ -13,6 +13,7 @@ from autosurf.infrastructure.database import AutomationRecord, ExecutionRecord
 from autosurf.main import create_app
 from autosurf.application.services import (
     reconcile_periodic_signin_templates,
+    reconcile_pt_profile_refresh_defaults,
     reconcile_signin_schedules,
 )
 from autosurf.domain.scheduling import next_signin_run_at
@@ -65,6 +66,40 @@ def test_reconcile_signin_schedules_preserves_execution_history(settings):
         assert refreshed.next_run_at.hour == 1
         assert json.loads(refreshed.config_json)["daily_start_time"] == "09:00"
         assert session.get(ExecutionRecord, execution.id) is not None
+
+
+def test_reconcile_pt_profile_refresh_defaults_runs_once(settings):
+    app = create_app(settings)
+    automation = app.state.automations.create(
+        "legacy-pt", "pt_signin", 24 * 3600, {
+            "url": "https://tracker.test/attendance.php",
+            "site_domain": "tracker.test",
+            "profile_refresh_enabled": False,
+            "profile_refresh_supported": False,
+        },
+    )
+    with app.state.sessions.begin() as session:
+        session.get(AutomationRecord, automation.id).enabled = False
+
+    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 1
+    with app.state.sessions() as session:
+        record = session.get(AutomationRecord, automation.id)
+        config = json.loads(record.config_json)
+        assert config["profile_refresh_enabled"] is True
+        assert config["profile_refresh_supported"] is True
+        assert config["profile_refresh_default_version"] == 1
+        assert record.enabled is False
+
+    with app.state.sessions.begin() as session:
+        record = session.get(AutomationRecord, automation.id)
+        config = json.loads(record.config_json)
+        config["profile_refresh_enabled"] = False
+        record.config_json = json.dumps(config)
+
+    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 0
+    with app.state.sessions() as session:
+        config = json.loads(session.get(AutomationRecord, automation.id).config_json)
+        assert config["profile_refresh_enabled"] is False
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,10 @@ from sqlalchemy import delete, select
 
 from autosurf.domain.models import ExecutionStatus, RunOutcome, utc_now
 from autosurf.domain.scheduling import SIGNIN_START_TIME, next_signin_run_at
-from autosurf.application.services import align_all_signin_schedules
+from autosurf.application.services import (
+    PT_PROFILE_REFRESH_DEFAULT_VERSION,
+    align_all_signin_schedules,
+)
 from autosurf.automations.pt_signin import sanitize_pt_profile_stats
 from autosurf.automations.browser_session import (
     _standalone_chrome_executable,
@@ -64,7 +67,7 @@ class PtSignInInput(BaseModel):
     success_patterns: list[str] = Field(default_factory=list, max_length=20)
     already_patterns: list[str] = Field(default_factory=list, max_length=20)
     sign_in_enabled: bool = True
-    profile_refresh_enabled: bool = False
+    profile_refresh_enabled: bool = True
 
 
 class PtSignInEnabledInput(BaseModel):
@@ -84,7 +87,7 @@ class PtSignInCollectInput(BaseModel):
     retry_interval_hours: int = Field(default=2, ge=1, le=168)
     max_retries: int = Field(default=5, ge=0, le=20)
     sign_in_enabled: bool = True
-    profile_refresh_enabled: bool = False
+    profile_refresh_enabled: bool = True
 
 
 class PtSignInScheduleInput(BaseModel):
@@ -1083,6 +1086,7 @@ def create_pt_signin_site(data: PtSignInInput, request: Request) -> dict[str, An
         ) and profile_refresh_supported,
         "sign_in_supported": sign_in_supported,
         "profile_refresh_supported": profile_refresh_supported,
+        "profile_refresh_default_version": PT_PROFILE_REFRESH_DEFAULT_VERSION,
         "discovery_strategy": discovery.strategy if discovery else None,
         "profile_url": discovery.profile_url if discovery else None,
         "daily_start_time": SIGNIN_START_TIME,
@@ -1161,6 +1165,7 @@ def collect_pt_signin_sites(data: PtSignInCollectInput, request: Request) -> dic
             ) and candidate["profile_refresh_supported"],
             "sign_in_supported": candidate["sign_in_supported"],
             "profile_refresh_supported": candidate["profile_refresh_supported"],
+            "profile_refresh_default_version": PT_PROFILE_REFRESH_DEFAULT_VERSION,
             "discovery_strategy": candidate["strategy"],
             "profile_url": candidate["profile_url"],
             "discovered": True,

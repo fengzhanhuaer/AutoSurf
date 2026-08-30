@@ -26,6 +26,7 @@ from autosurf.application.services import (
     ExecutionService,
     QueueService,
     reconcile_periodic_signin_templates,
+    reconcile_pt_profile_refresh_defaults,
     reconcile_signin_schedules,
 )
 from autosurf.browser_control import (
@@ -78,6 +79,7 @@ async def run_worker(settings: Settings) -> None:
     queue = QueueService(sessions, settings.execution_lease_seconds)
     execution = ExecutionService(sessions, queue, registry)
     reconcile_periodic_signin_templates(sessions)
+    reconcile_pt_profile_refresh_defaults(sessions)
     reconcile_signin_schedules(sessions)
     register_shared_browser_provider(CdpAutomationProvider())
 
@@ -116,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         display_settings=BrowserDisplaySettings(sessions),
     )
     reconcile_periodic_signin_templates(sessions)
+    reconcile_pt_profile_refresh_defaults(sessions)
     reconcile_signin_schedules(sessions)
 
     @asynccontextmanager

@@ -32,50 +32,82 @@ class PtSiteDefinition:
     aliases: tuple[str, ...] = ()
     profile_path: str | None = None
     target_domain: str | None = None
-    default_profile_refresh: bool = False
+    default_profile_refresh: bool = True
 
 
 # This catalog supplies stable names and known sign-in paths. Browser automation
 # reads all authentication state from the persistent Chrome profile.
 PT_SITE_CATALOG = (
-    PtSiteDefinition("pt.hdupt.com", "HDU PT"),
-    PtSiteDefinition("pterclub.net", "PterClub", aliases=("pterclub.com",)),
+    PtSiteDefinition("1ptba.com", "1PTBA"),
     PtSiteDefinition("52pt.site", "52PT", "/52bakatest0818.php"),
-    PtSiteDefinition("u2.dmhy.org", "U2"),
-    PtSiteDefinition("hdarea.club", "HDArea", "/"),
-    PtSiteDefinition("hhanclub.net", "HhanClub", aliases=("hhan.club", "hhanclub.top")),
-    PtSiteDefinition("tjupt.org", "TJUPT"),
+    PtSiteDefinition("agsvpt.com", "Arctic Global Seed Vault", target_domain="www.agsvpt.com"),
+    PtSiteDefinition("audiences.me", "Audiences"),
+    PtSiteDefinition("carpt.net", "CarPT"),
     PtSiteDefinition("club.hares.top", "Hares", "/attendance.php?action=sign"),
-    PtSiteDefinition("pt.btschool.club", "BTSchool", "/index.php?action=addbonus"),
-    PtSiteDefinition("pttime.org", "PTTime", target_domain="www.pttime.org"),
-    PtSiteDefinition("pt.0ff.cc", "pt.0ff.cc", default_profile_refresh=True),
-    PtSiteDefinition("ptchdbits.co", "CHDBits", "/bakatest.php"),
-    PtSiteDefinition("hdcity.city", "HDCity", "/"),
-    PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
-    PtSiteDefinition("rousi.pro", "Rousi", "/", "web_storage_browser", aliases=("rousi.zip",)),
-    PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "web_storage_profile_refresh_only"),
-    PtSiteDefinition("totheglory.im", "TTG", "/"),
-    PtSiteDefinition(
-        "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
-    ),
-    PtSiteDefinition("yemapt.org", "YemaPT"),
+    PtSiteDefinition("crabpt.vip", "CrabPT"),
+    PtSiteDefinition("cyanbug.net", "CyanBug"),
+    PtSiteDefinition("discfan.net", "DiscFan"),
+    PtSiteDefinition("et8.org", "TCCF", "/", "profile_refresh_only"),
+    PtSiteDefinition("gamegamept.com", "GGPT", target_domain="www.gamegamept.com"),
     PtSiteDefinition(
         "haidan.cc", "Haidan", "/", aliases=("haidan.video",),
         target_domain="www.haidan.cc",
     ),
-    PtSiteDefinition("open.cd", "OpenCD", "/"),
+    PtSiteDefinition("hdarea.club", "HDArea", "/"),
     PtSiteDefinition("hdchina.org", "HDChina"),
+    PtSiteDefinition("hdcity.city", "HDCity", "/"),
+    PtSiteDefinition("hddolby.com", "HD Dolby", target_domain="www.hddolby.com"),
+    PtSiteDefinition("hdfans.org", "HDFans", target_domain="www.hdfans.org"),
+    PtSiteDefinition("hdhome.org", "HDHome"),
+    PtSiteDefinition("hdkyl.in", "HDKylin", target_domain="www.hdkyl.in"),
     PtSiteDefinition("hdsky.me", "HDSky", "/"),
-    PtSiteDefinition("hdvideo.top", "HDVideo", "/attendance.php"),
+    PtSiteDefinition("hdtime.org", "HDTime"),
+    PtSiteDefinition("hdvideo.top", "HDVideo"),
+    PtSiteDefinition("hhanclub.net", "HhanClub", aliases=("hhan.club", "hhanclub.top")),
+    PtSiteDefinition("htpt.cc", "HaitangPT", target_domain="www.htpt.cc"),
+    PtSiteDefinition("hxpt.org", "HXPT", target_domain="www.hxpt.org"),
+    PtSiteDefinition("jpopsuki.eu", "JPopsuki", "/", "profile_refresh_only"),
+    PtSiteDefinition("kp.m-team.cc", "M-Team", "/", "web_storage_profile_refresh_only"),
+    PtSiteDefinition("kufei.org", "KuFei"),
+    PtSiteDefinition("monikadesign.uk", "MonikaDesign", "/", "profile_refresh_only"),
     PtSiteDefinition("nanyangpt.com", "NanyangPT", "/", "profile_refresh_only"),
-    PtSiteDefinition("et8.org", "TCCF", "/", "profile_refresh_only"),
-    PtSiteDefinition("pt.eastgame.org", "TLFBits", "/", "profile_refresh_only"),
-    PtSiteDefinition("pt.keepfrds.com", "KEEPFRDS", "/", "profile_refresh_only"),
-    PtSiteDefinition(
-        "sunnypt.top", "SunnyPT", "/user/attendance",
-    ),
+    PtSiteDefinition("open.cd", "OpenCD", "/"),
     PtSiteDefinition("oshen.win", "OshenPT", target_domain="www.oshen.win"),
+    PtSiteDefinition("ourbits.club", "OurBits"),
+    PtSiteDefinition("pandapt.net", "PANDA"),
+    PtSiteDefinition("piggo.me", "PigGo"),
+    PtSiteDefinition("pt.0ff.cc", "Free Farm"),
+    PtSiteDefinition("pt.btschool.club", "BTSchool", "/index.php?action=addbonus"),
+    PtSiteDefinition("pt.eastgame.org", "TLFBits", "/", "profile_refresh_only"),
+    PtSiteDefinition("pt.hdupt.com", "HDU PT"),
+    PtSiteDefinition("pt.keepfrds.com", "KEEPFRDS", "/", "profile_refresh_only"),
     PtSiteDefinition("pt.soulvoice.club", "SoulVoice"),
+    PtSiteDefinition("pt.xingyungept.org", "XingYunGePT"),
+    PtSiteDefinition("ptcafe.club", "PTCafe"),
+    PtSiteDefinition("ptchdbits.co", "CHDBits", "/bakatest.php"),
+    PtSiteDefinition("pterclub.net", "PterClub", aliases=("pterclub.com",)),
+    PtSiteDefinition("pthome.net", "PTHome"),
+    PtSiteDefinition("ptlgs.org", "PTLGS"),
+    PtSiteDefinition("ptskit.org", "PTSKIT", target_domain="www.ptskit.org"),
+    PtSiteDefinition("pttime.org", "PTTime", target_domain="www.pttime.org"),
+    PtSiteDefinition("ptsbao.club", "PTSBao", "/", "profile_refresh_only"),
+    PtSiteDefinition("qingwapt.org", "QingwaPT", target_domain="www.qingwapt.org"),
+    PtSiteDefinition("rousi.pro", "Rousi", "/", "web_storage_browser", aliases=("rousi.zip",)),
+    PtSiteDefinition("sewerpt.com", "SewerPT"),
+    PtSiteDefinition("springsunday.net", "SSD"),
+    PtSiteDefinition("sunnypt.top", "SunnyPT", "/user/attendance"),
+    PtSiteDefinition("tangpt.top", "TangPT", target_domain="www.tangpt.top"),
+    PtSiteDefinition("tjupt.org", "TJUPT"),
+    PtSiteDefinition("totheglory.im", "TTG", "/"),
+    PtSiteDefinition("u2.dmhy.org", "U2", "/", "profile_refresh_only"),
+    PtSiteDefinition("ubits.club", "UBits"),
+    PtSiteDefinition("v6.nexushd.org", "NexusHD", "/signin.php", "custom_required"),
+    PtSiteDefinition("xingtan.one", "XingTan"),
+    PtSiteDefinition("yemapt.org", "YemaPT"),
+    PtSiteDefinition(
+        "zhuque.in", "Zhuque", "/", "profile_refresh_only", profile_path="/user/info",
+    ),
+    PtSiteDefinition("zmpt.cc", "ZhiMengPT"),
 )
 
 
@@ -100,7 +132,7 @@ class PtDiscovery:
     @property
     def profile_refresh_supported(self) -> bool:
         return self.strategy in {
-            "generic_browser", "profile_refresh_only", "web_storage_browser",
+            "custom_required", "generic_browser", "profile_refresh_only", "web_storage_browser",
             "web_storage_profile_refresh_only",
         }
 
