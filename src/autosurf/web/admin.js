@@ -1354,8 +1354,7 @@ async function refresh({ quiet = false } = {}) {
   setBusy(true);
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [ptCandidates, ptSites, ptHistory, ptStats, accessSettings,
-      periodicCandidates, periodicSites, periodicExecutions] = await Promise.all([
+    const results = await Promise.allSettled([
       api("/api/v1/pt-signin/candidates?include_unknown=true"),
       api("/api/v1/pt-signin/sites"),
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
@@ -1365,18 +1364,29 @@ async function refresh({ quiet = false } = {}) {
       api("/api/v1/periodic-signin/sites"),
       api("/api/v1/periodic-signin/executions?limit=100"),
     ]);
-    state.ptCandidates = ptCandidates.items;
-    state.ptSites = ptSites.items;
-    state.ptHistory = ptHistory;
-    state.ptStats = ptStats.items;
-    state.lanOnly = accessSettings.lan_only;
-    elements.lanOnlyAccess.checked = state.lanOnly;
-    state.periodicCandidates = periodicCandidates.items;
-    state.periodicSites = periodicSites.items;
-    state.periodicExecutions = periodicExecutions.items;
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.some((result) => result.reason?.status === 401)) {
+      goToLogin();
+      return;
+    }
+    const value = (index) => results[index].status === "fulfilled" ? results[index].value : null;
+    if (value(0)) state.ptCandidates = value(0).items;
+    if (value(1)) state.ptSites = value(1).items;
+    if (value(2)) state.ptHistory = value(2);
+    if (value(3)) state.ptStats = value(3).items;
+    if (value(4)) {
+      state.lanOnly = value(4).lan_only;
+      elements.lanOnlyAccess.checked = state.lanOnly;
+    }
+    if (value(5)) state.periodicCandidates = value(5).items;
+    if (value(6)) state.periodicSites = value(6).items;
+    if (value(7)) state.periodicExecutions = value(7).items;
     renderPt();
     renderPeriodic();
-    if (!quiet) showToast("状态已刷新");
+    if (!quiet && failures.length) {
+      const messages = [...new Set(failures.map((result) => result.reason?.message || "数据读取失败"))];
+      showToast(`部分数据加载失败：${messages.join("；")}`, true);
+    } else if (!quiet) showToast("状态已刷新");
   } catch (error) {
     if (error.status === 401) goToLogin();
     else showToast(error.message, true);
@@ -1397,18 +1407,24 @@ async function refreshExecutionStates() {
   executionRefreshInFlight = true;
   try {
     const timezoneOffset = -new Date().getTimezoneOffset();
-    const [ptSites, ptHistory, ptStats, periodicSites, periodicExecutions] = await Promise.all([
+    const results = await Promise.allSettled([
       api("/api/v1/pt-signin/sites"),
       api(`/api/v1/pt-signin/history?days=7&timezone_offset=${timezoneOffset}`),
       api("/api/v1/pt-signin/stats"),
       api("/api/v1/periodic-signin/sites"),
       api("/api/v1/periodic-signin/executions?limit=100"),
     ]);
-    state.ptSites = ptSites.items;
-    state.ptHistory = ptHistory;
-    state.ptStats = ptStats.items;
-    state.periodicSites = periodicSites.items;
-    state.periodicExecutions = periodicExecutions.items;
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.some((result) => result.reason?.status === 401)) {
+      goToLogin();
+      return;
+    }
+    const value = (index) => results[index].status === "fulfilled" ? results[index].value : null;
+    if (value(0)) state.ptSites = value(0).items;
+    if (value(1)) state.ptHistory = value(1);
+    if (value(2)) state.ptStats = value(2).items;
+    if (value(3)) state.periodicSites = value(3).items;
+    if (value(4)) state.periodicExecutions = value(4).items;
     renderPtSummary();
     renderPtSites();
     renderPtHistory();

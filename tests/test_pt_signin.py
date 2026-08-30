@@ -957,6 +957,18 @@ async def test_pt_stats_api_returns_latest_profile_snapshot(settings):
                 "details": {"status_code": 401},
             }}},
         })
+    sign_only = app.state.queue.enqueue_now(automation.id)
+    with app.state.sessions.begin() as session:
+        record = session.get(ExecutionRecord, sign_only.id)
+        record.status = "succeeded"
+        record.finished_at = latest_finished_at + timedelta(seconds=1)
+        record.result_json = json.dumps({
+            "outcome": "success",
+            "message": "sign in only",
+            "details": {
+                "actions": {"sign_in": {"enabled": True}, "profile_refresh": None},
+            },
+        })
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

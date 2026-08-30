@@ -1770,10 +1770,10 @@ def _profile_stats_from_result(result_json: str | None) -> dict[str, str]:
         details = result.get("details") or {}
         stats = details.get("profile_stats")
         if not isinstance(stats, dict):
-            stats = (
-                details.get("actions", {}).get("profile_refresh", {}).get("details", {})
-                .get("profile_stats")
-            )
+            actions = details.get("actions")
+            refresh = actions.get("profile_refresh") if isinstance(actions, dict) else None
+            refresh_details = refresh.get("details") if isinstance(refresh, dict) else None
+            stats = refresh_details.get("profile_stats") if isinstance(refresh_details, dict) else None
         if isinstance(stats, dict):
             return sanitize_pt_profile_stats({
                 str(key): str(value)[:160]
