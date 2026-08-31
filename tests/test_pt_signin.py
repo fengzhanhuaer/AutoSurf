@@ -42,6 +42,7 @@ from autosurf.automations.pt_signin import (
     normalize_site_signin_history,
     normalize_pt_profile_stats,
     page_body_text,
+    page_requires_login,
     playwright_error_result,
     profile_refresh_skip_result,
     sanitize_pt_profile_stats,
@@ -307,8 +308,8 @@ async def test_safeline_confirmation_is_clicked_once_when_explicit():
         async def is_visible(self):
             return True
 
-        async def click(self, **kwargs):
-            assert kwargs == {"timeout": 1_000, "no_wait_after": True}
+        async def evaluate(self, script):
+            assert script == "element => element.click()"
             self.page.clicks += 1
             self.page.body = "欢迎回来"
 
@@ -357,8 +358,8 @@ async def test_safeline_confirmation_waits_without_reloading():
         async def is_visible(self):
             return True
 
-        async def click(self, **kwargs):
-            assert kwargs == {"timeout": 2_000, "no_wait_after": True}
+        async def evaluate(self, script):
+            assert script == "element => element.click()"
             self.page.clicks += 1
 
     class Page:
@@ -403,8 +404,8 @@ async def test_safeline_confirmation_times_out_without_reloading_or_reclicking()
         async def is_visible(self):
             return True
 
-        async def click(self, **kwargs):
-            assert kwargs == {"timeout": 1_000, "no_wait_after": True}
+        async def evaluate(self, script):
+            assert script == "element => element.click()"
             self.page.clicks += 1
 
     class Page:
@@ -445,7 +446,7 @@ async def test_safeline_confirmation_does_not_retry_after_click_error():
         async def is_visible(self):
             return True
 
-        async def click(self, **_kwargs):
+        async def evaluate(self, _script):
             self.page.clicks += 1
             raise RuntimeError("page navigated during click")
 
@@ -2089,6 +2090,11 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
             assert name == "href"
             return "/52bakatest0818.php"
 
+        async def evaluate(self, script):
+            assert script == "element => element.click()"
+            self.page.visited.append("native-click")
+            self.page.url = "https://52pt.site/52bakatest0818.php"
+
     class Page:
         url = "https://52pt.site/52bakatest0818.php"
         visited = []
@@ -2110,7 +2116,7 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
 
     assert page.visited == [
         "https://52pt.site/",
-        "https://52pt.site/52bakatest0818.php",
+        "native-click",
     ]
     assert result.outcome == RunOutcome.ALREADY_DONE
 
@@ -2146,19 +2152,30 @@ async def test_chdbits_uses_safe_skip_answer_option():
             return "签到成功" if self.page.clicked else "每日签到 请选择答案"
 
         async def is_visible(self):
-            return "不会" in self.selector
+            return "不会" in self.selector or 'type="radio"' in self.selector
+
+        async def is_checked(self):
+            return self.page.answer_selected
 
         async def click(self):
             self.page.clicked = True
 
         async def evaluate(self, script):
-            assert "requestSubmit" in script
-            self.page.clicked = True
+            if 'type="radio"' in self.selector:
+                assert script == "element => element.click()"
+                self.page.events.append("select-answer")
+                self.page.answer_selected = True
+            else:
+                assert "requestSubmit" in script
+                self.page.events.append("skip-question")
+                self.page.clicked = True
 
     class Page:
         url = "https://ptchdbits.co/bakatest.php"
         frames = None
         clicked = False
+        answer_selected = False
+        events = []
 
         def locator(self, selector):
             return Locator(self, selector)
@@ -2172,7 +2189,42 @@ async def test_chdbits_uses_safe_skip_answer_option():
     ))
 
     assert page.clicked is True
+    assert page.answer_selected is True
+    assert page.events == ["select-answer", "skip-question"]
     assert result.outcome == RunOutcome.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_chdbits_does_not_submit_skip_without_an_answer_option():
+    class Locator:
+        first = None
+
+        def __init__(self, selector):
+            self.selector = selector
+            self.first = self
+
+        async def inner_text(self):
+            return "每日签到 请选择答案"
+
+        async def is_visible(self):
+            return "不会" in self.selector
+
+    class Page:
+        url = "https://ptchdbits.co/bakatest.php"
+        frames = None
+
+        def locator(self, selector):
+            return Locator(selector)
+
+        def expect_navigation(self, **_kwargs):
+            raise AssertionError("must not submit without selecting an answer")
+
+    result = await ChdBitsAdapter().sign_in(Page(), RunContext(
+        "test", {"url": Page.url}, {"sid": "secret"},
+    ))
+
+    assert result.outcome == RunOutcome.FAILED
+    assert result.message == "CHDBits 签到页没有找到可选答案"
 
 
 @pytest.mark.asyncio
@@ -2203,6 +2255,40 @@ async def test_common_signin_control_searches_child_frames():
 
     assert await _click_common_signin_control(page) is True
     assert frame.controls.clicked is True
+
+
+@pytest.mark.asyncio
+async def test_generic_signin_reports_login_form_without_clicking_submit(tmp_path):
+    class Control:
+        first = None
+
+        def __init__(self, visible):
+            self.visible = visible
+            self.first = self
+
+        async def is_visible(self):
+            return self.visible
+
+    class Page:
+        url = "https://hdcity.city/login.php"
+        frames = None
+
+        def locator(self, selector):
+            if 'type="password"' in selector or 'type="text"' in selector:
+                return Control(True)
+            raise AssertionError("login page must be classified before sign-in controls")
+
+    page = Page()
+    assert await page_requires_login(page) is True
+    result = await PtSignInHandler()._generic_sign_in(
+        page,
+        RunContext("test", {"url": "https://hdcity.city/"}, {}),
+        200,
+        tmp_path / "failed.png",
+    )
+
+    assert result.outcome == RunOutcome.AUTH_EXPIRED
+    assert result.details["clicked"] is False
 
 
 @pytest.mark.asyncio
@@ -2605,6 +2691,14 @@ async def test_nexusphp_captcha_supports_ajax_controls_outside_form(monkeypatch)
             assert kwargs == {"timeout": 30_000}
             return ResponseContext()
 
+        async def screenshot(self, **kwargs):
+            assert kwargs == {
+                "type": "png",
+                "clip": {"x": 100.0, "y": 50.0, "width": 150.0, "height": 40.0},
+                "animations": "disabled",
+            }
+            return b"captcha-image"
+
         async def wait_for_timeout(self, _milliseconds):
             return None
 
@@ -2666,8 +2760,10 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
             assert timeout == 5_000
             self.page.captcha_ready = True
 
-        async def screenshot(self, **_kwargs):
-            return b"captcha-image"
+        async def bounding_box(self):
+            if self.kind != "captcha":
+                return None
+            return {"x": 120, "y": 80, "width": 150, "height": 40}
 
         async def fill(self, value):
             self.page.answer = value
@@ -2705,6 +2801,14 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
 
         def expect_navigation(self, **_kwargs):
             return Navigation()
+
+        async def screenshot(self, **kwargs):
+            assert kwargs == {
+                "type": "png",
+                "clip": {"x": 120.0, "y": 80.0, "width": 150.0, "height": 40.0},
+                "animations": "disabled",
+            }
+            return b"captcha-image"
 
     page = Page()
     result = await adapter.sign_in(
@@ -2761,8 +2865,10 @@ async def test_nexusphp_captcha_adapter_does_not_submit_unreliable_value(
         async def is_visible(self):
             return True
 
-        async def screenshot(self, **_kwargs):
-            return b"captcha-image"
+        async def bounding_box(self):
+            if self.kind != "captcha":
+                return None
+            return {"x": 30, "y": 20, "width": 150, "height": 40}
 
         async def click(self):
             raise AssertionError("unreliable captcha must not be submitted")
@@ -2775,6 +2881,14 @@ async def test_nexusphp_captcha_adapter_does_not_submit_unreliable_value(
 
         def locator(self, selector):
             return Locator("body" if selector == "body" else "form")
+
+        async def screenshot(self, **kwargs):
+            assert kwargs == {
+                "type": "png",
+                "clip": {"x": 30.0, "y": 20.0, "width": 150.0, "height": 40.0},
+                "animations": "disabled",
+            }
+            return b"captcha-image"
 
     page = Page()
     result = await adapter.sign_in(

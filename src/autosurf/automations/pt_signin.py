@@ -909,7 +909,9 @@ class FiftyTwoPtAdapter:
             target_host = (urlparse(target).hostname or "").lower().rstrip(".")
             if target_host != "52pt.site" and not target_host.endswith(".52pt.site"):
                 return RunResult(RunOutcome.FAILED, "52PT 签到入口指向了站外地址", {"url": target})
-            await page.goto(target, wait_until="domcontentloaded")
+            await signin_link.evaluate("element => element.click()")
+            with suppress(Exception):
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
 
         body = (await page.locator("body").inner_text())[:1_000_000]
         outcome = classify_pt_page(page.url, None, body, context.config)
@@ -1000,6 +1002,20 @@ class ChdBitsAdapter:
             return RunResult(
                 RunOutcome.FAILED,
                 "CHDBits 签到页没有找到安全的“不答题”选项",
+                {"url": page.url, "clicked": False},
+            )
+        answer = page.locator('input[type="radio"]:not([disabled])').first
+        if not await answer.is_visible():
+            return RunResult(
+                RunOutcome.FAILED,
+                "CHDBits 签到页没有找到可选答案",
+                {"url": page.url, "clicked": False},
+            )
+        await answer.evaluate("element => element.click()")
+        if not await answer.is_checked():
+            return RunResult(
+                RunOutcome.FAILED,
+                "CHDBits 签到答案未能选中",
                 {"url": page.url, "clicked": False},
             )
         async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
@@ -1146,7 +1162,9 @@ async def _submit_nexusphp_captcha(
             return None
         captcha, answer, submit = controls
 
-        value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
+        value = recognize_nexusphp_captcha(
+            await _capture_nexusphp_captcha(page, captcha)
+        )
         if value is None:
             return RunResult(
                 RunOutcome.BLOCKED,
@@ -1190,6 +1208,22 @@ async def _submit_nexusphp_captcha(
         RunOutcome.FAILED,
         f"{site_name} 提交签到后未识别到结果",
         {"url": page.url, "status_code": status_code, "clicked": True},
+    )
+
+
+async def _capture_nexusphp_captcha(page: Any, captcha: Any) -> bytes:
+    box = await captcha.bounding_box()
+    if not box or box["width"] <= 0 or box["height"] <= 0:
+        raise RuntimeError("captcha image has no visible bounds")
+    return await page.screenshot(
+        type="png",
+        clip={
+            "x": max(float(box["x"]), 0),
+            "y": max(float(box["y"]), 0),
+            "width": float(box["width"]),
+            "height": float(box["height"]),
+        },
+        animations="disabled",
     )
 
 
@@ -1515,6 +1549,10 @@ class PtSignInHandler:
     async def _generic_sign_in(self, page: Any, context: RunContext, status_code: int | None,
                                screenshot: Path) -> RunResult:
         config = context.config
+        if await page_requires_login(page):
+            return _classified_result(
+                RunOutcome.AUTH_EXPIRED, page.url, status_code, clicked=False,
+            )
         body = await page_body_text(page)
         body += "\n" + await rendered_signin_status_text(page)
         outcome = classify_pt_page(page.url, status_code, body, config)
@@ -1842,10 +1880,7 @@ async def confirm_safeline_challenge(page: Any, timeout_ms: int = 30_000) -> boo
                     candidate = build_candidate()
                     if await candidate.is_visible():
                         clicked = True
-                        await candidate.click(
-                            timeout=min(max(timeout_ms, 1_000), 5_000),
-                            no_wait_after=True,
-                        )
+                        await candidate.evaluate("element => element.click()")
                         break
                 except Exception:
                     if clicked:
@@ -1885,6 +1920,26 @@ async def _usable_partial_pt_page(page: Any, expected_url: str) -> bool:
         return await body.count() > 0 and bool((await body.inner_text()).strip())
     except Exception:
         return False
+
+
+async def page_requires_login(page: Any) -> bool:
+    roots = [page]
+    roots.extend(
+        frame for frame in (getattr(page, "frames", None) or [])
+        if frame is not page
+    )
+    for root in roots:
+        try:
+            password = root.locator('input[type="password"]:not([disabled])').first
+            username = root.locator(
+                'input[type="text"]:not([disabled]), input[type="email"]:not([disabled]), '
+                'input[name*="user" i]:not([disabled]), input[name*="login" i]:not([disabled])'
+            ).first
+            if await password.is_visible() and await username.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def classify_pt_page(url: str, status_code: int | None, body: str,
