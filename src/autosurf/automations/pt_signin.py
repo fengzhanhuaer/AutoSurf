@@ -39,6 +39,7 @@ DEFAULT_ALREADY_PATTERNS = (
     r"已签到.{0,20}无需再签",
     r"签到已得",
     r"簽到已得",
+    r"\[已签到\s*\(Showed Up\)\]",
     r"already\s+(?:checked|signed)",
     r"checked\s+in\s+today",
     r"\bchecked\s+in\b",
@@ -46,6 +47,7 @@ DEFAULT_ALREADY_PATTERNS = (
 DEFAULT_SUCCESS_PATTERNS = (
     r"签到成功",
     r"簽到成功",
+    r"成功.{0,16}(?:连续|連續)(?:签到|簽到)",
     r"本次签到获得",
     r"本次簽到獲得",
     r"今天签到您获得.{0,24}(?:积分|魔力值?|金币|上传量)",
@@ -1153,10 +1155,10 @@ async def _submit_nexusphp_captcha(
             with suppress(Exception):
                 await page.wait_for_timeout(500)
         else:
-            async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-                await submit.click()
-            response = await navigation.value
-            status_code = response.status if response else None
+            await submit.click()
+            status_code = None
+            with suppress(Exception):
+                await page.wait_for_timeout(500)
     body = response_body + "\n" + await page_body_text(page)
     outcome = classify_pt_page(page.url, status_code, body, context.config)
     if outcome:

@@ -630,6 +630,9 @@ async def test_0ff_homepage_already_done_is_enriched_from_calendar_page():
         "https://hdarea.club/", 200, "魔力值 [使用] [已签到] (32)"
     ) == RunOutcome.ALREADY_DONE
     assert classify_pt_page(
+        "https://hdsky.me/", 200, "当前活动: [已签到(Showed Up)]"
+    ) == RunOutcome.ALREADY_DONE
+    assert classify_pt_page(
         "https://hdcity.city/", 200, "assignment_turned_in Checked in"
     ) == RunOutcome.ALREADY_DONE
     assert classify_pt_page(
@@ -2763,22 +2766,6 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
         async def click(self):
             self.page.submitted = True
 
-    class Response:
-        status = 200
-
-    class Navigation:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        @property
-        def value(self):
-            async def resolve():
-                return Response()
-            return resolve()
-
     class Page:
         frames = None
 
@@ -2791,9 +2778,6 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
         def locator(self, selector):
             return Locator(self, "body" if selector == "body" else "form")
 
-        def expect_navigation(self, **_kwargs):
-            return Navigation()
-
         async def screenshot(self, **kwargs):
             assert kwargs == {
                 "type": "png",
@@ -2801,6 +2785,9 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
                 "animations": "disabled",
             }
             return b"captcha-image"
+
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
 
     page = Page()
     result = await adapter.sign_in(
@@ -2813,6 +2800,80 @@ async def test_nexusphp_captcha_adapter_recognizes_and_confirms_success(
     assert page.answer == "MEP5MP"
     assert page.captcha_ready is True
     assert "MEP5MP" not in json.dumps(result.details)
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_captcha_accepts_hdsky_ajax_success_dialog(monkeypatch):
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.recognize_nexusphp_captcha",
+        lambda _image: "AAABR9",
+    )
+
+    class Locator:
+        first = None
+
+        def __init__(self, page, kind):
+            self.page = page
+            self.kind = kind
+            self.first = self
+
+        def locator(self, selector):
+            if "img" in selector:
+                return Locator(self.page, "captcha")
+            if "imagestring" in selector:
+                return Locator(self.page, "answer")
+            return Locator(self.page, "submit")
+
+        async def inner_text(self):
+            if self.kind == "body" and self.page.submitted:
+                return "成功,已连续签到6天,魔力值加20,明日继续签到可获取22魔力值"
+            return "签到(Show Up)"
+
+        async def is_visible(self):
+            return True
+
+        async def wait_for(self, **_kwargs):
+            return None
+
+        async def bounding_box(self):
+            if self.kind != "captcha":
+                return None
+            return {"x": 120, "y": 80, "width": 150, "height": 40}
+
+        async def fill(self, value):
+            self.page.answer = value
+
+        async def click(self):
+            self.page.submitted = True
+
+    class Page:
+        frames = None
+        url = "https://hdsky.me/"
+
+        def __init__(self):
+            self.answer = None
+            self.submitted = False
+
+        def locator(self, selector):
+            return Locator(self, "body" if selector == "body" else "form")
+
+        async def screenshot(self, **_kwargs):
+            return b"captcha-image"
+
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
+
+    page = Page()
+    result = await _submit_nexusphp_captcha(
+        page,
+        RunContext("test", {"url": page.url}, {"sid": "secret"}),
+        "HDSky",
+    )
+
+    assert result is not None
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["clicked"] is True
+    assert page.answer == "AAABR9"
 
 
 @pytest.mark.asyncio
