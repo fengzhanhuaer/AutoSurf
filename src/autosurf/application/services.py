@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
+from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -22,6 +24,8 @@ from autosurf.periodic_templates import apply_periodic_template
 
 PT_PROFILE_REFRESH_DEFAULT_VERSION = 1
 PT_CATALOG_CORRECTION_VERSION = 2
+MAX_EXECUTION_RUNTIME_SECONDS = 300
+EXECUTION_CANCEL_GRACE_SECONDS = 10
 
 
 class AutomationService:
@@ -305,7 +309,36 @@ class ExecutionService:
                 context = RunContext(execution_id=execution.id, config=automation_config,
                                      cookies={}, browser_cookies=None, user_agent=None)
                 handler = self.registry.get(automation.handler_type)
-            result = await handler.run(context)
+            execution_timeout = _execution_timeout_seconds(automation_config)
+            task = asyncio.create_task(handler.run(context))
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(task), timeout=execution_timeout,
+                )
+            except TimeoutError:
+                task.cancel()
+                done, _pending = await asyncio.wait(
+                    {task}, timeout=EXECUTION_CANCEL_GRACE_SECONDS,
+                )
+                if task in done:
+                    with suppress(asyncio.CancelledError, Exception):
+                        task.result()
+                else:
+                    task.add_done_callback(_discard_task_result)
+                message = f"任务执行超过 {execution_timeout} 秒，已中止"
+                self.queue.fail(
+                    claimed.id, message, max_attempts=max_attempts,
+                    result={
+                        "outcome": RunOutcome.FAILED,
+                        "message": message,
+                        "details": {
+                            "failure_type": "execution_timeout",
+                            "timeout_seconds": execution_timeout,
+                        },
+                    },
+                    retry_interval_seconds=retry_interval_seconds,
+                )
+                return True
             result_payload = {"outcome": result.outcome, "message": result.message, "details": result.details}
             if result.outcome in {RunOutcome.SUCCESS, RunOutcome.ALREADY_DONE}:
                 self.queue.succeed(claimed.id, result_payload)
@@ -320,6 +353,19 @@ class ExecutionService:
                 retry_interval_seconds=retry_interval_seconds,
             )
         return True
+
+
+def _execution_timeout_seconds(config: dict[str, Any]) -> int:
+    page_timeout = _bounded_int(config.get("timeout_seconds"), 60, 5, 180)
+    default = min(max(page_timeout * 4, 120), MAX_EXECUTION_RUNTIME_SECONDS)
+    return _bounded_int(
+        config.get("execution_timeout_seconds"), default, 30, MAX_EXECUTION_RUNTIME_SECONDS,
+    )
+
+
+def _discard_task_result(task: asyncio.Task[Any]) -> None:
+    with suppress(asyncio.CancelledError, Exception):
+        task.result()
 
 
 def reconcile_periodic_signin_templates(sessions: sessionmaker[Session]) -> int:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -101,7 +102,11 @@ AUTOMATIC_CHALLENGE_PATTERNS = (
     *HUMAN_CHALLENGE_PATTERNS,
 )
 COMMON_BUTTON_PATTERNS = (
-    re.compile(r"^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*[\[【]?\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)"
+        r"(?:得魔力|领奖)?\s*[\]】]?\s*$",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$",
         re.IGNORECASE,
@@ -1683,7 +1688,13 @@ async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
     hostname = (expected.hostname or "").lower().rstrip(".")
     if hostname == "pttime.org" or hostname.endswith(".pttime.org"):
         return await _goto_pt_page(page, url, timeout_ms)
-    link = await _find_actionable_signin_link(page)
+    try:
+        link = await asyncio.wait_for(
+            _find_actionable_signin_link(page),
+            timeout=min(max(timeout_ms / 1000, 1), 5),
+        )
+    except TimeoutError:
+        link = None
     clicked = False
     with suppress(Exception):
         if link is not None:
@@ -1711,6 +1722,38 @@ async def _find_actionable_signin_link(page: Any) -> Any | None:
     for root in roots:
         try:
             links = root.locator("a[href]")
+            index = await links.evaluate_all(r"""(elements) => {
+              const patterns = [
+                /^\s*[\[【]?\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:得魔力|领奖)?\s*[\]】]?\s*$/i,
+                /^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$/i,
+              ];
+              return elements.slice(0, 120).findIndex((element) => {
+                const style = getComputedStyle(element);
+                const rect = element.getBoundingClientRect();
+                if (style.display === 'none' || style.visibility === 'hidden'
+                    || rect.width <= 0 || rect.height <= 0) return false;
+                const directText = [...element.childNodes]
+                  .filter((node) => node.nodeType === Node.TEXT_NODE)
+                  .map((node) => node.textContent || '').join(' ').trim();
+                const text = String(
+                  directText || element.innerText || element.textContent
+                  || element.getAttribute('aria-label') || element.getAttribute('title')
+                  || element.querySelector('img[alt]')?.alt || ''
+                ).trim();
+                return patterns.some((pattern) => pattern.test(text));
+              });
+            }""")
+            if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
+                return links.nth(index)
+            continue
+        except (AttributeError, TypeError):
+            # Lightweight test doubles and unusual frame implementations may
+            # not expose evaluate_all; the caller still applies an overall timeout.
+            try:
+                links = root.locator("a[href]")
+            except Exception:
+                continue
+        try:
             count = min(await links.count(), 120)
         except Exception:
             continue
@@ -2625,7 +2668,7 @@ async def _click_common_signin_control_in(root: Any) -> bool:
     try:
         found = await controls.evaluate_all(r"""(elements, marker) => {
           const patterns = [
-            /^\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:领奖)?\s*$/i,
+            /^\s*[\[【]?\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:得魔力|领奖)?\s*[\]】]?\s*$/i,
             /^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$/i,
           ];
           for (const element of elements.slice(0, 500)) {

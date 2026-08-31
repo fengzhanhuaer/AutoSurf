@@ -24,6 +24,7 @@ from autosurf.automations.pt_signin import (
     _classify_pt_homepage,
     _complete_0ff_slider,
     _enrich_0ff_calendar_history,
+    _find_actionable_signin_link,
     _goto_pt_page,
     _open_pt_signin_page,
     _resolve_0ff_slider,
@@ -1315,6 +1316,38 @@ async def test_pt_signin_opens_explicit_homepage_attendance_link():
 
     assert response.status == 200
     assert page.url == "https://u2.dmhy.org/showup.php"
+
+
+@pytest.mark.asyncio
+async def test_actionable_signin_link_uses_one_dom_scan_for_piggo_label():
+    target = object()
+
+    class Links:
+        calls = 0
+
+        async def evaluate_all(self, script):
+            self.calls += 1
+            assert "得魔力" in script
+            return 73
+
+        def nth(self, index):
+            assert index == 73
+            return target
+
+    class Page:
+        frames = None
+
+        def __init__(self):
+            self.links = Links()
+
+        def locator(self, selector):
+            assert selector == "a[href]"
+            return self.links
+
+    page = Page()
+
+    assert await _find_actionable_signin_link(page) is target
+    assert page.links.calls == 1
 
 
 def test_text_signin_history_supports_pttime_records():

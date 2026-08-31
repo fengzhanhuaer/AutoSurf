@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 import io
 import json
@@ -891,6 +892,43 @@ async def test_failed_handler_outcome_is_not_recorded_as_success(settings):
         assert record.error == "Cookie expired"
         assert record.result_json is not None
         assert __import__("json").loads(record.result_json)["outcome"] == "auth_expired"
+
+
+@pytest.mark.asyncio
+async def test_execution_timeout_cancels_handler_and_releases_queue_record(
+    settings, monkeypatch,
+):
+    cancelled = asyncio.Event()
+
+    class HangingHandler:
+        type = "test_hanging"
+
+        async def run(self, _context):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    monkeypatch.setattr(
+        "autosurf.application.services._execution_timeout_seconds", lambda _config: 0.01,
+    )
+    app = create_app(settings)
+    app.state.registry.register(HangingHandler())
+    automation = app.state.automations.create("hanging", "test_hanging", 3600, {})
+    execution = app.state.queue.enqueue_now(automation.id)
+
+    assert await app.state.execution.run_one() is True
+    assert cancelled.is_set()
+    with app.state.sessions() as session:
+        record = session.get(ExecutionRecord, execution.id)
+        result = json.loads(record.result_json)
+        assert record.status == ExecutionStatus.RETRY_WAIT
+        assert record.lease_until is None
+        assert result["outcome"] == RunOutcome.FAILED
+        assert result["details"] == {
+            "failure_type": "execution_timeout",
+            "timeout_seconds": 0.01,
+        }
 
 
 @pytest.mark.asyncio
