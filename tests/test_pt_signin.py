@@ -1641,7 +1641,7 @@ def test_52pt_discovery_and_adapter_use_the_current_signin_page():
     adapter = FiftyTwoPtAdapter()
 
     assert discovery is not None
-    assert discovery.url == "https://52pt.site/52bakatest0818.php"
+    assert discovery.url == "https://52pt.site/bakatest.php"
     assert adapter.matches(discovery.url) is True
     assert adapter.matches("https://www.52pt.site/52bakatest0818.php") is True
     assert adapter.matches("https://not52pt.site/52bakatest0818.php") is False
@@ -2028,7 +2028,7 @@ async def test_btschool_adapter_treats_authenticated_empty_reward_as_already_don
 
 
 @pytest.mark.asyncio
-async def test_52pt_missing_home_entry_after_paused_page_is_already_done():
+async def test_52pt_paused_legacy_page_uses_current_signin_route():
     class Locator:
         first = None
 
@@ -2038,7 +2038,11 @@ async def test_52pt_missing_home_entry_after_paused_page_is_already_done():
             self.first = self
 
         async def inner_text(self):
-            return "签到页面已暂停使用" if self.page.url.endswith("52bakatest0818.php") else "欢迎回来"
+            return (
+                "签到页面已暂停使用"
+                if self.page.url.endswith("52bakatest0818.php")
+                else "今日已签到"
+            )
 
         async def count(self):
             return 0
@@ -2056,19 +2060,17 @@ async def test_52pt_missing_home_entry_after_paused_page_is_already_done():
         async def goto(self, url, **_kwargs):
             self.url = url
 
-        async def evaluate(self, _script):
-            return "https://52pt.site/userdetails.php?id=7"
-
     page = Page()
     result = await FiftyTwoPtAdapter().sign_in(page, RunContext(
         "test", {"url": page.url}, {"sid": "secret"},
     ))
 
     assert result.outcome == RunOutcome.ALREADY_DONE
+    assert page.url == "https://52pt.site/bakatest.php"
 
 
 @pytest.mark.asyncio
-async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
+async def test_52pt_uses_current_signin_route_instead_of_stale_home_link():
     class Locator:
         first = None
 
@@ -2078,22 +2080,13 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
             self.first = self
 
         async def inner_text(self):
-            return "今日已签到" if len(self.page.visited) >= 2 else "欢迎回来"
+            return "今日已签到" if self.page.url.endswith("bakatest.php") else "欢迎回来"
 
         async def count(self):
             return 0
 
         async def is_visible(self):
-            return self.selector == 'a[href*="52bakatest0818.php"]'
-
-        async def get_attribute(self, name):
-            assert name == "href"
-            return "/52bakatest0818.php"
-
-        async def evaluate(self, script):
-            assert script == "element => element.click()"
-            self.page.visited.append("native-click")
-            self.page.url = "https://52pt.site/52bakatest0818.php"
+            return False
 
     class Page:
         url = "https://52pt.site/52bakatest0818.php"
@@ -2115,8 +2108,7 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
     ))
 
     assert page.visited == [
-        "https://52pt.site/",
-        "native-click",
+        "https://52pt.site/bakatest.php",
     ]
     assert result.outcome == RunOutcome.ALREADY_DONE
 

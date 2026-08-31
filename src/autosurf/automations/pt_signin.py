@@ -896,22 +896,9 @@ class FiftyTwoPtAdapter:
         if sign_in_paused or not await page.locator("#slider-btn").count():
             parsed = validated_http_url(str(context.config["url"]))
             origin = f"{parsed.scheme}://{parsed.netloc}/"
-            await page.goto(origin, wait_until="domcontentloaded")
-            signin_link = await _find_52pt_signin_link(page)
-            if signin_link is None:
-                if sign_in_paused and await discover_pt_profile_url(page):
-                    return _classified_result(
-                        RunOutcome.ALREADY_DONE, page.url, None, clicked=False,
-                    )
-                return RunResult(RunOutcome.FAILED, "52PT 首页没有找到签到入口", {"url": page.url})
-            href = str(await signin_link.get_attribute("href") or "")
-            target = urljoin(page.url, href)
-            target_host = (urlparse(target).hostname or "").lower().rstrip(".")
-            if target_host != "52pt.site" and not target_host.endswith(".52pt.site"):
-                return RunResult(RunOutcome.FAILED, "52PT 签到入口指向了站外地址", {"url": target})
-            await signin_link.evaluate("element => element.click()")
-            with suppress(Exception):
-                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            await page.goto(
+                urljoin(origin, "/bakatest.php"), wait_until="domcontentloaded",
+            )
 
         body = (await page.locator("body").inner_text())[:1_000_000]
         outcome = classify_pt_page(page.url, None, body, context.config)
@@ -934,26 +921,6 @@ class FiftyTwoPtAdapter:
         return RunResult(RunOutcome.FAILED, "52PT 提交签到后未识别到结果", {
             "url": page.url, "status_code": status_code, "clicked": True,
         })
-
-
-async def _find_52pt_signin_link(page: Any) -> Any | None:
-    selectors = (
-        "#game",
-        'a[href*="52bakatest0818.php"]',
-        'a[href*="bakatest.php"]',
-    )
-    for selector in selectors:
-        candidate = page.locator(selector).first
-        with suppress(Exception):
-            if await candidate.is_visible():
-                return candidate
-    with suppress(Exception):
-        candidate = page.get_by_text(
-            re.compile(r"^\s*(?:52PT)?\s*签到(?:得魔力)?\s*$", re.IGNORECASE),
-        ).first
-        if await candidate.is_visible():
-            return candidate
-    return None
 
 
 async def complete_52pt_slider(page: Any) -> bool:

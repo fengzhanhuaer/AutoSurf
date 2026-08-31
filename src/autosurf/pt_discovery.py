@@ -40,7 +40,7 @@ class PtSiteDefinition:
 # reads all authentication state from the persistent Chrome profile.
 PT_SITE_CATALOG = (
     PtSiteDefinition("1ptba.com", "1PTBA"),
-    PtSiteDefinition("52pt.site", "52PT", "/52bakatest0818.php"),
+    PtSiteDefinition("52pt.site", "52PT", "/bakatest.php"),
     PtSiteDefinition("agsvpt.com", "Arctic Global Seed Vault", target_domain="www.agsvpt.com"),
     PtSiteDefinition("audiences.me", "Audiences"),
     PtSiteDefinition("carpt.net", "CarPT"),
