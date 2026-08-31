@@ -30,6 +30,7 @@ from autosurf.automations.pt_signin import (
     _resolve_0ff_slider,
     _submit_nexusphp_captcha,
     classify_cloudflare_upstream_error,
+    classify_upstream_error,
     classify_pt_challenge,
     classify_pt_page,
     combine_pt_action_results,
@@ -115,6 +116,130 @@ def test_cloudflare_origin_error_is_not_reported_as_human_verification():
     ) is None
 
 
+def test_gateway_timeout_is_reported_as_upstream_failure():
+    body = "网关超时 Error 504 访问源网站超时"
+    assert classify_upstream_error(504, body) == (
+        "gateway_timeout",
+        "站点源服务器响应超时（504）",
+    )
+    assert classify_pt_page(
+        "https://www.ptskit.org/", 504, body,
+    ) == RunOutcome.FAILED
+
+
+@pytest.mark.asyncio
+async def test_sunnypt_handler_uses_api_without_opening_attendance_spa(
+    monkeypatch, tmp_path,
+):
+    class Body:
+        async def inner_text(self):
+            return "SunnyPT 欢迎回来"
+
+    class Page:
+        url = "about:blank"
+
+        def set_default_timeout(self, _timeout):
+            return None
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        async def evaluate(self, _script, args=None):
+            if args == {"method": "GET", "path": "/api/v1/attendance/status"}:
+                return {
+                    "session_status": 200,
+                    "status": 200,
+                    "authenticated": True,
+                    "body": {"code": 0, "data": {"checked_in": True}},
+                }
+            if args and args["path"].startswith("/api/v1/attendance/monthly"):
+                return {
+                    "session_status": 200,
+                    "status": 200,
+                    "authenticated": True,
+                    "body": {"code": 0, "data": {"records": []}},
+                }
+            return ""
+
+    page = Page()
+
+    class BrowserContext:
+        async def new_page(self):
+            return page
+
+    class BrowserSession:
+        context = BrowserContext()
+        mode = "persistent_headful"
+        profile_key = "shared"
+
+        async def new_page(self):
+            return page
+
+    class SessionManager:
+        async def __aenter__(self):
+            return BrowserSession()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class PlaywrightManager:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Response:
+        status = 200
+
+    async def goto_home(current_page, url, _timeout_ms):
+        assert url == "https://sunnypt.top/"
+        current_page.url = url
+        return Response()
+
+    async def keep_context(_page, context, _url):
+        return context
+
+    async def no_home_classification(*_args, **_kwargs):
+        return None
+
+    async def reject_spa_navigation(*_args, **_kwargs):
+        raise AssertionError("SunnyPT attendance SPA must not be opened")
+
+    monkeypatch.setenv("AUTOSURF_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "playwright.async_api.async_playwright", lambda: PlaywrightManager(),
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.persistent_chromium_session",
+        lambda *_args, **_kwargs: SessionManager(),
+    )
+    monkeypatch.setattr("autosurf.automations.pt_signin._goto_pt_page", goto_home)
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.browser_environment_run_context", keep_context,
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin._classify_pt_homepage", no_home_classification,
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin._open_pt_signin_page", reject_spa_navigation,
+    )
+
+    result = await PtSignInHandler([SunnyPtAdapter()]).run(RunContext(
+        "sunny-api",
+        {
+            "url": "https://sunnypt.top/user/attendance",
+            "sign_in_enabled": True,
+            "profile_refresh_supported": False,
+        },
+        {},
+    ))
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    assert result.message == "SunnyPT 今日已经签到"
+
+
 @pytest.mark.asyncio
 async def test_wait_for_automatic_pt_challenge_stops_after_browser_is_allowed():
     class Body:
@@ -182,7 +307,8 @@ async def test_safeline_confirmation_is_clicked_once_when_explicit():
         async def is_visible(self):
             return True
 
-        async def click(self):
+        async def click(self, **kwargs):
+            assert kwargs == {"timeout": 1_000, "no_wait_after": True}
             self.page.clicks += 1
             self.page.body = "欢迎回来"
 
@@ -203,14 +329,17 @@ async def test_safeline_confirmation_is_clicked_once_when_explicit():
         def get_by_text(self, _name):
             raise AssertionError("fallback text lookup should not be used")
 
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
+
     page = Page()
-    assert await confirm_safeline_challenge(page) is True
+    assert await confirm_safeline_challenge(page, 1_000) is True
     assert page.clicks == 1
     assert page.body == "欢迎回来"
 
 
 @pytest.mark.asyncio
-async def test_safeline_confirmation_reloads_once_when_challenge_persists():
+async def test_safeline_confirmation_waits_without_reloading():
     class Body:
         def __init__(self, page):
             self.page = page
@@ -228,13 +357,14 @@ async def test_safeline_confirmation_reloads_once_when_challenge_persists():
         async def is_visible(self):
             return True
 
-        async def click(self):
+        async def click(self, **kwargs):
+            assert kwargs == {"timeout": 2_000, "no_wait_after": True}
             self.page.clicks += 1
 
     class Page:
         body = "客户端异常，请确认您是合法用户。安全检测能力由 雷池 WAF 驱动"
         clicks = 0
-        reloads = 0
+        waits = 0
 
         def locator(self, selector):
             assert selector == "body"
@@ -246,17 +376,96 @@ async def test_safeline_confirmation_reloads_once_when_challenge_persists():
 
         async def wait_for_timeout(self, milliseconds):
             assert milliseconds == 500
-
-        async def reload(self, **kwargs):
-            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 10_000}
-            self.reloads += 1
-            self.body = "欢迎回来"
+            self.waits += 1
+            if self.waits == 2:
+                self.body = "欢迎回来"
 
     page = Page()
-    assert await confirm_safeline_challenge(page) is True
+    assert await confirm_safeline_challenge(page, 2_000) is True
     assert page.clicks == 1
-    assert page.reloads == 1
+    assert page.waits == 3
     assert page.body == "欢迎回来"
+
+
+@pytest.mark.asyncio
+async def test_safeline_confirmation_times_out_without_reloading_or_reclicking():
+    class Body:
+        async def inner_text(self):
+            return "客户端异常，请确认您是合法用户。安全检测能力由 雷池 WAF 驱动"
+
+    class Button:
+        first = None
+
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def is_visible(self):
+            return True
+
+        async def click(self, **kwargs):
+            assert kwargs == {"timeout": 1_000, "no_wait_after": True}
+            self.page.clicks += 1
+
+    class Page:
+        clicks = 0
+        waits = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def get_by_role(self, _role, *, name):
+            assert name.search("确认")
+            return Button(self)
+
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
+            self.waits += 1
+
+    page = Page()
+    assert await confirm_safeline_challenge(page, 1_000) is False
+    assert page.clicks == 1
+    assert page.waits == 2
+
+
+@pytest.mark.asyncio
+async def test_safeline_confirmation_does_not_retry_after_click_error():
+    class Body:
+        async def inner_text(self):
+            return "客户端异常，请确认您是合法用户。安全检测能力由 雷池 WAF 驱动"
+
+    class Button:
+        first = None
+
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def is_visible(self):
+            return True
+
+        async def click(self, **_kwargs):
+            self.page.clicks += 1
+            raise RuntimeError("page navigated during click")
+
+    class Page:
+        clicks = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        def get_by_role(self, _role, *, name):
+            assert name.search("确认")
+            return Button(self)
+
+        def get_by_text(self, _name):
+            raise AssertionError("must not try a second confirmation target")
+
+    page = Page()
+    assert await confirm_safeline_challenge(page, 1_000) is False
+    assert page.clicks == 1
 
 
 def test_pt_page_classification_distinguishes_common_results():
@@ -1252,7 +1461,7 @@ async def test_pttime_opens_signin_endpoint_instead_of_history_link():
 
 
 @pytest.mark.asyncio
-async def test_pt_signin_opens_explicit_homepage_attendance_link():
+async def test_pt_signin_opens_explicit_homepage_attendance_link(monkeypatch):
     class Response:
         status = 200
 
@@ -1309,6 +1518,13 @@ async def test_pt_signin_opens_explicit_homepage_attendance_link():
             assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60_000}
             return Pending()
 
+    settled = []
+
+    async def settle(page, timeout_ms):
+        settled.append((page.url, timeout_ms))
+        return True
+
+    monkeypatch.setattr("autosurf.automations.pt_signin._settle_pt_challenge", settle)
     page = Page()
     response = await _open_pt_signin_page(
         page, "https://u2.dmhy.org/attendance.php", 60_000,
@@ -1316,6 +1532,7 @@ async def test_pt_signin_opens_explicit_homepage_attendance_link():
 
     assert response.status == 200
     assert page.url == "https://u2.dmhy.org/showup.php"
+    assert settled == [("https://u2.dmhy.org/showup.php", 60_000)]
 
 
 @pytest.mark.asyncio
@@ -1860,7 +2077,7 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
             self.first = self
 
         async def inner_text(self):
-            return "今日已签到" if self.page.clicked else "欢迎回来"
+            return "今日已签到" if len(self.page.visited) >= 2 else "欢迎回来"
 
         async def count(self):
             return 0
@@ -1872,18 +2089,15 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
             assert name == "href"
             return "/52bakatest0818.php"
 
-        async def click(self):
-            self.page.clicked = True
-            self.page.url = "https://52pt.site/52bakatest0818.php"
-
     class Page:
         url = "https://52pt.site/52bakatest0818.php"
-        clicked = False
+        visited = []
 
         def locator(self, selector):
             return Locator(self, selector)
 
         async def goto(self, url, **_kwargs):
+            self.visited.append(url)
             self.url = url
 
         async def wait_for_load_state(self, *_args, **_kwargs):
@@ -1894,7 +2108,10 @@ async def test_52pt_finds_current_signin_href_when_legacy_id_is_missing():
         "test", {"url": page.url}, {"sid": "secret"},
     ))
 
-    assert page.clicked is True
+    assert page.visited == [
+        "https://52pt.site/",
+        "https://52pt.site/52bakatest0818.php",
+    ]
     assert result.outcome == RunOutcome.ALREADY_DONE
 
 
@@ -1934,6 +2151,10 @@ async def test_chdbits_uses_safe_skip_answer_option():
         async def click(self):
             self.page.clicked = True
 
+        async def evaluate(self, script):
+            assert "requestSubmit" in script
+            self.page.clicked = True
+
     class Page:
         url = "https://ptchdbits.co/bakatest.php"
         frames = None
@@ -1961,23 +2182,19 @@ async def test_common_signin_control_searches_child_frames():
             self.found = found
             self.clicked = False
 
-        async def evaluate_all(self, script, marker):
+        async def evaluate_all(self, script):
             assert "elements.slice(0, 500)" in script
             assert "Node.TEXT_NODE" in script
-            assert marker == "data-autosurf-signin-target"
+            assert "element.click()" in script
+            self.clicked = self.found
             return self.found
-
-        async def click(self, **kwargs):
-            assert kwargs == {"timeout": 5_000}
-            self.clicked = True
 
     class Root:
         def __init__(self, found):
             self.controls = Controls(found)
 
         def locator(self, selector):
-            if selector == '[data-autosurf-signin-target="true"]':
-                self.controls.first = self.controls
+            assert selector.startswith("button, a")
             return self.controls
 
     page = Root(False)
@@ -2004,7 +2221,7 @@ async def test_generic_signin_continues_with_captcha_after_click(monkeypatch, tm
         def __init__(self):
             self.first = self
 
-        async def evaluate_all(self, _script, _marker):
+        async def evaluate_all(self, _script):
             return True
 
         async def click(self, **_kwargs):
@@ -2106,6 +2323,9 @@ async def test_opencd_adapter_reports_image_captcha_as_blocked():
         async def click(self):
             return None
 
+        async def evaluate(self, script):
+            assert script == "element => element.click()"
+
     class Response:
         url = "https://open.cd/plugin_sign-in.php"
         status = 200
@@ -2183,6 +2403,9 @@ async def test_opencd_adapter_routes_captcha_page_to_local_ocr(monkeypatch):
 
         async def click(self):
             return None
+
+        async def evaluate(self, script):
+            assert script == "element => element.click()"
 
     class Response:
         url = "https://open.cd/plugin_sign-in.php"

@@ -16,9 +16,9 @@ import httpx
 import pytest
 
 from autosurf.automations.browser_session import (
-    OFFSCREEN_WINDOW_POSITION,
     PersistentBrowserRuntime,
-    new_offscreen_browser_page,
+    foreground_browser_page,
+    new_browser_task_page,
     persistent_chromium_session,
     register_shared_browser_provider,
 )
@@ -118,7 +118,7 @@ class FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_offscreen_page_uses_a_separate_verified_chrome_window():
+async def test_task_page_uses_a_separate_visible_chrome_window():
     page = FakePage()
     commands = []
 
@@ -129,8 +129,6 @@ async def test_offscreen_page_uses_a_separate_verified_chrome_window():
                 return {"targetId": "target-1"}
             if method == "Browser.getWindowForTarget":
                 return {"windowId": 42}
-            if method == "Browser.getWindowBounds":
-                return {"bounds": {"left": OFFSCREEN_WINDOW_POSITION, "top": 0}}
             return {}
 
         async def detach(self):
@@ -154,15 +152,31 @@ async def test_offscreen_page_uses_a_separate_verified_chrome_window():
         expect_page=lambda **_kwargs: ExpectedPage(),
     )
 
-    created = await new_offscreen_browser_page(context)
+    created = await new_browser_task_page(context)
 
     assert created is page
     create = next(params for method, params in commands if method == "Target.createTarget")
-    assert create == {"url": "about:blank", "newWindow": True, "background": True}
+    assert create == {"url": "about:blank", "newWindow": True, "background": False}
     bounds = next(params for method, params in commands if method == "Browser.setWindowBounds")
     assert bounds["windowId"] == 42
-    assert bounds["bounds"]["left"] == OFFSCREEN_WINDOW_POSITION
+    assert bounds["bounds"]["left"] == 0
     assert commands[-1] == ("detach", None)
+
+
+@pytest.mark.asyncio
+async def test_foreground_browser_page_only_activates_visible_window():
+    class Page:
+        foreground_calls = 0
+
+        async def bring_to_front(self):
+            self.foreground_calls += 1
+
+    page_instance = Page()
+
+    async with foreground_browser_page(page_instance):
+        assert page_instance.foreground_calls == 1
+
+    assert page_instance.foreground_calls == 1
 
 
 @pytest.mark.asyncio
@@ -183,7 +197,7 @@ async def test_worker_cdp_provider_closes_only_automation_pages(tmp_path, monkey
         return task_page
 
     monkeypatch.setattr("autosurf.browser_control.connect_standalone_browser", connect)
-    monkeypatch.setattr("autosurf.browser_control.new_offscreen_browser_page", create_page)
+    monkeypatch.setattr("autosurf.browser_control.new_browser_task_page", create_page)
     provider = CdpAutomationProvider()
 
     async with provider.automation_session(
@@ -310,14 +324,14 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     async def save(value, url):
         saved.append((value, url))
 
-    async def create_offscreen_page(value):
+    async def create_task_page(value):
         assert value is context
         return await value.new_page()
 
     monkeypatch.setattr("autosurf.browser_control.prepare_browser_for_run", prepare)
     monkeypatch.setattr("autosurf.browser_control.save_browser_after_run", save)
     monkeypatch.setattr(
-        "autosurf.browser_control.new_offscreen_browser_page", create_offscreen_page,
+        "autosurf.browser_control.new_browser_task_page", create_task_page,
     )
 
     display_settings = SimpleNamespace(

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from autosurf.automations.browser_session import (
     browser_environment_run_context,
+    foreground_browser_page,
     new_browser_session_page,
     persistent_chromium_session,
     validated_http_url,
@@ -908,8 +909,7 @@ class FiftyTwoPtAdapter:
             target_host = (urlparse(target).hostname or "").lower().rstrip(".")
             if target_host != "52pt.site" and not target_host.endswith(".52pt.site"):
                 return RunResult(RunOutcome.FAILED, "52PT 签到入口指向了站外地址", {"url": target})
-            await signin_link.click()
-            await page.wait_for_load_state("domcontentloaded")
+            await page.goto(target, wait_until="domcontentloaded")
 
         body = (await page.locator("body").inner_text())[:1_000_000]
         outcome = classify_pt_page(page.url, None, body, context.config)
@@ -1003,7 +1003,10 @@ class ChdBitsAdapter:
                 {"url": page.url, "clicked": False},
             )
         async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-            await skip.click()
+            await skip.evaluate(r"""element => {
+              if (element.form?.requestSubmit) element.form.requestSubmit(element);
+              else element.click();
+            }""")
         response = await navigation.value
         status_code = response.status if response else None
         body = await page_body_text(page)
@@ -1078,7 +1081,7 @@ class OpenCdAdapter:
         async with page.expect_response(
             lambda response: response.url.endswith("/plugin_sign-in.php")
         ) as pending:
-            await target.click()
+            await target.evaluate("element => element.click()")
         response = await pending.value
         response_body = (await response.text())[:1_000_000]
         if "name=\"imagehash\"" in response_body and "name=\"imagestring\"" in response_body:
@@ -1137,37 +1140,38 @@ async def _submit_nexusphp_captcha(
     site_name: str,
     response_suffix: str | None = None,
 ) -> RunResult | None:
-    controls = await _nexusphp_captcha_controls(page)
-    if controls is None:
-        return None
-    captcha, answer, submit = controls
+    async with foreground_browser_page(page):
+        controls = await _nexusphp_captcha_controls(page)
+        if controls is None:
+            return None
+        captcha, answer, submit = controls
 
-    value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
-    if value is None:
-        return RunResult(
-            RunOutcome.BLOCKED,
-            f"{site_name} 图片验证码未能可靠识别",
-            {"url": page.url, "clicked": False},
-        )
+        value = recognize_nexusphp_captcha(await captcha.screenshot(type="png"))
+        if value is None:
+            return RunResult(
+                RunOutcome.BLOCKED,
+                f"{site_name} 图片验证码未能可靠识别",
+                {"url": page.url, "clicked": False},
+            )
 
-    await answer.fill(value)
-    response_body = ""
-    if response_suffix:
-        async with page.expect_response(
-            lambda item: urlparse(item.url).path.endswith(response_suffix),
-            timeout=30_000,
-        ) as pending:
-            await submit.click()
-        response = await pending.value
-        status_code = response.status
-        response_body = (await response.text())[:1_000_000]
-        with suppress(Exception):
-            await page.wait_for_timeout(500)
-    else:
-        async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
-            await submit.click()
-        response = await navigation.value
-        status_code = response.status if response else None
+        await answer.fill(value)
+        response_body = ""
+        if response_suffix:
+            async with page.expect_response(
+                lambda item: urlparse(item.url).path.endswith(response_suffix),
+                timeout=30_000,
+            ) as pending:
+                await submit.click()
+            response = await pending.value
+            status_code = response.status
+            response_body = (await response.text())[:1_000_000]
+            with suppress(Exception):
+                await page.wait_for_timeout(500)
+        else:
+            async with page.expect_navigation(wait_until="domcontentloaded") as navigation:
+                await submit.click()
+            response = await navigation.value
+            status_code = response.status if response else None
     body = response_body + "\n" + await page_body_text(page)
     outcome = classify_pt_page(page.url, status_code, body, context.config)
     if outcome:
@@ -1436,7 +1440,9 @@ class PtSignInHandler:
                                         sign_in_result = await _enrich_0ff_calendar_history(
                                             page, context, sign_in_result, timeout_ms,
                                         )
-                                    if sign_in_result is None:
+                                    if sign_in_result is None and not isinstance(
+                                        adapter, SunnyPtAdapter,
+                                    ):
                                         response = await _open_pt_signin_page(page, url, timeout_ms)
                                         sign_in_result = await _resolve_0ff_slider(
                                             page, url, response.status if response else None, screenshot,
@@ -1707,7 +1713,9 @@ async def _open_pt_signin_page(page: Any, url: str, timeout_ms: int) -> Any:
                 ) as navigation:
                     clicked = True
                     await link.click()
-                return await navigation.value
+                response = await navigation.value
+                await _settle_pt_challenge(page, timeout_ms)
+                return response
     if clicked and page.url != pt_home_url(url):
         return None
     return await _goto_pt_page(page, url, timeout_ms)
@@ -1773,8 +1781,7 @@ async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
 
     try:
         response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        await confirm_safeline_challenge(page)
-        await wait_for_automatic_pt_challenge(page, min(timeout_ms, 12_000))
+        await _settle_pt_challenge(page, timeout_ms)
         return response
     except PlaywrightTimeoutError:
         if await _usable_partial_pt_page(page, url):
@@ -1806,8 +1813,15 @@ async def wait_for_automatic_pt_challenge(page: Any, timeout_ms: int = 12_000) -
     return False
 
 
-async def confirm_safeline_challenge(page: Any) -> bool:
-    """Click one explicit SafeLine confirmation; never interact with CAPTCHA controls."""
+async def _settle_pt_challenge(page: Any, timeout_ms: int) -> bool:
+    safeline_timeout = min(max(timeout_ms, 0), 30_000)
+    if await confirm_safeline_challenge(page, safeline_timeout):
+        return True
+    return await wait_for_automatic_pt_challenge(page, min(timeout_ms, 12_000))
+
+
+async def confirm_safeline_challenge(page: Any, timeout_ms: int = 30_000) -> bool:
+    """Click one explicit SafeLine confirmation and wait for it to complete."""
     try:
         body = await page_body_text(page)
         if not _matches(body, SAFELINE_CHALLENGE_PATTERNS):
@@ -1821,24 +1835,41 @@ async def confirm_safeline_challenge(page: Any) -> bool:
                 'input[type="button"][value="確認"], input[type="submit"][value="確認"]'
             ).first,
         )
-        for build_candidate in candidate_builders:
-            try:
-                candidate = build_candidate()
-                if await candidate.is_visible():
-                    await candidate.click()
-                    with suppress(Exception):
-                        await page.wait_for_timeout(500)
-                    if _matches(await page_body_text(page), SAFELINE_CHALLENGE_PATTERNS):
-                        with suppress(Exception):
-                            await page.reload(
-                                wait_until="domcontentloaded", timeout=10_000,
-                            )
-                    return True
-            except Exception:
-                continue
+        async with foreground_browser_page(page):
+            clicked = False
+            for build_candidate in candidate_builders:
+                try:
+                    candidate = build_candidate()
+                    if await candidate.is_visible():
+                        clicked = True
+                        await candidate.click(
+                            timeout=min(max(timeout_ms, 1_000), 5_000),
+                            no_wait_after=True,
+                        )
+                        break
+                except Exception:
+                    if clicked:
+                        return False
+                    continue
+            if not clicked:
+                return False
+
+            remaining_ms = max(timeout_ms, 0)
+            clear_reads = 0
+            while remaining_ms > 0:
+                interval_ms = min(500, remaining_ms)
+                await page.wait_for_timeout(interval_ms)
+                remaining_ms -= interval_ms
+                body = await page_body_text(page)
+                if body.strip() and not _matches(body, SAFELINE_CHALLENGE_PATTERNS):
+                    clear_reads += 1
+                    if clear_reads >= 2:
+                        return True
+                else:
+                    clear_reads = 0
+            return False
     except Exception:
         return False
-    return False
 
 
 async def _usable_partial_pt_page(page: Any, expected_url: str) -> bool:
@@ -1862,7 +1893,7 @@ def classify_pt_page(url: str, status_code: int | None, body: str,
     if status_code == 401:
         return RunOutcome.AUTH_EXPIRED
     lowered_url = url.lower()
-    if classify_cloudflare_upstream_error(status_code, body) is not None:
+    if classify_upstream_error(status_code, body) is not None:
         return RunOutcome.FAILED
     if _matches(body, CHALLENGE_PATTERNS):
         return RunOutcome.BLOCKED
@@ -1934,9 +1965,9 @@ def _classified_result(outcome: RunOutcome, url: str, status_code: int | None,
         messages[RunOutcome.BLOCKED] = blocker_message
         details["blocker_type"] = blocker_type
     elif outcome == RunOutcome.FAILED:
-        cloudflare_error = classify_cloudflare_upstream_error(status_code, page_body or "")
-        if cloudflare_error is not None:
-            failure_type, failure_message = cloudflare_error
+        upstream_error = classify_upstream_error(status_code, page_body or "")
+        if upstream_error is not None:
+            failure_type, failure_message = upstream_error
             messages[RunOutcome.FAILED] = failure_message
             details["failure_type"] = failure_type
     if site_history:
@@ -1979,6 +2010,25 @@ def classify_cloudflare_upstream_error(
     )
 
 
+def classify_upstream_error(
+    status_code: int | None, body: str,
+) -> tuple[str, str] | None:
+    cloudflare_error = classify_cloudflare_upstream_error(status_code, body)
+    if cloudflare_error is not None:
+        return cloudflare_error
+    if status_code == 504 or _matches(
+        body,
+        (
+            r"网关超时",
+            r"gateway\s+time(?:d)?\s*out",
+            r"error\s+504",
+            r"访问源网站超时",
+        ),
+    ):
+        return "gateway_timeout", "站点源服务器响应超时（504）"
+    return None
+
+
 async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
                                   site_domain: str, timeout_ms: int) -> RunResult:
     current_body = await page_body_text(page)
@@ -2005,13 +2055,12 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
         return RunResult(RunOutcome.FAILED, "个人信息页不属于当前 PT 站点", {"url": profile_url})
 
     response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_ms)
-    await confirm_safeline_challenge(page)
-    await wait_for_automatic_pt_challenge(page, min(timeout_ms, 12_000))
+    await _settle_pt_challenge(page, timeout_ms)
     status_code = response.status if response else None
     body = (await page.locator("body").inner_text())[:1_000_000]
-    cloudflare_error = classify_cloudflare_upstream_error(status_code, body)
-    if cloudflare_error is not None:
-        failure_type, failure_message = cloudflare_error
+    upstream_error = classify_upstream_error(status_code, body)
+    if upstream_error is not None:
+        failure_type, failure_message = upstream_error
         return RunResult(RunOutcome.FAILED, f"个人信息页：{failure_message}", {
             "url": page.url, "status_code": status_code, "failure_type": failure_type,
         })
@@ -2664,16 +2713,12 @@ async def _click_common_signin_control_in(root: Any) -> bool:
         "button, a, input[type=button], input[type=submit], input[type=image], "
         "[role=button], [onclick]"
     )
-    marker = "data-autosurf-signin-target"
     try:
-        found = await controls.evaluate_all(r"""(elements, marker) => {
+        return bool(await controls.evaluate_all(r"""(elements) => {
           const patterns = [
             /^\s*[\[【]?\s*(?:每日|今日|立即)?\s*(?:签到|簽到|打卡)(?:得魔力|领奖)?\s*[\]】]?\s*$/i,
             /^\s*(?:check\s*in|sign\s*in|attendance|show\s*up)\s*$/i,
           ];
-          for (const element of elements.slice(0, 500)) {
-            element.removeAttribute(marker);
-          }
           for (const element of elements.slice(0, 500)) {
             const style = getComputedStyle(element);
             const rect = element.getBoundingClientRect();
@@ -2689,15 +2734,11 @@ async def _click_common_signin_control_in(root: Any) -> bool:
               || element.getAttribute('title') || element.querySelector('img[alt]')?.alt || ''
             ).trim();
             if (!patterns.some((pattern) => pattern.test(text))) continue;
-            element.setAttribute(marker, 'true');
+            element.click();
             return true;
           }
           return false;
-        }""", marker)
-        if not found:
-            return False
-        await root.locator(f'[{marker}="true"]').first.click(timeout=5_000)
-        return True
+        }"""))
     except Exception:
         return False
 

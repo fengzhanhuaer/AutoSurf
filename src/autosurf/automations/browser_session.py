@@ -23,7 +23,6 @@ WAF_COOKIE_NAMES = frozenset({
 })
 SHARED_PROFILE_KEY = "shared"
 STANDALONE_CDP_ENDPOINT = "http://127.0.0.1:9222"
-OFFSCREEN_WINDOW_POSITION = 10_000
 CHROME_SINGLETON_FILES = (
     "SingletonCookie",
     "SingletonLock",
@@ -370,8 +369,8 @@ async def standalone_browser_pages(
     return await asyncio.to_thread(read)
 
 
-async def new_offscreen_browser_page(browser_context: Any) -> Any:
-    """Create a Chrome window outside the noVNC framebuffer."""
+async def new_browser_task_page(browser_context: Any) -> Any:
+    """Create a separate, visible Chrome window for one automation task."""
     browser = browser_context.browser
     if browser is None:
         raise RuntimeError("Chrome CDP browser connection is unavailable")
@@ -382,7 +381,7 @@ async def new_offscreen_browser_page(browser_context: Any) -> Any:
             target = await cdp.send("Target.createTarget", {
                 "url": "about:blank",
                 "newWindow": True,
-                "background": True,
+                "background": False,
             })
         page = await page_info.value
         target_id = str(target["targetId"])
@@ -391,17 +390,13 @@ async def new_offscreen_browser_page(browser_context: Any) -> Any:
         await cdp.send("Browser.setWindowBounds", {
             "windowId": window_id,
             "bounds": {
-                "left": OFFSCREEN_WINDOW_POSITION,
+                "left": 0,
                 "top": 0,
                 "width": 1365,
                 "height": 768,
                 "windowState": "normal",
             },
         })
-        actual = await cdp.send("Browser.getWindowBounds", {"windowId": window_id})
-        left = int(actual.get("bounds", {}).get("left", 0))
-        if left < OFFSCREEN_WINDOW_POSITION:
-            raise RuntimeError(f"Chrome automation window was not moved offscreen: left={left}")
         return page
     except Exception:
         if page is not None:
@@ -411,6 +406,14 @@ async def new_offscreen_browser_page(browser_context: Any) -> Any:
     finally:
         with suppress(Exception):
             await cdp.detach()
+
+
+@asynccontextmanager
+async def foreground_browser_page(page: Any):
+    """Bring a visible Chrome task window forward for interactive checks."""
+    with suppress(Exception):
+        await page.bring_to_front()
+    yield
 
 
 async def prepare_browser_for_run(

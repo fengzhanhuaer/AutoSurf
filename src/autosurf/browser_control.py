@@ -21,7 +21,7 @@ from autosurf.automations.browser_session import (
     close_persistent_browser,
     connect_standalone_browser,
     launch_standalone_browser,
-    new_offscreen_browser_page,
+    new_browser_task_page,
     prepare_browser_for_run,
     register_shared_browser_provider,
     save_browser_after_run,
@@ -104,7 +104,7 @@ class CdpAutomationProvider:
             await prepare_browser_for_run(connected, run_context, url)
 
             async def create_page() -> Any:
-                page = await new_offscreen_browser_page(connected.context)
+                page = await new_browser_task_page(connected.context)
                 owned_pages.add(page)
                 return page
 
@@ -401,7 +401,7 @@ class BrowserControlService:
                     assert connected.context is not None
 
                     async def create_page() -> Any:
-                        page = await new_offscreen_browser_page(connected.context)
+                        page = await new_browser_task_page(connected.context)
                         owned_pages.add(page)
                         return page
 
