@@ -43,3 +43,23 @@ def test_nexusphp_captcha_requires_exactly_six_alphanumeric_characters(
     monkeypatch.setattr(captcha_ocr, "_ocr_engine", lambda: Engine())
 
     assert captcha_ocr.recognize_nexusphp_captcha(b"source") == expected
+
+
+def test_nexusphp_captcha_uses_consistent_grayscale_fallbacks(monkeypatch):
+    class Engine:
+        def classification(self, image):
+            return {
+                b"strict": "a+abr9",
+                b"gray-80": "aaabr9",
+                b"gray-160": "aaabr9",
+            }[image]
+
+    monkeypatch.setattr(captcha_ocr, "preprocess_nexusphp_captcha", lambda _image: b"strict")
+    monkeypatch.setattr(
+        captcha_ocr,
+        "preprocess_nexusphp_captcha_grayscale",
+        lambda _image, threshold: f"gray-{threshold}".encode(),
+    )
+    monkeypatch.setattr(captcha_ocr, "_ocr_engine", lambda: Engine())
+
+    assert captcha_ocr.recognize_nexusphp_captcha(b"source") == "AAABR9"
