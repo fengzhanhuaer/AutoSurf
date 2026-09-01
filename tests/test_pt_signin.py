@@ -3563,6 +3563,85 @@ async def test_pt_navigation_tolerates_only_usable_same_origin_partial_page():
         )
 
 
+@pytest.mark.asyncio
+async def test_pt_navigation_retries_once_after_waf_aborts_initial_navigation():
+    from playwright.async_api import Error as PlaywrightError
+
+    class Response:
+        status = 200
+
+    class Body:
+        async def count(self):
+            return 1
+
+        async def inner_text(self):
+            return "欢迎回来，今日已经签到"
+
+    class Page:
+        url = "chrome-error://chromewebdata/"
+
+        def __init__(self):
+            self.calls = 0
+            self.waits = []
+
+        async def goto(self, url, **kwargs):
+            assert kwargs == {"wait_until": "domcontentloaded", "timeout": 60_000}
+            self.calls += 1
+            if self.calls == 1:
+                raise PlaywrightError("Page.goto: net::ERR_ABORTED")
+            self.url = url
+            return Response()
+
+        async def wait_for_timeout(self, timeout_ms):
+            self.waits.append(timeout_ms)
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+    page = Page()
+    response = await _goto_pt_page(page, "https://www.hdkyl.in/attendance.php", 60_000)
+
+    assert response.status == 200
+    assert page.calls == 2
+    assert page.waits == [1_000]
+
+
+@pytest.mark.asyncio
+async def test_pt_navigation_accepts_page_loaded_during_waf_abort():
+    from playwright.async_api import Error as PlaywrightError
+
+    class Body:
+        async def count(self):
+            return 1
+
+        async def inner_text(self):
+            return "欢迎回来，今日已经签到"
+
+    class Page:
+        url = "https://www.hdkyl.in/attendance.php"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def goto(self, *_args, **_kwargs):
+            self.calls += 1
+            raise PlaywrightError("Page.goto: net::ERR_ABORTED")
+
+        async def wait_for_timeout(self, timeout_ms):
+            assert timeout_ms == 1_000
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+    page = Page()
+    assert await _goto_pt_page(
+        page, "https://www.hdkyl.in/attendance.php", 60_000,
+    ) is None
+    assert page.calls == 1
+
+
 def test_hdvideo_uses_current_catalog_domain():
     discovery = discover_pt_site("www.hdvideo.top", {"c_secure_uid"})
 

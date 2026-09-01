@@ -1784,6 +1784,7 @@ async def _find_actionable_signin_link(page: Any) -> Any | None:
 
 
 async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
+    from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
     try:
@@ -1794,6 +1795,18 @@ async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
         if await _usable_partial_pt_page(page, url):
             return None
         raise
+    except PlaywrightError as exc:
+        if "ERR_ABORTED" not in str(exc):
+            raise
+        # WAF completion can replace the initial navigation while Playwright
+        # still reports that navigation as aborted.
+        await page.wait_for_timeout(1_000)
+        if await _usable_partial_pt_page(page, url):
+            await _settle_pt_challenge(page, timeout_ms)
+            return None
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        await _settle_pt_challenge(page, timeout_ms)
+        return response
 
 
 async def wait_for_automatic_pt_challenge(page: Any, timeout_ms: int = 60_000) -> bool:
