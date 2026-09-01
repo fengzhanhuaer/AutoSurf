@@ -28,6 +28,7 @@ from autosurf.automations.pt_signin import (
     _goto_pt_page,
     _open_pt_signin_page,
     _resolve_0ff_slider,
+    _settle_pt_challenge,
     _submit_nexusphp_captcha,
     classify_cloudflare_upstream_error,
     classify_upstream_error,
@@ -292,6 +293,34 @@ async def test_wait_for_automatic_pt_challenge_keeps_unsolved_challenge_blocked(
 
 
 @pytest.mark.asyncio
+async def test_settle_pt_challenge_uses_full_configured_timeout(monkeypatch):
+    class Body:
+        async def inner_text(self):
+            return "Just a moment... Cloudflare"
+
+    class Page:
+        frames = []
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+    captured = []
+
+    async def wait_for_challenge(_page, timeout_ms):
+        captured.append(timeout_ms)
+        return False
+
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.wait_for_automatic_pt_challenge",
+        wait_for_challenge,
+    )
+
+    assert await _settle_pt_challenge(Page(), 60_000) is False
+    assert captured == [60_000]
+
+
+@pytest.mark.asyncio
 async def test_safeline_confirmation_is_clicked_once_when_explicit():
     class Body:
         def __init__(self, page):
@@ -386,6 +415,95 @@ async def test_safeline_confirmation_waits_without_reloading():
     assert page.clicks == 1
     assert page.waits == 3
     assert page.body == "欢迎回来"
+
+
+@pytest.mark.asyncio
+async def test_safeline_confirmation_can_finish_after_previous_thirty_second_limit():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Button:
+        def __init__(self, page):
+            self.page = page
+            self.first = self
+
+        async def is_visible(self):
+            return True
+
+        async def evaluate(self, _script):
+            self.page.clicks += 1
+
+    class Page:
+        body = "客户端异常，请确认您是合法用户。安全检测能力由 雷池 WAF 驱动"
+        clicks = 0
+        waits = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        def get_by_role(self, _role, *, name):
+            assert name.search("确认")
+            return Button(self)
+
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
+            self.waits += 1
+            if self.waits == 70:
+                self.body = "欢迎回来，今日尚未签到"
+
+    page = Page()
+    assert await confirm_safeline_challenge(page, 60_000) is True
+    assert page.clicks == 1
+    assert page.waits == 71
+
+
+@pytest.mark.asyncio
+async def test_safeline_confirmation_waits_when_button_is_not_yet_visible():
+    class Body:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self):
+            return self.page.body
+
+    class Button:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        async def is_visible(self):
+            return False
+
+    class Page:
+        body = "安全检测能力由 雷池 WAF 驱动"
+        waits = 0
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body(self)
+
+        def get_by_role(self, _role, *, name):
+            assert name.search("确认")
+            return Button()
+
+        def get_by_text(self, _name):
+            return Button()
+
+        async def wait_for_timeout(self, milliseconds):
+            assert milliseconds == 500
+            self.waits += 1
+            if self.waits == 2:
+                self.body = "欢迎回来"
+
+    page = Page()
+    assert await confirm_safeline_challenge(page, 2_000) is True
+    assert page.waits == 3
 
 
 @pytest.mark.asyncio

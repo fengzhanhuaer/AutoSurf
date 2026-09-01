@@ -1796,8 +1796,8 @@ async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
         raise
 
 
-async def wait_for_automatic_pt_challenge(page: Any, timeout_ms: int = 12_000) -> bool:
-    """Wait briefly for browser-solvable WAF checks without interacting with a challenge."""
+async def wait_for_automatic_pt_challenge(page: Any, timeout_ms: int = 60_000) -> bool:
+    """Wait for browser-solvable WAF checks without interacting with a challenge."""
     try:
         body = await page_body_text(page)
         if not _matches(body, AUTOMATIC_CHALLENGE_PATTERNS):
@@ -1821,13 +1821,14 @@ async def wait_for_automatic_pt_challenge(page: Any, timeout_ms: int = 12_000) -
 
 
 async def _settle_pt_challenge(page: Any, timeout_ms: int) -> bool:
-    safeline_timeout = min(max(timeout_ms, 0), 30_000)
-    if await confirm_safeline_challenge(page, safeline_timeout):
-        return True
-    return await wait_for_automatic_pt_challenge(page, min(timeout_ms, 12_000))
+    challenge_timeout = max(timeout_ms, 0)
+    body = await page_body_text(page)
+    if _matches(body, SAFELINE_CHALLENGE_PATTERNS):
+        return await confirm_safeline_challenge(page, challenge_timeout)
+    return await wait_for_automatic_pt_challenge(page, challenge_timeout)
 
 
-async def confirm_safeline_challenge(page: Any, timeout_ms: int = 30_000) -> bool:
+async def confirm_safeline_challenge(page: Any, timeout_ms: int = 60_000) -> bool:
     """Click one explicit SafeLine confirmation and wait for it to complete."""
     try:
         body = await page_body_text(page)
@@ -1855,9 +1856,6 @@ async def confirm_safeline_challenge(page: Any, timeout_ms: int = 30_000) -> boo
                     if clicked:
                         return False
                     continue
-            if not clicked:
-                return False
-
             remaining_ms = max(timeout_ms, 0)
             clear_reads = 0
             while remaining_ms > 0:
