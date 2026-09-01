@@ -13,6 +13,7 @@ class PeriodicSiteTemplate:
 
 PERIODIC_SITE_TEMPLATES = (
     PeriodicSiteTemplate("nodeseek", "NodeSeek", ("nodeseek.com", "www.nodeseek.com")),
+    PeriodicSiteTemplate("invitesfun", "InvitesFun", ("invites.fun", "www.invites.fun")),
 )
 
 
@@ -36,6 +37,29 @@ NODESEEK_TEMPLATE_CONFIG: dict[str, Any] = {
 }
 
 
+INVITES_FUN_TEMPLATE_CONFIG: dict[str, Any] = {
+    "template_key": "invitesfun",
+    "url": "https://www.invites.fun/",
+    "wait_for_selector": ".item-forum-checkin",
+    "click_selector": ".item-forum-checkin .CheckInButton--yellow",
+    "click_role": None,
+    "click_name": None,
+    "click_exact": False,
+    "already_selector": ".item-forum-checkin .CheckInButton--green",
+    "success_selector": ".checkInResultModal .successTitleText, .Alert--success",
+    "wait_after_click_ms": 1500,
+    "success_patterns": ["签到成功", r"您已签到\s*\d+\s*天", r"获得\s*\d+.*奖励"],
+    "already_patterns": [r"已签到\s*\d+\s*天"],
+    "auth_expired_patterns": ["请先登录", "登录后签到"],
+}
+
+
+PERIODIC_TEMPLATE_CONFIGS = {
+    "nodeseek": NODESEEK_TEMPLATE_CONFIG,
+    "invitesfun": INVITES_FUN_TEMPLATE_CONFIG,
+}
+
+
 def discover_periodic_template(domain: str) -> PeriodicSiteTemplate | None:
     normalized = domain.lower().strip().lstrip(".").rstrip(".")
     return next((item for item in PERIODIC_SITE_TEMPLATES if normalized in item.domains), None)
@@ -44,8 +68,9 @@ def discover_periodic_template(domain: str) -> PeriodicSiteTemplate | None:
 def apply_periodic_template(
     config: dict[str, Any], handler_type: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    if config.get("template_key") != "nodeseek":
+    template = PERIODIC_TEMPLATE_CONFIGS.get(str(config.get("template_key") or ""))
+    if template is None:
         return str(handler_type or config.get("handler_type") or "browser_signin"), config
     updated = dict(config)
-    updated.update(NODESEEK_TEMPLATE_CONFIG)
+    updated.update(template)
     return "browser_signin", updated

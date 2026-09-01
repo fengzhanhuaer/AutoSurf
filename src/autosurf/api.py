@@ -881,10 +881,15 @@ def create_periodic_signin_site(data: PeriodicSignInInput, request: Request) -> 
     if method not in {"GET", "POST"}:
         raise HTTPException(status_code=422, detail="HTTP 方法仅支持 GET 或 POST")
     _validate_site_url(data.url)
-    if data.template_key == "nodeseek" and (
-        (urlparse(data.url).hostname or "").lower() not in {"nodeseek.com", "www.nodeseek.com"}
+    template = next(
+        (item for item in PERIODIC_SITE_TEMPLATES if item.key == data.template_key), None,
+    )
+    if template is not None and (
+        (urlparse(data.url).hostname or "").lower() not in template.domains
     ):
-        raise HTTPException(status_code=422, detail="NodeSeek 模板必须使用 NodeSeek 站点地址")
+        raise HTTPException(
+            status_code=422, detail=f"{template.name} 模板必须使用对应站点地址",
+        )
     if bool(data.click_role) != bool(data.click_name):
         raise HTTPException(status_code=422, detail="按按钮文字点击时必须同时填写角色和名称")
 
@@ -1646,6 +1651,8 @@ def _periodic_signin_site_view(
             "click_role": config.get("click_role"),
             "click_name": config.get("click_name"),
             "click_exact": bool(config.get("click_exact", False)),
+            "already_selector": config.get("already_selector"),
+            "success_selector": config.get("success_selector"),
             "wait_after_click_ms": config.get("wait_after_click_ms", 1500),
             "success_patterns": config.get("success_patterns", []),
             "already_patterns": config.get("already_patterns", []),

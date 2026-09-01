@@ -262,6 +262,41 @@ async def test_periodic_signin_api_manages_nodeseek_task(settings):
 
 
 @pytest.mark.asyncio
+async def test_periodic_signin_api_applies_invitesfun_template(settings):
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    auth = (settings.username, settings.password)
+    payload = {
+        "name": "InvitesFun",
+        "handler_type": "browser_signin",
+        "template_key": "invitesfun",
+        "url": "https://www.invites.fun/",
+        "interval_hours": 24,
+        "timeout_seconds": 60,
+        "random_delay_minutes": 30,
+        "retry_interval_hours": 2,
+        "max_retries": 5,
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        rejected = await client.post(
+            "/api/v1/periodic-signin/sites", auth=auth,
+            json={**payload, "url": "https://example.test/"},
+        )
+        created = await client.post(
+            "/api/v1/periodic-signin/sites", auth=auth, json=payload,
+        )
+
+    config = created.json()["config"]
+    assert rejected.status_code == 422
+    assert created.status_code == 201
+    assert created.json()["template_key"] == "invitesfun"
+    assert created.json()["handler_type"] == "browser_signin"
+    assert config["click_selector"] == ".item-forum-checkin .CheckInButton--yellow"
+    assert config["already_selector"] == ".item-forum-checkin .CheckInButton--green"
+    assert ".checkInResultModal .successTitleText" in config["success_selector"]
+
+
+@pytest.mark.asyncio
 async def test_periodic_candidates_collect_templates_and_expose_execution_history(settings):
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
@@ -286,9 +321,11 @@ async def test_periodic_candidates_collect_templates_and_expose_execution_histor
         history = await client.get("/api/v1/periodic-signin/executions", auth=auth)
         configured = await client.get("/api/v1/periodic-signin/candidates", auth=auth)
 
-    candidate = candidates.json()["items"][0]
+    candidate_items = candidates.json()["items"]
+    candidate = next(item for item in candidate_items if item["template_key"] == "nodeseek")
     assert candidates.status_code == 200
-    assert len(candidates.json()["items"]) == 1
+    assert len(candidate_items) == 2
+    assert {item["template_key"] for item in candidate_items} == {"nodeseek", "invitesfun"}
     assert candidate["template_key"] == "nodeseek"
     assert candidate["site_key"] == "nodeseek"
     assert candidate["configured"] is False
@@ -299,7 +336,13 @@ async def test_periodic_candidates_collect_templates_and_expose_execution_histor
     assert queued.status_code == 202
     assert history.json()["items"][0]["automation_name"] == "NodeSeek"
     assert history.json()["items"][0]["domain"] == "www.nodeseek.com"
-    assert configured.json()["items"][0]["configured"] is True
+    configured_items = configured.json()["items"]
+    assert next(
+        item for item in configured_items if item["template_key"] == "nodeseek"
+    )["configured"] is True
+    assert next(
+        item for item in configured_items if item["template_key"] == "invitesfun"
+    )["configured"] is False
 
 
 @pytest.mark.asyncio
@@ -354,26 +397,38 @@ async def test_execution_config_override_is_applied_without_changing_automation(
         assert json.loads(stored_automation.config_json) == {"mode": "scheduled", "kept": True}
 
 
-def test_periodic_template_reconciliation_migrates_nodeseek_only(settings):
+def test_periodic_template_reconciliation_migrates_known_templates_only(settings):
     app = create_app(settings)
     nodeseek = app.state.automations.create(
         "NodeSeek", "browser_signin", 86400,
         {"template_key": "nodeseek", "url": "https://www.nodeseek.com/board"},
     )
+    invitesfun = app.state.automations.create(
+        "InvitesFun", "browser_signin", 86400,
+        {"template_key": "invitesfun", "url": "https://www.invites.fun/"},
+    )
     custom = app.state.automations.create(
         "HTTP", "http_signin", 3600, {"url": "https://example.test/checkin"},
     )
 
-    assert reconcile_periodic_signin_templates(app.state.sessions) == 1
+    assert reconcile_periodic_signin_templates(app.state.sessions) == 2
 
     with app.state.sessions() as session:
         migrated = session.get(AutomationRecord, nodeseek.id)
+        migrated_invitesfun = session.get(AutomationRecord, invitesfun.id)
         untouched = session.get(AutomationRecord, custom.id)
         migrated_config = json.loads(migrated.config_json)
         assert migrated.handler_type == "browser_signin"
         assert migrated_config["url"] == "https://www.nodeseek.com/board"
         assert migrated_config["browser_request"]["method"] == "POST"
         assert r"今日签到获得鸡腿\d+个" in migrated_config["already_patterns"]
+        invitesfun_config = json.loads(migrated_invitesfun.config_json)
+        assert invitesfun_config["click_selector"] == (
+            ".item-forum-checkin .CheckInButton--yellow"
+        )
+        assert invitesfun_config["already_selector"] == (
+            ".item-forum-checkin .CheckInButton--green"
+        )
         assert untouched.handler_type == "http_signin"
         assert json.loads(untouched.config_json) == {"url": "https://example.test/checkin"}
 

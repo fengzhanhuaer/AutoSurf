@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from autosurf.automations.browser_signin import BrowserSignInHandler, _classify_body
+from autosurf.automations.browser_signin import (
+    BrowserSignInHandler,
+    _classify_body,
+    _selector_is_visible,
+)
 from autosurf.automations.browser_session import (
     _restore_waf_cookie_state,
     _save_waf_cookie_state,
@@ -42,6 +46,26 @@ def test_browser_signin_classifies_nodeseek_before_and_after_click():
     assert already.outcome == RunOutcome.ALREADY_DONE
     assert success.outcome == RunOutcome.SUCCESS
     assert expired.outcome == RunOutcome.AUTH_EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_browser_signin_checks_template_state_selectors():
+    class Locator:
+        first = None
+
+        def __init__(self, visible):
+            self.first = self
+            self.visible = visible
+
+        async def is_visible(self):
+            return self.visible
+
+    class Page:
+        def locator(self, selector):
+            return Locator(selector == ".CheckInButton--green")
+
+    assert await _selector_is_visible(Page(), ".CheckInButton--green") is True
+    assert await _selector_is_visible(Page(), ".missing") is False
 
 
 def test_browser_handler_is_registered(tmp_path):

@@ -41,6 +41,14 @@ class BrowserSignInHandler:
                     status = response.status if response else None
                     body = (await page.locator("body").inner_text())[:1_000_000]
                     details = {"url": page.url, "status_code": status, "clicked": False}
+                    already_selector = str(config.get("already_selector") or "").strip()
+                    if already_selector and await _selector_is_visible(page, already_selector):
+                        details["matched_selector"] = already_selector
+                        return with_browser_details(RunResult(
+                            RunOutcome.ALREADY_DONE,
+                            "site reports this task is already complete",
+                            details,
+                        ), browser_session)
                     initial_result = _classify_body(config, body, status, before_click=True)
                     if initial_result is not None:
                         return with_browser_details(RunResult(
@@ -97,6 +105,19 @@ class BrowserSignInHandler:
                         await page.wait_for_timeout(min(max(int(config["wait_after_click_ms"]), 0), 30_000))
                     body = (await page.locator("body").inner_text())[:1_000_000]
                     details = {"url": page.url, "status_code": status, "clicked": clicked}
+                    success_selector = str(config.get("success_selector") or "").strip()
+                    if success_selector and await _selector_is_visible(page, success_selector):
+                        details["matched_selector"] = success_selector
+                        return with_browser_details(RunResult(
+                            RunOutcome.SUCCESS, "success selector matched", details,
+                        ), browser_session)
+                    if already_selector and await _selector_is_visible(page, already_selector):
+                        details["matched_selector"] = already_selector
+                        return with_browser_details(RunResult(
+                            RunOutcome.ALREADY_DONE,
+                            "site reports this task is already complete",
+                            details,
+                        ), browser_session)
                     result = _classify_body(config, body, status, before_click=False)
                     if result is not None:
                         return with_browser_details(RunResult(
@@ -118,6 +139,13 @@ class BrowserSignInHandler:
                         RunOutcome.BLOCKED, f"browser operation timed out: {exc}",
                         {"screenshot": str(screenshot)},
                     ), browser_session)
+
+
+async def _selector_is_visible(page: object, selector: str) -> bool:
+    try:
+        return bool(await page.locator(selector).first.is_visible())
+    except Exception:
+        return False
 
 
 def _classify_body(

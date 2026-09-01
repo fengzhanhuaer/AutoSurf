@@ -674,9 +674,24 @@ function renderPeriodicCandidates() {
 
 function applyPeriodicTemplate() {
   const template = elements.periodicTemplate.value;
-  const browser = template === "custom_browser";
+  const browser = template !== "custom_http";
   elements.periodicHandler.value = browser ? "browser_signin" : "http_signin";
   elements.periodicMethod.value = "GET";
+  if (template === "invitesfun") {
+    elements.periodicName.value = "InvitesFun";
+    elements.periodicHandler.value = "browser_signin";
+    elements.periodicUrl.value = "https://www.invites.fun/";
+    elements.periodicWaitSelector.value = ".item-forum-checkin";
+    elements.periodicClickSelector.value = ".item-forum-checkin .CheckInButton--yellow";
+    elements.periodicClickRole.value = "";
+    elements.periodicClickName.value = "";
+    elements.periodicClickExact.checked = false;
+    elements.periodicWaitAfter.value = "1500";
+    elements.periodicSuccessPatterns.value = "签到成功\n您已签到\\s*\\d+\\s*天\n获得\\s*\\d+.*奖励";
+    elements.periodicAlreadyPatterns.value = "已签到\\s*\\d+\\s*天";
+    elements.periodicAuthPatterns.value = "请先登录\n登录后签到";
+    return;
+  }
   if (template !== "nodeseek") {
     elements.periodicName.value = "";
     elements.periodicUrl.value = "";
@@ -1614,7 +1629,7 @@ elements.periodicForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         name: elements.periodicName.value.trim(),
         handler_type: elements.periodicHandler.value,
-        template_key: template === "nodeseek" ? "nodeseek" : null,
+        template_key: ["nodeseek", "invitesfun"].includes(template) ? template : null,
         url: elements.periodicUrl.value.trim(),
         interval_hours: Number(elements.periodicInterval.value),
         timeout_seconds: Number(elements.periodicTimeout.value),
