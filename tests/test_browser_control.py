@@ -19,6 +19,7 @@ from autosurf.automations.browser_session import (
     PersistentBrowserRuntime,
     foreground_browser_page,
     new_browser_task_page,
+    persistent_browser_task_page,
     persistent_chromium_session,
     register_shared_browser_provider,
 )
@@ -51,6 +52,8 @@ class FakePage:
         self.url = url
         self.timeout = None
         self.closed = False
+        self.window_name = ""
+        self.foreground_calls = 0
 
     def set_default_timeout(self, timeout):
         self.timeout = timeout
@@ -66,6 +69,17 @@ class FakePage:
 
     async def close(self):
         self.closed = True
+
+    async def evaluate(self, script, value=None):
+        if "window.name = name" in script:
+            self.window_name = value
+            return None
+        if "window.name" in script:
+            return self.window_name
+        return None
+
+    async def bring_to_front(self):
+        self.foreground_calls += 1
 
 
 class FakeContext:
@@ -164,6 +178,29 @@ async def test_task_page_uses_a_separate_visible_chrome_window():
 
 
 @pytest.mark.asyncio
+async def test_persistent_task_page_reuses_its_marked_window(monkeypatch):
+    context = FakeContext()
+    created = []
+
+    async def create_page(value):
+        page = await value.new_page()
+        created.append(page)
+        return page
+
+    monkeypatch.setattr(
+        "autosurf.automations.browser_session.new_browser_task_page", create_page,
+    )
+
+    first = await persistent_browser_task_page(context)
+    second = await persistent_browser_task_page(context)
+
+    assert first is second
+    assert created == [first]
+    assert first.window_name == "__autosurf_automation_window__"
+    assert first.foreground_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_foreground_browser_page_only_activates_visible_window():
     class Page:
         foreground_calls = 0
@@ -180,7 +217,7 @@ async def test_foreground_browser_page_only_activates_visible_window():
 
 
 @pytest.mark.asyncio
-async def test_worker_cdp_provider_closes_only_automation_pages(tmp_path, monkeypatch):
+async def test_worker_cdp_provider_keeps_and_reuses_automation_window(tmp_path, monkeypatch):
     control_page = FakePage("https://manual.example/")
     task_page = FakePage()
     context = FakeContext()
@@ -197,7 +234,9 @@ async def test_worker_cdp_provider_closes_only_automation_pages(tmp_path, monkey
         return task_page
 
     monkeypatch.setattr("autosurf.browser_control.connect_standalone_browser", connect)
-    monkeypatch.setattr("autosurf.browser_control.new_browser_task_page", create_page)
+    monkeypatch.setattr(
+        "autosurf.automations.browser_session.new_browser_task_page", create_page,
+    )
     provider = CdpAutomationProvider()
 
     async with provider.automation_session(
@@ -207,8 +246,16 @@ async def test_worker_cdp_provider_closes_only_automation_pages(tmp_path, monkey
     ) as session:
         assert await session.new_page() is task_page
 
-    assert task_page.closed is True
+    async with provider.automation_session(
+        RunContext("worker-execution-2", {}, {}),
+        "https://example.com/",
+        playwright=playwright,
+    ) as session:
+        assert await session.new_page() is task_page
+
+    assert task_page.closed is False
     assert control_page.closed is False
+    assert context.pages.count(task_page) == 1
     assert playwright.stopped is False
 
 
@@ -331,7 +378,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     monkeypatch.setattr("autosurf.browser_control.prepare_browser_for_run", prepare)
     monkeypatch.setattr("autosurf.browser_control.save_browser_after_run", save)
     monkeypatch.setattr(
-        "autosurf.browser_control.new_browser_task_page", create_task_page,
+        "autosurf.automations.browser_session.new_browser_task_page", create_task_page,
     )
 
     display_settings = SimpleNamespace(
@@ -378,7 +425,7 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
         with pytest.raises(BrowserControlBusy):
             await service.set_resolution(1600, 900)
 
-    assert task_page.closed is True
+    assert task_page.closed is False
     assert context.pages[0].closed is False
     assert prepared[0][0].context is context
     assert prepared[0][1:] == ("execution-1", "https://example.com/")
@@ -391,8 +438,8 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
         RunContext("execution-2", {}, {}),
         "https://example.com/",
         playwright=task_playwright,
-    ):
-        pass
+    ) as session:
+        assert await session.new_page() is task_page
     assert connected[-1] == (task_playwright, active_runtime)
     assert task_playwright.stopped is False
     assert (await service.status())["active"] is True

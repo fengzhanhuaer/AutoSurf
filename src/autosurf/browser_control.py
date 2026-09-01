@@ -21,7 +21,7 @@ from autosurf.automations.browser_session import (
     close_persistent_browser,
     connect_standalone_browser,
     launch_standalone_browser,
-    new_browser_task_page,
+    persistent_browser_task_page,
     prepare_browser_for_run,
     register_shared_browser_provider,
     save_browser_after_run,
@@ -59,7 +59,7 @@ class BrowserControlInactive(BrowserControlError):
 
 
 class CdpAutomationProvider:
-    """Attach a worker process to the always-on Chrome without using its visible window."""
+    """Attach a worker to the always-on Chrome and reuse its dedicated task window."""
 
     def __init__(self, endpoint: str = STANDALONE_CDP_ENDPOINT) -> None:
         self._endpoint = endpoint
@@ -97,16 +97,18 @@ class CdpAutomationProvider:
             cdp_endpoint=self._endpoint,
         )
         connected = None
-        owned_pages: set[Any] = set()
         try:
             connected = await self._connect(current_playwright, runtime)
             assert connected.context is not None
             await prepare_browser_for_run(connected, run_context, url)
 
+            task_page = None
+
             async def create_page() -> Any:
-                page = await new_browser_task_page(connected.context)
-                owned_pages.add(page)
-                return page
+                nonlocal task_page
+                if task_page is None or task_page.is_closed():
+                    task_page = await persistent_browser_task_page(connected.context)
+                return task_page
 
             yield PersistentBrowserSession(
                 connected.context,
@@ -118,9 +120,6 @@ class CdpAutomationProvider:
             if connected is not None and connected.context is not None:
                 with suppress(Exception):
                     await save_browser_after_run(connected, url)
-                for page in owned_pages:
-                    with suppress(Exception):
-                        await page.close()
             if manager is not None:
                 with suppress(Exception):
                     await current_playwright.stop()
@@ -395,15 +394,17 @@ class BrowserControlService:
             if runtime is not self._runtime:
                 runtime = await self._wait_for_runtime()
             self._automation_owner = run_context.execution_id
-            owned_pages: set[Any] = set()
             try:
                 async with self._connected_runtime(runtime, playwright=playwright) as connected:
                     assert connected.context is not None
 
+                    task_page = None
+
                     async def create_page() -> Any:
-                        page = await new_browser_task_page(connected.context)
-                        owned_pages.add(page)
-                        return page
+                        nonlocal task_page
+                        if task_page is None or task_page.is_closed():
+                            task_page = await persistent_browser_task_page(connected.context)
+                        return task_page
 
                     try:
                         await prepare_browser_for_run(connected, run_context, url)
@@ -417,9 +418,6 @@ class BrowserControlService:
                     finally:
                         with suppress(Exception):
                             await save_browser_after_run(connected, url)
-                        for page in owned_pages:
-                            with suppress(Exception):
-                                await page.close()
             finally:
                 self._automation_owner = None
 

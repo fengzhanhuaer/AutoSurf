@@ -22,6 +22,7 @@ WAF_COOKIE_NAMES = frozenset({
     "sl-session",
 })
 SHARED_PROFILE_KEY = "shared"
+AUTOMATION_WINDOW_NAME = "__autosurf_automation_window__"
 STANDALONE_CDP_ENDPOINT = "http://127.0.0.1:9222"
 CHROME_SINGLETON_FILES = (
     "SingletonCookie",
@@ -406,6 +407,34 @@ async def new_browser_task_page(browser_context: Any) -> Any:
     finally:
         with suppress(Exception):
             await cdp.detach()
+
+
+async def persistent_browser_task_page(browser_context: Any) -> Any:
+    """Reuse one visible Chrome window for all serialized automation tasks."""
+    for page in reversed(list(browser_context.pages)):
+        is_closed = getattr(page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            continue
+        try:
+            if await page.evaluate("() => window.name") != AUTOMATION_WINDOW_NAME:
+                continue
+            with suppress(Exception):
+                await page.bring_to_front()
+            return page
+        except Exception:
+            continue
+
+    page = await new_browser_task_page(browser_context)
+    try:
+        await page.evaluate(
+            "name => { window.name = name; }",
+            AUTOMATION_WINDOW_NAME,
+        )
+    except Exception:
+        with suppress(Exception):
+            await page.close()
+        raise
+    return page
 
 
 @asynccontextmanager
