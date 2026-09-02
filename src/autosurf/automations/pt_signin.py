@@ -86,6 +86,8 @@ SAFELINE_CHALLENGE_PATTERNS = (
     r"客户端异常.{0,24}合法用户",
     r"sl-challenge-server",
 )
+SAFELINE_CHALLENGE_STATUS = 468
+SAFELINE_INITIAL_WAIT_MS = 10_000
 HUMAN_CHALLENGE_PATTERNS = (
     r"验证您是真人",
     r"人机验证",
@@ -1792,7 +1794,16 @@ async def _goto_pt_page(page: Any, url: str, timeout_ms: int) -> Any:
 
     try:
         response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        await _settle_pt_challenge(page, timeout_ms)
+        status_code = getattr(response, "status", None)
+        initial_wait = (
+            min(timeout_ms, SAFELINE_INITIAL_WAIT_MS)
+            if status_code == SAFELINE_CHALLENGE_STATUS
+            else timeout_ms
+        )
+        settled = await _settle_pt_challenge(page, initial_wait)
+        if status_code == SAFELINE_CHALLENGE_STATUS and not settled:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await _settle_pt_challenge(page, timeout_ms)
         return response
     except PlaywrightTimeoutError:
         if await _usable_partial_pt_page(page, url):
@@ -1866,7 +1877,7 @@ async def confirm_safeline_challenge(page: Any, timeout_ms: int = 60_000) -> boo
                     candidate = build_candidate()
                     if await candidate.is_visible():
                         clicked = True
-                        await candidate.evaluate("element => element.click()")
+                        await candidate.click()
                         break
                 except Exception:
                     if clicked:
@@ -2092,8 +2103,7 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
     if site_domain and not _domain_matches(site_domain, parsed.hostname or ""):
         return RunResult(RunOutcome.FAILED, "个人信息页不属于当前 PT 站点", {"url": profile_url})
 
-    response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_ms)
-    await _settle_pt_challenge(page, timeout_ms)
+    response = await _goto_pt_page(page, profile_url, timeout_ms)
     status_code = response.status if response else None
     body = (await page.locator("body").inner_text())[:1_000_000]
     upstream_error = classify_upstream_error(status_code, body)

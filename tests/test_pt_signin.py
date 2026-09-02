@@ -321,6 +321,38 @@ async def test_settle_pt_challenge_uses_full_configured_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pt_navigation_reloads_after_initial_safeline_challenge(monkeypatch):
+    class Response:
+        def __init__(self, status):
+            self.status = status
+
+    class Page:
+        def __init__(self):
+            self.calls = []
+
+        async def goto(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return Response(468 if len(self.calls) == 1 else 200)
+
+    waits = []
+
+    async def settle(_page, timeout_ms):
+        waits.append(timeout_ms)
+        return len(waits) > 1
+
+    monkeypatch.setattr("autosurf.automations.pt_signin._settle_pt_challenge", settle)
+
+    page = Page()
+    response = await _goto_pt_page(
+        page, "https://www.hdkyl.in/attendance.php", 60_000,
+    )
+
+    assert response.status == 200
+    assert len(page.calls) == 2
+    assert waits == [10_000, 60_000]
+
+
+@pytest.mark.asyncio
 async def test_safeline_confirmation_is_clicked_once_when_explicit():
     class Body:
         def __init__(self, page):
@@ -337,8 +369,7 @@ async def test_safeline_confirmation_is_clicked_once_when_explicit():
         async def is_visible(self):
             return True
 
-        async def evaluate(self, script):
-            assert script == "element => element.click()"
+        async def click(self):
             self.page.clicks += 1
             self.page.body = "欢迎回来"
 
@@ -387,8 +418,7 @@ async def test_safeline_confirmation_waits_without_reloading():
         async def is_visible(self):
             return True
 
-        async def evaluate(self, script):
-            assert script == "element => element.click()"
+        async def click(self):
             self.page.clicks += 1
 
     class Page:
@@ -434,7 +464,7 @@ async def test_safeline_confirmation_can_finish_after_previous_thirty_second_lim
         async def is_visible(self):
             return True
 
-        async def evaluate(self, _script):
+        async def click(self):
             self.page.clicks += 1
 
     class Page:
@@ -522,8 +552,7 @@ async def test_safeline_confirmation_times_out_without_reloading_or_reclicking()
         async def is_visible(self):
             return True
 
-        async def evaluate(self, script):
-            assert script == "element => element.click()"
+        async def click(self):
             self.page.clicks += 1
 
     class Page:
@@ -564,7 +593,7 @@ async def test_safeline_confirmation_does_not_retry_after_click_error():
         async def is_visible(self):
             return True
 
-        async def evaluate(self, _script):
+        async def click(self):
             self.page.clicks += 1
             raise RuntimeError("page navigated during click")
 
@@ -1231,8 +1260,14 @@ async def test_handler_keeps_profile_refresh_after_signin_navigation_error(monke
         async def __aexit__(self, *_args):
             return None
 
-    async def fail_home_navigation(*_args, **_kwargs):
-        raise PlaywrightError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+    navigation_calls = 0
+
+    async def fail_home_navigation(page, url, _timeout_ms):
+        nonlocal navigation_calls
+        navigation_calls += 1
+        if navigation_calls == 1:
+            raise PlaywrightError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+        return await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
 
     monkeypatch.setenv("AUTOSURF_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(
