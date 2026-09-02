@@ -973,7 +973,10 @@ class ChdBitsAdapter:
                 "CHDBits 签到页没有找到安全的“不答题”选项",
                 {"url": page.url, "clicked": False},
             )
-        answer = page.locator('input[type="radio"]:not([disabled])').first
+        answer = page.locator(
+            'input[name="choice[]"][type="radio"]:not([disabled]), '
+            'input[name="choice[]"][type="checkbox"]:not([disabled])'
+        ).first
         if not await answer.is_visible():
             return RunResult(
                 RunOutcome.FAILED,

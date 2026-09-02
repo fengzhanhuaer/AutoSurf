@@ -2265,7 +2265,7 @@ async def test_chdbits_uses_safe_skip_answer_option():
             return "签到成功" if self.page.clicked else "每日签到 请选择答案"
 
         async def is_visible(self):
-            return "不会" in self.selector or 'type="radio"' in self.selector
+            return "不会" in self.selector or 'name="choice[]"' in self.selector
 
         async def is_checked(self):
             return self.page.answer_selected
@@ -2304,6 +2304,74 @@ async def test_chdbits_uses_safe_skip_answer_option():
     assert page.clicked is True
     assert page.answer_selected is True
     assert page.events == ["select-answer", "skip-question"]
+    assert result.outcome == RunOutcome.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_chdbits_accepts_multi_select_answer_options():
+    class Response:
+        status = 200
+
+    class Pending:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return Response()
+
+            return resolve()
+
+    class Locator:
+        def __init__(self, page, selector):
+            self.page = page
+            self.selector = selector
+            self.first = self
+
+        async def inner_text(self):
+            return "签到成功" if self.page.submitted else "[多选] 请选择答案"
+
+        async def is_visible(self):
+            if "不会" in self.selector:
+                return True
+            return 'type="checkbox"' in self.selector
+
+        async def is_checked(self):
+            return self.page.answer_selected
+
+        async def evaluate(self, script):
+            if 'name="choice[]"' in self.selector:
+                assert 'type="checkbox"' in self.selector
+                self.page.answer_selected = True
+            else:
+                assert "requestSubmit" in script
+                self.page.submitted = True
+
+    class Page:
+        url = "https://ptchdbits.co/bakatest.php"
+        frames = None
+
+        def __init__(self):
+            self.answer_selected = False
+            self.submitted = False
+
+        def locator(self, selector):
+            return Locator(self, selector)
+
+        def expect_navigation(self, **_kwargs):
+            return Pending()
+
+    page = Page()
+    result = await ChdBitsAdapter().sign_in(page, RunContext(
+        "test", {"url": page.url}, {"sid": "secret"},
+    ))
+
+    assert page.answer_selected is True
+    assert page.submitted is True
     assert result.outcome == RunOutcome.SUCCESS
 
 
