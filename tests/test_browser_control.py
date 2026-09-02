@@ -17,20 +17,25 @@ import pytest
 
 from autosurf.automations.browser_session import (
     PersistentBrowserRuntime,
+    PersistentBrowserSession,
     foreground_browser_page,
     new_browser_task_page,
+    prepare_detached_browser_challenge,
+    prepared_browser_task_page,
     persistent_browser_task_page,
     persistent_chromium_session,
     register_shared_browser_provider,
+    with_browser_details,
 )
 from autosurf.browser_control import (
     BrowserControlBusy,
     BrowserControlService,
     BrowserDisplaySettings,
     CdpAutomationProvider,
+    detached_safeline_warmup,
 )
 from autosurf.config import Settings
-from autosurf.domain.models import RunContext
+from autosurf.domain.models import RunContext, RunOutcome, RunResult
 from autosurf.main import create_app
 from autosurf.main import run_worker
 
@@ -201,6 +206,167 @@ async def test_persistent_task_page_reuses_its_marked_window(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prepared_task_page_adopts_warmup_tab_and_closes_previous_task_page():
+    previous = FakePage("https://previous.example/")
+    previous.window_name = "__autosurf_automation_window__"
+    manual = FakePage("https://manual.example/")
+    warmup = FakePage("https://www.hdkyl.in/")
+    context = FakeContext()
+    context.pages = [manual, previous, warmup]
+
+    selected = await prepared_browser_task_page(
+        context, "https://www.hdkyl.in/attendance.php",
+    )
+
+    assert selected is warmup
+    assert warmup.window_name == "__autosurf_automation_window__"
+    assert warmup.foreground_calls == 1
+    assert previous.closed is True
+    assert manual.closed is False
+
+
+@pytest.mark.asyncio
+async def test_detached_safeline_warmup_skips_non_468(monkeypatch, tmp_path):
+    opened = []
+
+    monkeypatch.setattr("autosurf.browser_control._probe_http_status", lambda _url: 200)
+
+    async def open_url(*_args):
+        opened.append(True)
+        return True
+
+    monkeypatch.setattr("autosurf.browser_control._open_url_without_cdp", open_url)
+    runtime = PersistentBrowserRuntime(
+        context=None,
+        profile_path=tmp_path,
+        mode="persistent_headful",
+        display=None,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    assert await detached_safeline_warmup(runtime, "https://example.com/") is False
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_detached_safeline_warmup_opens_before_polling_normal_page(
+    monkeypatch, tmp_path,
+):
+    events = []
+
+    def probe(_url):
+        events.append("probe")
+        return 468
+
+    async def pages(_runtime):
+        events.append("pages")
+        return [{
+            "type": "page",
+            "url": "https://www.hdkyl.in/",
+            "title": "HDKylin - Powered by NexusPHP",
+        }]
+
+    async def open_url(_runtime, _url):
+        events.append("open")
+        return True
+
+    async def sleep(_delay):
+        events.append("sleep")
+
+    monkeypatch.setattr("autosurf.browser_control._probe_http_status", probe)
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control._open_url_without_cdp", open_url)
+    monkeypatch.setattr("autosurf.browser_control.asyncio.sleep", sleep)
+    runtime = PersistentBrowserRuntime(
+        context=None,
+        profile_path=tmp_path,
+        mode="persistent_headful",
+        display=None,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    assert await detached_safeline_warmup(
+        runtime,
+        "https://www.hdkyl.in/attendance.php",
+        minimum_seconds=0,
+        timeout_seconds=1,
+    ) is True
+    assert events[:3] == ["probe", "pages", "open"]
+    assert events[3:] == ["sleep", "pages"]
+
+
+@pytest.mark.asyncio
+async def test_detached_safeline_warmup_times_out_without_marking_prepared(
+    monkeypatch, tmp_path,
+):
+    opened = []
+
+    monkeypatch.setattr("autosurf.browser_control._probe_http_status", lambda _url: 468)
+
+    async def pages(_runtime):
+        return [{
+            "type": "page",
+            "url": "https://www.hdkyl.in/",
+            "title": "www.hdkyl.in",
+        }]
+
+    async def open_url(_runtime, url):
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control._open_url_without_cdp", open_url)
+    runtime = PersistentBrowserRuntime(
+        context=None,
+        profile_path=tmp_path,
+        mode="persistent_headful",
+        display=None,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    assert await detached_safeline_warmup(
+        runtime,
+        "https://www.hdkyl.in/attendance.php",
+        minimum_seconds=0,
+        timeout_seconds=0,
+    ) is False
+    assert opened == ["https://www.hdkyl.in/attendance.php"]
+
+
+@pytest.mark.asyncio
+async def test_detached_challenge_provider_failure_falls_back():
+    class Provider:
+        async def prepare_detached_challenge(self, _context, _url):
+            raise RuntimeError("warmup unavailable")
+
+    register_shared_browser_provider(Provider())
+    try:
+        prepared = await prepare_detached_browser_challenge(
+            RunContext("execution-fallback", {}, {}),
+            "https://example.com/",
+        )
+    finally:
+        register_shared_browser_provider(None)
+
+    assert prepared is False
+
+
+def test_browser_details_record_detached_waf_warmup():
+    session = PersistentBrowserSession(
+        context=object(),
+        profile_key="shared",
+        mode="persistent_headful",
+        detached_waf_warmup=True,
+    )
+
+    result = with_browser_details(
+        RunResult(RunOutcome.ALREADY_DONE, "today"), session,
+    )
+
+    assert result.details["browser"]["detached_waf_warmup"] is True
+
+
+@pytest.mark.asyncio
 async def test_foreground_browser_page_only_activates_visible_window():
     class Page:
         foreground_calls = 0
@@ -257,6 +423,47 @@ async def test_worker_cdp_provider_keeps_and_reuses_automation_window(tmp_path, 
     assert control_page.closed is False
     assert context.pages.count(task_page) == 1
     assert playwright.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_worker_cdp_provider_prepares_before_connect_and_adopts_warmup_page(
+    tmp_path, monkeypatch,
+):
+    events = []
+    warmup_page = FakePage("https://www.hdkyl.in/")
+    context = FakeContext()
+    context.pages = [warmup_page]
+    playwright = FakePlaywright()
+
+    async def warmup(runtime, url):
+        events.append(("warmup", url, runtime.cdp_endpoint))
+        return True
+
+    async def connect(_playwright, runtime):
+        events.append(("connect", runtime.cdp_endpoint))
+        return replace(runtime, context=context, browser_connection=object())
+
+    monkeypatch.setattr("autosurf.browser_control.detached_safeline_warmup", warmup)
+    monkeypatch.setattr("autosurf.browser_control.connect_standalone_browser", connect)
+    monkeypatch.setattr(
+        "autosurf.browser_control.browser_profile_path", lambda: tmp_path,
+    )
+    provider = CdpAutomationProvider()
+    run_context = RunContext("execution-waf", {}, {})
+
+    assert await provider.prepare_detached_challenge(
+        run_context, "https://www.hdkyl.in/attendance.php",
+    ) is True
+    async with provider.automation_session(
+        run_context,
+        "https://www.hdkyl.in/attendance.php",
+        playwright=playwright,
+    ) as session:
+        assert session.detached_waf_warmup is True
+        assert await session.new_page() is warmup_page
+
+    assert events[0][0] == "warmup"
+    assert events[1][0] == "connect"
 
 
 @pytest.mark.asyncio

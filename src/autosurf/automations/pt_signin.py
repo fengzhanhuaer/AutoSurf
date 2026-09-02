@@ -16,6 +16,7 @@ from autosurf.automations.browser_session import (
     foreground_browser_page,
     new_browser_session_page,
     persistent_chromium_session,
+    prepare_detached_browser_challenge,
     validated_http_url,
     with_browser_details,
 )
@@ -1407,6 +1408,7 @@ class PtSignInHandler:
         screenshot = artifact_dir / f"{context.execution_id}.png"
         screenshot.unlink(missing_ok=True)
 
+        await prepare_detached_browser_challenge(context, url)
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context

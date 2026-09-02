@@ -8,6 +8,9 @@ import threading
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
 from sqlalchemy import select
@@ -21,11 +24,13 @@ from autosurf.automations.browser_session import (
     close_persistent_browser,
     connect_standalone_browser,
     launch_standalone_browser,
+    prepared_browser_task_page,
     persistent_browser_task_page,
     prepare_browser_for_run,
     register_shared_browser_provider,
     save_browser_after_run,
     standalone_browser_pages,
+    _standalone_chrome_executable,
     validated_http_url,
 )
 from autosurf.domain.models import ExecutionStatus, RunContext
@@ -40,6 +45,10 @@ AUDIO_CHANNELS = 2
 AUDIO_CHUNK_BYTES = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * 2 // 10
 RESTART_DELAY_SECONDS = 3
 STARTUP_TIMEOUT_SECONDS = 30
+SAFELINE_CHALLENGE_STATUS = 468
+SAFELINE_PROBE_TIMEOUT_SECONDS = 5
+SAFELINE_WARMUP_MIN_SECONDS = 15
+SAFELINE_WARMUP_TIMEOUT_SECONDS = 30
 BROWSER_RESOLUTION_SETTING_KEY = "browser.display_resolution"
 DEFAULT_BROWSER_RESOLUTION = (1365, 768)
 SUPPORTED_BROWSER_RESOLUTIONS = (
@@ -48,6 +57,107 @@ SUPPORTED_BROWSER_RESOLUTIONS = (
     (1600, 900),
     (1920, 1080),
 )
+
+
+def _probe_http_status(url: str) -> int | None:
+    validated_http_url(url)
+    request = Request(
+        url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    try:
+        with urlopen(request, timeout=SAFELINE_PROBE_TIMEOUT_SECONDS) as response:
+            return int(response.status)
+    except HTTPError as exc:
+        try:
+            return int(exc.code)
+        finally:
+            exc.close()
+    except (OSError, ValueError):
+        return None
+
+
+def _matching_page_has_normal_title(pages: list[dict[str, Any]], url: str) -> bool:
+    target = validated_http_url(url)
+    generic_titles = {
+        (target.hostname or "").casefold(),
+        (target.netloc or "").casefold(),
+        "just a moment...",
+    }
+    for page in pages:
+        current = urlparse(str(page.get("url") or ""))
+        if current.scheme != target.scheme or current.hostname != target.hostname:
+            continue
+        title = str(page.get("title") or "").strip().casefold()
+        if title and title not in generic_titles:
+            return True
+    return False
+
+
+async def _open_url_without_cdp(runtime: PersistentBrowserRuntime, url: str) -> bool:
+    executable = _standalone_chrome_executable()
+    env = dict(os.environ)
+    if runtime.display is not None:
+        env["DISPLAY"] = runtime.display.name
+    process = await asyncio.create_subprocess_exec(
+        executable,
+        f"--user-data-dir={runtime.profile_path}",
+        url,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        return await asyncio.wait_for(process.wait(), timeout=1) == 0
+    except TimeoutError:
+        # A fresh Chrome process may remain running. The existing endpoint check
+        # below remains the source of truth for whether it can be automated.
+        return True
+
+
+async def detached_safeline_warmup(
+    runtime: PersistentBrowserRuntime,
+    url: str,
+    *,
+    minimum_seconds: float = SAFELINE_WARMUP_MIN_SECONDS,
+    timeout_seconds: float = SAFELINE_WARMUP_TIMEOUT_SECONDS,
+) -> bool:
+    """Open a SafeLine target in ordinary Chrome before any CDP attachment."""
+    status = await asyncio.to_thread(_probe_http_status, url)
+    if status != SAFELINE_CHALLENGE_STATUS:
+        return False
+    try:
+        await standalone_browser_pages(runtime)
+        if not await _open_url_without_cdp(runtime, url):
+            return False
+    except Exception:
+        return False
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + max(float(timeout_seconds), 0)
+    minimum_ready_at = started + max(float(minimum_seconds), 0)
+    while loop.time() < deadline:
+        await asyncio.sleep(min(0.5, max(deadline - loop.time(), 0)))
+        if loop.time() < minimum_ready_at:
+            continue
+        try:
+            pages = await standalone_browser_pages(runtime)
+        except Exception:
+            continue
+        if _matching_page_has_normal_title(pages, url):
+            return True
+    # The regular Playwright path will reclassify a challenge that did not
+    # finish within the detached window.
+    return False
 
 
 class BrowserControlError(RuntimeError):
@@ -63,6 +173,26 @@ class CdpAutomationProvider:
 
     def __init__(self, endpoint: str = STANDALONE_CDP_ENDPOINT) -> None:
         self._endpoint = endpoint
+        self._prepared_urls: dict[str, str] = {}
+
+    async def prepare_detached_challenge(
+        self,
+        run_context: RunContext,
+        url: str,
+    ) -> bool:
+        runtime = PersistentBrowserRuntime(
+            context=None,
+            profile_path=browser_profile_path(),
+            mode="persistent_headful",
+            display=None,
+            cdp_endpoint=self._endpoint,
+        )
+        warmed = await detached_safeline_warmup(runtime, url)
+        if warmed:
+            self._prepared_urls[run_context.execution_id] = url
+        else:
+            self._prepared_urls.pop(run_context.execution_id, None)
+        return warmed
 
     async def _connect(self, playwright: Any, runtime: PersistentBrowserRuntime) -> Any:
         last_error: Exception | None = None
@@ -84,6 +214,7 @@ class CdpAutomationProvider:
         playwright: Any | None = None,
     ):
         validated_http_url(url)
+        prepared_url = self._prepared_urls.pop(run_context.execution_id, None)
         manager = None
         current_playwright = playwright
         if current_playwright is None:
@@ -107,7 +238,12 @@ class CdpAutomationProvider:
             async def create_page() -> Any:
                 nonlocal task_page
                 if task_page is None or task_page.is_closed():
-                    task_page = await persistent_browser_task_page(connected.context)
+                    if prepared_url is not None:
+                        task_page = await prepared_browser_task_page(
+                            connected.context, prepared_url,
+                        )
+                    else:
+                        task_page = await persistent_browser_task_page(connected.context)
                 return task_page
 
             yield PersistentBrowserSession(
@@ -115,6 +251,7 @@ class CdpAutomationProvider:
                 "shared",
                 connected.mode,
                 page_factory=create_page,
+                detached_waf_warmup=prepared_url is not None,
             )
         finally:
             if connected is not None and connected.context is not None:

@@ -44,6 +44,7 @@ class PersistentBrowserSession:
     mode: str
     display_name: str | None = None
     page_factory: Callable[[], Any] | None = None
+    detached_waf_warmup: bool = False
 
     async def new_page(self) -> Any:
         if self.page_factory is not None:
@@ -88,6 +89,24 @@ class SharedBrowserProvider(Protocol):
 def register_shared_browser_provider(provider: SharedBrowserProvider | None) -> None:
     global _SHARED_BROWSER_PROVIDER
     _SHARED_BROWSER_PROVIDER = provider
+
+
+async def prepare_detached_browser_challenge(
+    run_context: RunContext,
+    url: str,
+) -> bool:
+    """Let a shared browser clear a challenge before Playwright attaches."""
+    validated_http_url(url)
+    provider = _SHARED_BROWSER_PROVIDER
+    prepare = getattr(provider, "prepare_detached_challenge", None)
+    if not callable(prepare):
+        return False
+    try:
+        return bool(await prepare(run_context, url))
+    except Exception:
+        # Challenge preparation is an optimization. The normal navigation path
+        # must remain available when probing or Chrome activation fails.
+        return False
 
 
 def validated_http_url(value: str) -> ParseResult:
@@ -437,6 +456,43 @@ async def persistent_browser_task_page(browser_context: Any) -> Any:
     return page
 
 
+async def prepared_browser_task_page(browser_context: Any, url: str) -> Any:
+    """Adopt a detached warm-up tab as the serialized automation page."""
+    target = validated_http_url(url)
+    pages = list(browser_context.pages)
+    candidate = None
+    for page in reversed(pages):
+        is_closed = getattr(page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            continue
+        current = urlparse(str(getattr(page, "url", "") or ""))
+        if (
+            current.scheme == target.scheme
+            and current.hostname == target.hostname
+            and current.port == target.port
+        ):
+            candidate = page
+            break
+    if candidate is None:
+        return await persistent_browser_task_page(browser_context)
+
+    for page in pages:
+        if page is candidate:
+            continue
+        try:
+            if await page.evaluate("() => window.name") == AUTOMATION_WINDOW_NAME:
+                await page.close()
+        except Exception:
+            continue
+    await candidate.evaluate(
+        "name => { window.name = name; }",
+        AUTOMATION_WINDOW_NAME,
+    )
+    with suppress(Exception):
+        await candidate.bring_to_front()
+    return candidate
+
+
 @asynccontextmanager
 async def foreground_browser_page(page: Any):
     """Bring a visible Chrome task window forward for interactive checks."""
@@ -540,11 +596,14 @@ async def close_persistent_browser(
 
 def with_browser_details(result: RunResult, browser_session: PersistentBrowserSession) -> RunResult:
     details = dict(result.details or {})
-    details["browser"] = {
+    browser_details = {
         "persistent": True,
         "mode": browser_session.mode,
         "profile_key": browser_session.profile_key,
     }
+    if bool(getattr(browser_session, "detached_waf_warmup", False)):
+        browser_details["detached_waf_warmup"] = True
+    details["browser"] = browser_details
     return RunResult(result.outcome, result.message, details)
 
 
