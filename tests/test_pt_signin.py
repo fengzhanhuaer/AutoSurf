@@ -118,6 +118,13 @@ def test_cloudflare_origin_error_is_not_reported_as_human_verification():
     ) is None
 
 
+def test_discussion_of_human_verification_is_not_treated_as_a_challenge():
+    # UBits' homepage chat can contain this phrase in ordinary user messages.
+    body = "论坛聊天：人机验证一直在转圈圈，除了挂梯还有其他办法吗？"
+
+    assert classify_pt_page("https://ubits.club/index.php", 200, body) is None
+
+
 def test_gateway_timeout_is_reported_as_upstream_failure():
     body = "网关超时 Error 504 访问源网站超时"
     assert classify_upstream_error(504, body) == (

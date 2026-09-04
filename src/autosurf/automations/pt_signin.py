@@ -92,8 +92,8 @@ SAFELINE_INITIAL_WAIT_MS = 10_000
 HOMEPAGE_CHALLENGE_STABILIZATION_MS = 15_000
 HUMAN_CHALLENGE_PATTERNS = (
     r"验证您是真人",
-    r"人机验证",
-    r"人機驗證",
+    r"(?:请|請)?(?:完成|通过|通過).{0,24}(?:人机|人機)(?:验证|驗證)",
+    r"(?:人机|人機)(?:验证|驗證).{0,48}(?:完成|通过|通過|签到|簽到|驗證)",
     r"(?:验证|驗證)通过后将自动完成签到",
 )
 CHALLENGE_PATTERNS = (
