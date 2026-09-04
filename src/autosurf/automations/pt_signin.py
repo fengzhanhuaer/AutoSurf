@@ -89,6 +89,7 @@ SAFELINE_CHALLENGE_PATTERNS = (
 )
 SAFELINE_CHALLENGE_STATUS = 468
 SAFELINE_INITIAL_WAIT_MS = 10_000
+HOMEPAGE_CHALLENGE_STABILIZATION_MS = 15_000
 HUMAN_CHALLENGE_PATTERNS = (
     r"验证您是真人",
     r"人机验证",
@@ -1600,6 +1601,17 @@ async def _classify_pt_homepage(page: Any, context: RunContext,
     body = await page_body_text(page)
     body += "\n" + await rendered_signin_status_text(page)
     outcome = classify_pt_page(page.url, status_code, body, context.config)
+    if outcome == RunOutcome.BLOCKED:
+        blocker_type, _ = classify_pt_challenge(body)
+        # Some sites finish their automatic challenge immediately after the
+        # initial navigation wait expires. Re-read once before abandoning the
+        # attendance page, but never issue SafeLine's explicit confirmation twice.
+        if blocker_type != "safeline" and await wait_for_automatic_pt_challenge(
+            page, HOMEPAGE_CHALLENGE_STABILIZATION_MS,
+        ):
+            body = await page_body_text(page)
+            body += "\n" + await rendered_signin_status_text(page)
+            outcome = classify_pt_page(page.url, status_code, body, context.config)
     target_host = (urlparse(str(context.config.get("url") or "")).hostname or "").lower()
     if outcome == RunOutcome.ALREADY_DONE and target_host == "u2.dmhy.org":
         # U2's homepage can contain historical check-in text. Only its

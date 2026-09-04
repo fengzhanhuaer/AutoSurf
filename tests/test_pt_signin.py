@@ -293,6 +293,79 @@ async def test_wait_for_automatic_pt_challenge_keeps_unsolved_challenge_blocked(
 
 
 @pytest.mark.asyncio
+async def test_homepage_rechecks_cleared_automatic_challenge_before_abandoning_signin(
+    monkeypatch,
+):
+    page = type("Page", (), {"url": "https://ubits.club/"})()
+    bodies = iter(("人机验证 验证通过后将自动完成签到", "欢迎回来，今日尚未签到"))
+    waits = []
+
+    async def body_text(_page):
+        return next(bodies)
+
+    async def rendered_text(_page):
+        return ""
+
+    async def wait_for_challenge(_page, timeout_ms):
+        waits.append(timeout_ms)
+        return True
+
+    monkeypatch.setattr("autosurf.automations.pt_signin.page_body_text", body_text)
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.rendered_signin_status_text", rendered_text,
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.wait_for_automatic_pt_challenge",
+        wait_for_challenge,
+    )
+
+    result = await _classify_pt_homepage(
+        page,
+        RunContext("ubits-challenge-cleared", {"url": "https://ubits.club/attendance.php"}, {}),
+        200,
+    )
+
+    assert result is None
+    assert waits == [15_000]
+
+
+@pytest.mark.asyncio
+async def test_homepage_keeps_safeline_blocked_without_a_second_confirmation(monkeypatch):
+    page = type("Page", (), {"url": "https://www.hdkyl.in/"})()
+    waits = []
+
+    async def body_text(_page):
+        return "安全检测能力由 雷池 WAF 驱动"
+
+    async def rendered_text(_page):
+        return ""
+
+    async def wait_for_challenge(_page, timeout_ms):
+        waits.append(timeout_ms)
+        return True
+
+    monkeypatch.setattr("autosurf.automations.pt_signin.page_body_text", body_text)
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.rendered_signin_status_text", rendered_text,
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.pt_signin.wait_for_automatic_pt_challenge",
+        wait_for_challenge,
+    )
+
+    result = await _classify_pt_homepage(
+        page,
+        RunContext("safeline-no-second-confirm", {"url": "https://www.hdkyl.in/attendance.php"}, {}),
+        468,
+    )
+
+    assert result is not None
+    assert result.outcome == RunOutcome.BLOCKED
+    assert result.details["blocker_type"] == "safeline"
+    assert waits == []
+
+
+@pytest.mark.asyncio
 async def test_settle_pt_challenge_uses_full_configured_timeout(monkeypatch):
     class Body:
         async def inner_text(self):
