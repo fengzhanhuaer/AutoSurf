@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,28 @@ import time
 
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+ERROR_ALREADY_EXISTS = 183
+
+
+def acquire_supervisor_mutex(root: Path) -> int | None:
+    """Acquire a process-lifetime Windows mutex for one installation."""
+    if os.name != "nt":
+        return 1
+    identifier = hashlib.sha256(str(root).casefold().encode("utf-8")).hexdigest()[:24]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, f"Local\\AutoSurfSupervisor-{identifier}")
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        return None
+    return int(handle)
+
+
+def release_supervisor_mutex(handle: int | None) -> None:
+    if handle and os.name == "nt":
+        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(ctypes.c_void_p(handle))
 
 
 def write_status(path: Path, state: str) -> None:
@@ -98,14 +122,9 @@ def main() -> int:
     if not python.is_file():
         raise RuntimeError(f"AutoSurf Python environment is missing: {python}")
 
-    if pid_file.is_file():
-        try:
-            existing_pid = int(pid_file.read_text(encoding="ascii").strip())
-            os.kill(existing_pid, 0)
-        except (OSError, ValueError):
-            pid_file.unlink(missing_ok=True)
-        else:
-            return 0
+    mutex = acquire_supervisor_mutex(root)
+    if mutex is None:
+        return 0
     pid_file.write_text(f"{os.getpid()}\n", encoding="ascii")
     process: subprocess.Popen[bytes] | None = None
     try:
@@ -151,6 +170,7 @@ def main() -> int:
         if process is not None:
             stop_process_tree(process)
         pid_file.unlink(missing_ok=True)
+        release_supervisor_mutex(mutex)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ $data = Join-Path $root "data"
 $browser = Join-Path $root "browser"
 $envFile = Join-Path $root ".env"
 $python = Join-Path $program ".venv\Scripts\python.exe"
+$taskName = "AutoSurf Local Service"
 
 function New-RandomBase64([int]$ByteCount) {
     $bytes = New-Object byte[] $ByteCount
@@ -87,10 +88,34 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
 
 $shell = New-Object -ComObject WScript.Shell
 $arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$program\scripts\run.ps1`" -InstallDir `"$root`""
-foreach ($shortcutPath in @(
-    (Join-Path ([Environment]::GetFolderPath("Startup")) "AutoSurf.lnk"),
-    (Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoSurf.lnk")
-)) {
+$startupShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "AutoSurf.lnk"
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoSurf.lnk"
+
+# A Startup shortcut runs only once per logon and cannot recover when its
+# process exits. Task Scheduler keeps the native service alive for the
+# interactive user, which is required by the visible browser profile.
+$taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments `
+    -WorkingDirectory $root
+$taskTrigger = New-ScheduledTaskTrigger -AtLogOn
+$taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew `
+    -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+$taskPrincipal = New-ScheduledTaskPrincipal `
+    -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive -RunLevel Limited
+$taskRegistered = $false
+try {
+    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger `
+        -Settings $taskSettings -Principal $taskPrincipal -Force | Out-Null
+    $taskRegistered = $true
+    Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
+} catch {
+    Write-Warning "Could not register the AutoSurf recovery task. Keeping the logon Startup shortcut: $($_.Exception.Message)"
+}
+
+foreach ($shortcutPath in @($desktopShortcut, $(if (-not $taskRegistered) { $startupShortcut }))) {
+    if (-not $shortcutPath) { continue }
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = "powershell.exe"
     $shortcut.Arguments = $arguments
@@ -98,7 +123,11 @@ foreach ($shortcutPath in @(
     $shortcut.Save()
 }
 
-Start-Process powershell.exe -WindowStyle Hidden -ArgumentList $arguments
+if ($taskRegistered) {
+    Start-ScheduledTask -TaskName $taskName
+} else {
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList $arguments
+}
 Write-Host "AutoSurf installed at $root"
 Write-Host "Open http://127.0.0.1:18980/"
 if ($createdPassword) {

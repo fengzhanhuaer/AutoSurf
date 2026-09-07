@@ -763,6 +763,11 @@ def test_windows_installation_uses_localhost_without_docker_artifacts():
     assert "AUTOSURF_HOST=127.0.0.1" in install
     assert "AUTOSURF_PORT=18980" in install
     assert "AUTOSURF_BROWSER_PROFILE_DIR" in install
+    assert '"AutoSurf Local Service"' in install
+    assert "Register-ScheduledTask" in install
+    assert "-RestartCount 5" in install
+    assert "Keeping the logon Startup shortcut" in install
+    assert "Remove-Item -LiteralPath $startupShortcut" in install
     assert "fetch --prune origin" in install
     assert 'reset --hard "refs/remotes/origin/$Branch"' in install
     assert "AUTOSURF_BROWSER_EXECUTABLE_PATH=$rootEnv/runtime/chrome/chrome.exe" in install

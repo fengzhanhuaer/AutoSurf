@@ -27,7 +27,7 @@ The default installation directory is `C:\Tools\AutoSurf`. The installer creates
 - `C:\Tools\AutoSurf\browser\profiles`: persistent Chrome profile and website logins
 - `C:\Tools\AutoSurf\.env`: local service configuration
 
-It also creates Startup and Desktop shortcuts. AutoSurf starts after Windows login and listens only at [http://127.0.0.1:18980/](http://127.0.0.1:18980/).
+It creates a desktop shortcut and attempts to create a per-user Task Scheduler entry. When permitted, AutoSurf starts after Windows login and restarts up to five times after an unexpected exit. If Windows rejects task registration, the installer keeps a Startup shortcut as a login-only fallback. The service listens only at [http://127.0.0.1:18980/](http://127.0.0.1:18980/).
 
 To choose the initial management password:
 
