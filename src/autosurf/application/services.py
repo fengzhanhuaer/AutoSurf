@@ -23,7 +23,7 @@ from autosurf.periodic_templates import apply_periodic_template
 
 
 PT_PROFILE_REFRESH_DEFAULT_VERSION = 1
-PT_CATALOG_CORRECTION_VERSION = 2
+PT_CATALOG_CORRECTION_VERSION = 3
 MAX_EXECUTION_RUNTIME_SECONDS = 300
 EXECUTION_CANCEL_GRACE_SECONDS = 10
 
@@ -108,6 +108,25 @@ def reconcile_pt_profile_refresh_defaults(sessions: sessionmaker[Session]) -> in
                         "url": "https://springsunday.net/",
                         "sign_in_enabled": False,
                         "sign_in_supported": False,
+                    })
+                if (
+                    config.get("url") in {
+                        "https://ptsbao.club/",
+                        "https://ptsbao.club/attendance.php",
+                    }
+                    or str(config.get("site_domain") or "").lower().lstrip(".")
+                    in {"ptsbao.club", "www.ptsbao.club"}
+                ):
+                    # PTSBao exposes its daily attendance calendar at this route.
+                    # Earlier catalog entries classified it as refresh-only, so
+                    # existing tasks could never enable the actual sign-in action.
+                    config.update({
+                        "url": "https://ptsbao.club/attendance.php",
+                        "site_domain": "ptsbao.club",
+                        "sign_in_enabled": True,
+                        "sign_in_supported": True,
+                        "profile_refresh_supported": True,
+                        "discovery_strategy": "generic_browser",
                     })
                 if (
                     config.get("site_domain") == "jpopsuki.eu"

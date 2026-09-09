@@ -92,7 +92,7 @@ PT_SITE_CATALOG = (
     PtSiteDefinition("ptlgs.org", "PTLGS"),
     PtSiteDefinition("ptskit.org", "PTSKIT", target_domain="www.ptskit.org"),
     PtSiteDefinition("pttime.org", "PTTime", target_domain="www.pttime.org"),
-    PtSiteDefinition("ptsbao.club", "PTSBao", "/", "profile_refresh_only"),
+    PtSiteDefinition("ptsbao.club", "PTSBao"),
     PtSiteDefinition("qingwapt.org", "QingwaPT", target_domain="www.qingwapt.org"),
     PtSiteDefinition("rousi.pro", "Rousi", "/", "web_storage_browser", aliases=("rousi.zip",)),
     PtSiteDefinition("sewerpt.com", "SewerPT"),

@@ -118,6 +118,13 @@ def test_reconcile_pt_catalog_corrections_updates_known_legacy_urls(settings):
                 "site_domain": "springsunday.net", "profile_refresh_default_version": 1,
             },
         ),
+        "ptsbao": app.state.automations.create(
+            "PTSBao", "pt_signin", 86400, {
+                "url": "https://ptsbao.club/", "site_domain": "ptsbao.club",
+                "sign_in_enabled": False, "sign_in_supported": False,
+                "profile_refresh_default_version": 1, "catalog_correction_version": 2,
+            },
+        ),
         "jpopsuki": app.state.automations.create(
             "JPopsuki", "pt_signin", 86400, {
                 "url": "https://jpopsuki.eu/", "site_domain": "jpopsuki.eu",
@@ -139,7 +146,7 @@ def test_reconcile_pt_catalog_corrections_updates_known_legacy_urls(settings):
         ),
     }
 
-    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 5
+    assert reconcile_pt_profile_refresh_defaults(app.state.sessions) == 6
 
     with app.state.sessions() as session:
         configs = {
@@ -149,6 +156,9 @@ def test_reconcile_pt_catalog_corrections_updates_known_legacy_urls(settings):
     assert configs["hdfans"]["url"] == "https://hdfans.org/attendance.php"
     assert configs["ssd"]["url"] == "https://springsunday.net/"
     assert configs["ssd"]["sign_in_supported"] is False
+    assert configs["ptsbao"]["url"] == "https://ptsbao.club/attendance.php"
+    assert configs["ptsbao"]["sign_in_enabled"] is True
+    assert configs["ptsbao"]["sign_in_supported"] is True
     assert configs["jpopsuki"]["profile_url"] == "https://jpopsuki.eu/bonus.php"
     assert configs["yemapt"]["url"] == "https://www.yemapt.org/attendance.php"
     assert configs["yemapt"]["site_domain"] == "yemapt.org"

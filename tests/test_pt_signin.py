@@ -3662,6 +3662,15 @@ def test_pt_catalog_uses_confirmed_ttg_and_sunny_routes():
     assert sunny.profile_url is None
 
 
+def test_ptsbao_catalog_uses_daily_attendance_page():
+    discovery = discover_pt_site("ptsbao.club", {"c_secure_uid"})
+
+    assert discovery is not None
+    assert discovery.url == "https://ptsbao.club/attendance.php"
+    assert discovery.sign_in_supported is True
+    assert discovery.profile_refresh_supported is True
+
+
 def test_oshen_soulvoice_and_0ff_are_cataloged_with_expected_actions():
     oshen = discover_pt_site("www.oshen.win", {"c_secure_uid"})
     soulvoice = discover_pt_site("pt.soulvoice.club", {"c_secure_uid"})
