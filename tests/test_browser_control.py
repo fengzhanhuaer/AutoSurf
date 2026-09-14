@@ -780,7 +780,7 @@ def test_windows_installation_uses_localhost_without_docker_artifacts():
     assert 'scripts\\native_launcher.py' in recovery_task
     assert '"$launcher`" --root' in install
     assert '"$launcher`" --root' in recovery_task
-    assert 'os.execv(sys.executable' in launcher
+    assert 'runpy.run_path(str(supervisor), run_name="__main__")' in launcher
     assert 'load_env(root / ".env")' in launcher
     assert 'os.environ[key]' in launcher
     assert '.venv\\Scripts\\pythonw.exe' in run
@@ -792,6 +792,7 @@ def test_windows_installation_uses_localhost_without_docker_artifacts():
     main = Path("src/autosurf/main.py").read_text(encoding="utf-8")
     assert "CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW" in supervisor
     assert 'WaitForSingleObject(ctypes.c_void_p(handle), 0)' in supervisor
+    assert 'load_env_file(root / ".env")' in supervisor
     assert 'getattr(subprocess, "CREATE_NO_WINDOW", 0)' in main
     assert "fetch --prune origin" in install
     assert 'reset --hard "refs/remotes/origin/$Branch"' in install

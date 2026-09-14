@@ -127,9 +127,23 @@ def test_browser_cookie_records_require_haidan_www_target_for_www_scope():
 
 def test_browser_profile_path_is_shared_and_kept_below_browser_mount(tmp_path, monkeypatch):
     monkeypatch.delenv("AUTOSURF_BROWSER_PROFILE_DIR", raising=False)
+    monkeypatch.delenv("AUTOSURF_PROGRAM_DIR", raising=False)
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
 
-    assert browser_profile_path() == tmp_path / "profiles" / "shared"
+    assert browser_profile_path() == (tmp_path / "profiles" / "shared").resolve()
+
+
+def test_browser_profile_path_uses_native_install_root_when_profile_env_is_missing(
+    tmp_path, monkeypatch,
+):
+    program = tmp_path / "program"
+    monkeypatch.delenv("AUTOSURF_BROWSER_PROFILE_DIR", raising=False)
+    monkeypatch.setenv("AUTOSURF_PROGRAM_DIR", str(program))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "wrong-runtime"))
+
+    assert browser_profile_path() == (
+        tmp_path / "browser" / "profiles" / "shared"
+    ).resolve()
 
 
 @pytest.mark.asyncio

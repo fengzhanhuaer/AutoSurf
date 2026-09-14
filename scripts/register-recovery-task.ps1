@@ -30,6 +30,6 @@ try {
         -Trigger $logonTrigger `
         -Settings $settings -Principal $principal -Force | Out-Null
 } catch {
-    Write-Warning "Could not update the AutoSurf service task: $($_.Exception.Message)"
+	throw "Could not update the AutoSurf service task: $($_.Exception.Message)"
 }
 Write-Host "Registered $taskName."

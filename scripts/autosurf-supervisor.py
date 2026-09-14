@@ -19,6 +19,20 @@ WAIT_OBJECT_0 = 0
 WAIT_ABANDONED = 0x00000080
 
 
+def load_env_file(path: Path) -> None:
+    """Load the installation environment before starting any child process."""
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
 def acquire_supervisor_mutex(root: Path) -> int | None:
     """Acquire a process-lifetime Windows mutex for one installation."""
     if os.name != "nt":
@@ -119,6 +133,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(r"C:\Tools\AutoSurf"))
     args = parser.parse_args()
     root = args.root.resolve()
+    load_env_file(root / ".env")
     program = root / "program"
     data = root / "data"
     python = program / ".venv" / "Scripts" / "python.exe"

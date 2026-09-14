@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import runpy
 import sys
 
 
@@ -32,7 +33,8 @@ def main() -> int:
     if not supervisor.is_file():
         raise RuntimeError(f"AutoSurf supervisor is missing: {supervisor}")
 
-    os.execv(sys.executable, [sys.executable, str(supervisor), "--root", str(root)])
+    sys.argv = [str(supervisor), "--root", str(root)]
+    runpy.run_path(str(supervisor), run_name="__main__")
     return 0
 
 

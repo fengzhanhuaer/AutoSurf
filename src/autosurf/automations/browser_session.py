@@ -159,11 +159,18 @@ def browser_profile_path() -> Path:
     configured = os.environ.get("AUTOSURF_BROWSER_PROFILE_DIR", "").strip()
     if configured:
         root = Path(configured)
+    elif os.environ.get("AUTOSURF_PROGRAM_DIR", "").strip():
+        install_root = (
+            Path(os.environ["AUTOSURF_PROGRAM_DIR"]).expanduser().resolve().parent
+        )
+        root = install_root / "browser" / "profiles"
     elif os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip():
         root = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) / "profiles"
+    elif os.name == "nt":
+        root = Path(r"C:\Tools\AutoSurf\browser\profiles")
     else:
         root = Path(os.environ.get("AUTOSURF_DATA_DIR", "data")) / "browser-profiles"
-    return root / SHARED_PROFILE_KEY
+    return (root / SHARED_PROFILE_KEY).expanduser().resolve()
 
 
 def persistent_browser_mode() -> str:
