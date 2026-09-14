@@ -14,7 +14,9 @@ import time
 
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
-ERROR_ALREADY_EXISTS = 183
+CREATE_NO_WINDOW = 0x08000000
+WAIT_OBJECT_0 = 0
+WAIT_ABANDONED = 0x00000080
 
 
 def acquire_supervisor_mutex(root: Path) -> int | None:
@@ -23,11 +25,15 @@ def acquire_supervisor_mutex(root: Path) -> int | None:
         return 1
     identifier = hashlib.sha256(str(root).casefold().encode("utf-8")).hexdigest()[:24]
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     handle = kernel32.CreateMutexW(None, False, f"Local\\AutoSurfSupervisor-{identifier}")
     if not handle:
         raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
-    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    result = kernel32.WaitForSingleObject(ctypes.c_void_p(handle), 0)
+    if result not in {WAIT_OBJECT_0, WAIT_ABANDONED}:
         kernel32.CloseHandle(ctypes.c_void_p(handle))
         return None
     return int(handle)
@@ -35,7 +41,10 @@ def acquire_supervisor_mutex(root: Path) -> int | None:
 
 def release_supervisor_mutex(handle: int | None) -> None:
     if handle and os.name == "nt":
-        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(ctypes.c_void_p(handle))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+        kernel32.ReleaseMutex(ctypes.c_void_p(handle))
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
 def write_status(path: Path, state: str) -> None:
@@ -137,7 +146,7 @@ def main() -> int:
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    creationflags=CREATE_NEW_PROCESS_GROUP,
+                    creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
                 )
                 log.close()
 

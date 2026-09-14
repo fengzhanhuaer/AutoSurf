@@ -287,6 +287,17 @@ async def launch_standalone_browser(
         validated_http_url(url)
     profile_path = browser_profile_path()
     await _prepare_shared_profile(profile_path)
+    if _can_reuse_standalone_browser() and await asyncio.to_thread(
+        _standalone_cdp_ready, STANDALONE_CDP_ENDPOINT,
+    ):
+        return PersistentBrowserRuntime(
+            context=None,
+            profile_path=profile_path,
+            mode=persistent_browser_mode(),
+            display=None,
+            browser_process=None,
+            cdp_endpoint=STANDALONE_CDP_ENDPOINT,
+        )
     await _remove_stale_chrome_singletons(profile_path)
     mode = persistent_browser_mode()
     if remote_desktop and mode != "persistent_headful":
@@ -795,21 +806,26 @@ def _chrome_graphics_args() -> list[str]:
 
 
 async def _wait_for_standalone_cdp(process: Any, endpoint: str) -> None:
-    def read_version() -> bool:
-        try:
-            with urlopen(f"{endpoint}/json/version", timeout=1) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
-        except Exception:
-            return False
-
     for _ in range(300):
         if process.returncode is not None:
             raise RuntimeError(f"Google Chrome exited with status {process.returncode}")
-        if await asyncio.to_thread(read_version):
+        if await asyncio.to_thread(_standalone_cdp_ready, endpoint):
             return
         await asyncio.sleep(0.05)
     raise RuntimeError("Google Chrome DevTools endpoint startup timed out")
+
+
+def _standalone_cdp_ready(endpoint: str) -> bool:
+    try:
+        with urlopen(f"{endpoint}/json/version", timeout=1) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
+    except Exception:
+        return False
+
+
+def _can_reuse_standalone_browser() -> bool:
+    return os.name == "nt"
 
 
 async def _terminate_async_process(process: Any) -> None:

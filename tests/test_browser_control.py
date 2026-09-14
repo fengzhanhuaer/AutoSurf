@@ -755,6 +755,9 @@ async def test_browser_control_status_and_native_window_actions_require_login(se
 
 def test_windows_installation_uses_localhost_without_docker_artifacts():
     install = Path("scripts/install.ps1").read_text(encoding="utf-8")
+    recovery_task = Path("scripts/register-recovery-task.ps1").read_text(encoding="utf-8")
+    run = Path("scripts/run.ps1").read_text(encoding="utf-8")
+    stop = Path("scripts/stop.ps1").read_text(encoding="utf-8")
     browser_install = Path("scripts/install-browser.ps1").read_text(encoding="utf-8")
     browser_manifest = json.loads(Path("browser-runtime.json").read_text(encoding="utf-8"))
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -763,11 +766,25 @@ def test_windows_installation_uses_localhost_without_docker_artifacts():
     assert "AUTOSURF_HOST=127.0.0.1" in install
     assert "AUTOSURF_PORT=18980" in install
     assert "AUTOSURF_BROWSER_PROFILE_DIR" in install
-    assert '"AutoSurf Local Service"' in install
+    assert '"AutoSurf Background Service"' in install
     assert "Register-ScheduledTask" in install
     assert "-RestartCount 5" in install
+    assert "Enable-ScheduledTask -TaskName $taskName" in install
     assert "Keeping the logon Startup shortcut" in install
     assert "Remove-Item -LiteralPath $startupShortcut" in install
+    assert '"AutoSurf Background Service", "AutoSurf Local Service"' in stop
+    assert 'New-ScheduledTaskAction -Execute $pythonw' in install
+    assert 'New-ScheduledTaskAction -Execute $pythonw' in recovery_task
+    assert '.venv\\Scripts\\pythonw.exe' in run
+    assert 'Start-Process -FilePath $pythonw' in run
+    assert '-WindowStyle Hidden' in run
+    assert 'Enable-ScheduledTask -TaskName $watchdogTaskName' not in run
+    assert 'Get-Process -Id $existingPid' in run
+    supervisor = Path("scripts/autosurf-supervisor.py").read_text(encoding="utf-8")
+    main = Path("src/autosurf/main.py").read_text(encoding="utf-8")
+    assert "CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW" in supervisor
+    assert 'WaitForSingleObject(ctypes.c_void_p(handle), 0)' in supervisor
+    assert 'getattr(subprocess, "CREATE_NO_WINDOW", 0)' in main
     assert "fetch --prune origin" in install
     assert 'reset --hard "refs/remotes/origin/$Branch"' in install
     assert "AUTOSURF_BROWSER_EXECUTABLE_PATH=$rootEnv/runtime/chrome/chrome.exe" in install

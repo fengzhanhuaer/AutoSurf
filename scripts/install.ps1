@@ -13,7 +13,9 @@ $data = Join-Path $root "data"
 $browser = Join-Path $root "browser"
 $envFile = Join-Path $root ".env"
 $python = Join-Path $program ".venv\Scripts\python.exe"
-$taskName = "AutoSurf Local Service"
+$pythonw = Join-Path $program ".venv\Scripts\pythonw.exe"
+$supervisor = Join-Path $program "scripts\autosurf-supervisor.py"
+$taskName = "AutoSurf Background Service"
 
 function New-RandomBase64([int]$ByteCount) {
     $bytes = New-Object byte[] $ByteCount
@@ -87,16 +89,16 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
 }
 
 $shell = New-Object -ComObject WScript.Shell
-$arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$program\scripts\run.ps1`" -InstallDir `"$root`""
+$arguments = "`"$supervisor`" --root `"$root`""
 $startupShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "AutoSurf.lnk"
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoSurf.lnk"
 
 # A Startup shortcut runs only once per logon and cannot recover when its
 # process exits. Task Scheduler keeps the native service alive for the
 # interactive user, which is required by the visible browser profile.
-$taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments `
+$taskAction = New-ScheduledTaskAction -Execute $pythonw -Argument $arguments `
     -WorkingDirectory $root
-$taskTrigger = New-ScheduledTaskTrigger -AtLogOn
+$taskLogonTrigger = New-ScheduledTaskTrigger -AtLogOn
 $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew `
     -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
@@ -106,7 +108,8 @@ $taskPrincipal = New-ScheduledTaskPrincipal `
     -LogonType Interactive -RunLevel Limited
 $taskRegistered = $false
 try {
-    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger `
+    Register-ScheduledTask -TaskName $taskName -Action $taskAction `
+        -Trigger $taskLogonTrigger `
         -Settings $taskSettings -Principal $taskPrincipal -Force | Out-Null
     $taskRegistered = $true
     Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
@@ -124,6 +127,7 @@ foreach ($shortcutPath in @($desktopShortcut, $(if (-not $taskRegistered) { $sta
 }
 
 if ($taskRegistered) {
+    Enable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Start-ScheduledTask -TaskName $taskName
 } else {
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList $arguments

@@ -5,9 +5,12 @@ param(
 $ErrorActionPreference = "Stop"
 $root = [System.IO.Path]::GetFullPath($InstallDir)
 $pidFile = Join-Path $root "data\supervisor.pid"
-$taskName = "AutoSurf Local Service"
-if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$taskNames = @("AutoSurf Background Service", "AutoSurf Local Service")
+foreach ($taskName in $taskNames) {
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    }
 }
 if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
     Write-Host "AutoSurf is not running."

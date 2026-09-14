@@ -199,6 +199,7 @@ def run() -> None:
     worker = subprocess.Popen(
         [sys.executable, "-m", "autosurf.main", "worker"],
         stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     try:
         uvicorn.run(app, host=settings.host, port=settings.port)

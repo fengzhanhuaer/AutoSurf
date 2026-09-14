@@ -241,6 +241,10 @@ async def test_standalone_chrome_is_not_launched_with_playwright_automation_flag
     monkeypatch.setenv("AUTOSURF_BROWSER_PROFILE_DIR", str(tmp_path))
     monkeypatch.setenv("AUTOSURF_BROWSER_HEADLESS", "false")
     monkeypatch.setattr(
+        "autosurf.automations.browser_session._can_reuse_standalone_browser",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "autosurf.automations.browser_session.shutil.which", lambda name: name,
     )
     monkeypatch.setattr(
@@ -277,6 +281,36 @@ async def test_standalone_chrome_is_not_launched_with_playwright_automation_flag
     assert "DISPLAY" not in kwargs["env"]
     assert kwargs["start_new_session"] is True
     assert runtime.context is None
+    assert runtime.cdp_endpoint == "http://127.0.0.1:9222"
+
+
+@pytest.mark.asyncio
+async def test_windows_reuses_running_standalone_chrome_without_opening_blank_tab(
+    tmp_path, monkeypatch
+):
+    async def process_factory(*_args, **_kwargs):
+        raise AssertionError("running Chrome must not be launched again")
+
+    monkeypatch.setenv("AUTOSURF_BROWSER_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("AUTOSURF_BROWSER_HEADLESS", "false")
+    monkeypatch.setattr(
+        "autosurf.automations.browser_session._can_reuse_standalone_browser",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "autosurf.automations.browser_session._standalone_cdp_ready",
+        lambda _endpoint: True,
+    )
+
+    runtime = await launch_standalone_browser(
+        None,
+        RunContext("restart", {"locale": "zh-CN"}, {}),
+        remote_desktop=True,
+        process_factory=process_factory,
+    )
+
+    assert runtime.browser_process is None
+    assert runtime.profile_path == tmp_path / "shared"
     assert runtime.cdp_endpoint == "http://127.0.0.1:9222"
 
 
