@@ -5,16 +5,15 @@ param(
 $ErrorActionPreference = "Stop"
 $root = [System.IO.Path]::GetFullPath($InstallDir)
 $program = Join-Path $root "program"
-$runScript = Join-Path $program "scripts\run.ps1"
 $pythonw = Join-Path $program ".venv\Scripts\pythonw.exe"
-$supervisor = Join-Path $program "scripts\autosurf-supervisor.py"
+$launcher = Join-Path $program "scripts\native_launcher.py"
 $taskName = "AutoSurf Background Service"
 
-if (-not (Test-Path -LiteralPath $runScript -PathType Leaf)) {
-    throw "AutoSurf launch script is missing: $runScript"
+if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+	throw "AutoSurf native launcher is missing: $launcher"
 }
 
-$arguments = "`"$supervisor`" --root `"$root`""
+$arguments = "`"$launcher`" --root `"$root`""
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument $arguments `
     -WorkingDirectory $root
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn

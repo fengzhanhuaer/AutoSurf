@@ -756,6 +756,7 @@ async def test_browser_control_status_and_native_window_actions_require_login(se
 def test_windows_installation_uses_localhost_without_docker_artifacts():
     install = Path("scripts/install.ps1").read_text(encoding="utf-8")
     recovery_task = Path("scripts/register-recovery-task.ps1").read_text(encoding="utf-8")
+    launcher = Path("scripts/native_launcher.py").read_text(encoding="utf-8")
     run = Path("scripts/run.ps1").read_text(encoding="utf-8")
     stop = Path("scripts/stop.ps1").read_text(encoding="utf-8")
     browser_install = Path("scripts/install-browser.ps1").read_text(encoding="utf-8")
@@ -775,6 +776,13 @@ def test_windows_installation_uses_localhost_without_docker_artifacts():
     assert '"AutoSurf Background Service", "AutoSurf Local Service"' in stop
     assert 'New-ScheduledTaskAction -Execute $pythonw' in install
     assert 'New-ScheduledTaskAction -Execute $pythonw' in recovery_task
+    assert 'scripts\\native_launcher.py' in install
+    assert 'scripts\\native_launcher.py' in recovery_task
+    assert '"$launcher`" --root' in install
+    assert '"$launcher`" --root' in recovery_task
+    assert 'os.execv(sys.executable' in launcher
+    assert 'load_env(root / ".env")' in launcher
+    assert 'os.environ[key]' in launcher
     assert '.venv\\Scripts\\pythonw.exe' in run
     assert 'Start-Process -FilePath $pythonw' in run
     assert '-WindowStyle Hidden' in run

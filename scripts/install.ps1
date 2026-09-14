@@ -14,7 +14,7 @@ $browser = Join-Path $root "browser"
 $envFile = Join-Path $root ".env"
 $python = Join-Path $program ".venv\Scripts\python.exe"
 $pythonw = Join-Path $program ".venv\Scripts\pythonw.exe"
-$supervisor = Join-Path $program "scripts\autosurf-supervisor.py"
+$launcher = Join-Path $program "scripts\native_launcher.py"
 $taskName = "AutoSurf Background Service"
 
 function New-RandomBase64([int]$ByteCount) {
@@ -89,7 +89,7 @@ if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
 }
 
 $shell = New-Object -ComObject WScript.Shell
-$arguments = "`"$supervisor`" --root `"$root`""
+$arguments = "`"$launcher`" --root `"$root`""
 $startupShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "AutoSurf.lnk"
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoSurf.lnk"
 
@@ -120,7 +120,7 @@ try {
 foreach ($shortcutPath in @($desktopShortcut, $(if (-not $taskRegistered) { $startupShortcut }))) {
     if (-not $shortcutPath) { continue }
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = "powershell.exe"
+    $shortcut.TargetPath = $pythonw
     $shortcut.Arguments = $arguments
     $shortcut.WorkingDirectory = $root
     $shortcut.Save()
@@ -130,7 +130,7 @@ if ($taskRegistered) {
     Enable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Start-ScheduledTask -TaskName $taskName
 } else {
-    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList $arguments
+    Start-Process -FilePath $pythonw -WindowStyle Hidden -ArgumentList $arguments -WorkingDirectory $root
 }
 Write-Host "AutoSurf installed at $root"
 Write-Host "Open http://127.0.0.1:18980/"
