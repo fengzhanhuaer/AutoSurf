@@ -1,4 +1,6 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 import json
 from uuid import uuid4
 
@@ -92,6 +94,82 @@ def settings(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prepared", [True, False])
+@pytest.mark.parametrize("landing_home", [True, False])
+async def test_detached_warmup_preserves_attendance_page(
+    monkeypatch, tmp_path, prepared, landing_home,
+):
+    url = "https://piggo.me/attendance.php"
+    page = SimpleNamespace(
+        url="https://piggo.me/" if landing_home else url,
+        set_default_timeout=lambda _timeout: None,
+    )
+    navigations = []
+
+    async def new_page():
+        return page
+
+    session = SimpleNamespace(
+        context=object(), mode="persistent_headful", profile_key="shared",
+        detached_waf_warmup=prepared, new_page=new_page,
+    )
+
+    @asynccontextmanager
+    async def playwright_manager():
+        yield object()
+
+    @asynccontextmanager
+    async def session_manager(*_args):
+        yield session
+
+    async def prepare(*_args):
+        return prepared
+
+    async def navigate(_page, target, _timeout):
+        navigations.append(target)
+        page.url = target
+        return SimpleNamespace(status=200)
+
+    async def keep_context(_page, context, _url):
+        return context
+
+    async def no_result(*_args):
+        return None
+
+    async def signin(*_args):
+        assert page.url == url
+        return RunResult(RunOutcome.ALREADY_DONE, "already done", {"url": url})
+
+    async def keep_result(_page, result, _screenshot):
+        return result
+
+    monkeypatch.setenv("AUTOSURF_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("playwright.async_api.async_playwright", playwright_manager)
+    module = "autosurf.automations.pt_signin."
+    monkeypatch.setattr(module + "persistent_chromium_session", session_manager)
+    monkeypatch.setattr(module + "prepare_detached_browser_challenge", prepare)
+    monkeypatch.setattr(module + "browser_environment_run_context", keep_context)
+    monkeypatch.setattr(module + "_goto_pt_page", navigate)
+    monkeypatch.setattr(module + "_open_pt_signin_page", navigate)
+    monkeypatch.setattr(module + "_classify_pt_homepage", no_result)
+    monkeypatch.setattr(module + "_resolve_0ff_slider", no_result)
+    monkeypatch.setattr(module + "_attach_failure_screenshot", keep_result)
+    handler = PtSignInHandler([])
+    monkeypatch.setattr(handler, "_generic_sign_in", signin)
+
+    result = await handler.run(RunContext(
+        "piggo-prepared", {
+            "url": url, "profile_refresh_enabled": False,
+            "profile_refresh_supported": False,
+        }, {},
+    ))
+
+    assert result.outcome == RunOutcome.ALREADY_DONE
+    expected_navigations = [url] if landing_home else []
+    assert navigations == (expected_navigations if prepared else ["https://piggo.me/", url])
+
+
 def test_pt_challenge_vendor_is_reported_separately():
     assert classify_pt_challenge(
         "安全检测能力由 雷池 WAF 驱动，客户端异常，请确认您是合法用户"
@@ -102,6 +180,64 @@ def test_pt_challenge_vendor_is_reported_separately():
     assert classify_pt_challenge(
         "人机验证 验证通过后将自动完成签到"
     ) == ("human_verification", "站点要求完成人机验证")
+
+
+def test_safeline_blocked_signin_skips_profile_refresh():
+    result = profile_refresh_skip_result(
+        RunResult(RunOutcome.BLOCKED, "blocked", {"blocker_type": "safeline"}),
+        "https://piggo.me/attendance.php",
+    )
+    assert result.outcome == RunOutcome.BLOCKED
+    assert result.details["blocker_type"] == "safeline"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,expected", [
+    ("当前环境正在被调试 雷池 WAF", RunOutcome.BLOCKED),
+    ("欢迎回来", RunOutcome.FAILED),
+])
+async def test_profile_refresh_does_not_reload_current_attendance_page(
+    monkeypatch, body, expected,
+):
+    url = "https://piggo.me/attendance.php"
+    page = SimpleNamespace(url=url)
+
+    async def body_text(_page):
+        return body
+
+    async def no_profile(_page):
+        return None
+
+    monkeypatch.setattr("autosurf.automations.pt_signin.page_body_text", body_text)
+    monkeypatch.setattr("autosurf.automations.pt_signin.discover_pt_profile_url", no_profile)
+    result = await refresh_pt_profile_page(
+        page, RunContext("profile-current", {"url": url}, {}), url, "piggo.me", 60_000,
+    )
+    assert result.outcome == expected
+    if expected == RunOutcome.BLOCKED:
+        assert result.details["blocker_type"] == "safeline"
+
+
+@pytest.mark.asyncio
+async def test_profile_refresh_reuses_current_profile_page(monkeypatch):
+    url = "https://tracker.test/userdetails.php?id=7"
+
+    class Body:
+        async def inner_text(self):
+            return "用户详情 上传量: 1 TiB"
+
+    page = SimpleNamespace(url=url, locator=lambda _selector: Body())
+
+    async def stats(_page):
+        return {"uploaded": "1 TiB"}
+
+    monkeypatch.setattr("autosurf.automations.pt_signin.extract_pt_profile_stats", stats)
+    result = await refresh_pt_profile_page(
+        page, RunContext("profile-reuse", {"profile_url": url}, {}),
+        "https://tracker.test/attendance.php", "tracker.test", 60_000,
+    )
+    assert result.outcome == RunOutcome.SUCCESS
+    assert result.details["profile_stats"] == {"uploaded": "1 TiB"}
 
 
 def test_cloudflare_origin_error_is_not_reported_as_human_verification():

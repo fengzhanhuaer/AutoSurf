@@ -474,7 +474,9 @@ async def persistent_browser_task_page(browser_context: Any) -> Any:
     return page
 
 
-async def prepared_browser_task_page(browser_context: Any, url: str) -> Any:
+async def prepared_browser_task_page(
+    browser_context: Any, url: str, *, target_id: str | None = None,
+) -> Any:
     """Adopt a detached warm-up tab as the serialized automation page."""
     target = validated_http_url(url)
     pages = list(browser_context.pages)
@@ -488,10 +490,29 @@ async def prepared_browser_task_page(browser_context: Any, url: str) -> Any:
             current.scheme == target.scheme
             and current.hostname == target.hostname
             and current.port == target.port
+            and (
+                target_id is not None
+                or (current.path == target.path and current.query == target.query)
+            )
         ):
+            if target_id is not None:
+                cdp = None
+                try:
+                    cdp = await browser_context.new_cdp_session(page)
+                    info = await cdp.send("Target.getTargetInfo")
+                    if info["targetInfo"]["targetId"] != target_id:
+                        continue
+                except Exception:
+                    continue
+                finally:
+                    if cdp is not None:
+                        with suppress(Exception):
+                            await cdp.detach()
             candidate = page
             break
     if candidate is None:
+        if target_id is not None:
+            return None
         return await persistent_browser_task_page(browser_context)
 
     for page in pages:

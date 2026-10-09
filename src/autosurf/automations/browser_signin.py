@@ -7,6 +7,7 @@ from pathlib import Path
 from autosurf.automations.browser_session import (
     new_browser_session_page,
     persistent_chromium_session,
+    prepare_detached_browser_challenge,
     validated_http_url,
     with_browser_details,
 )
@@ -29,18 +30,37 @@ class BrowserSignInHandler:
         screenshot_dir.mkdir(parents=True, exist_ok=True)
         screenshot = screenshot_dir / f"{context.execution_id}.png"
 
+        await prepare_detached_browser_challenge(context, url)
         async with async_playwright() as playwright:
             async with persistent_chromium_session(playwright, context, url) as browser_session:
                 browser_context = browser_session.context
                 page = await new_browser_session_page(browser_session)
                 page.set_default_timeout(timeout_ms)
                 try:
-                    response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    response = None
+                    if not (
+                        bool(getattr(browser_session, "detached_waf_warmup", False))
+                        and page.url == url
+                    ):
+                        response = await page.goto(
+                            url, wait_until="domcontentloaded", timeout=timeout_ms,
+                        )
                     if config.get("wait_for_selector"):
                         await page.locator(str(config["wait_for_selector"])).wait_for(state="visible")
                     status = response.status if response else None
                     body = (await page.locator("body").inner_text())[:1_000_000]
                     details = {"url": page.url, "status_code": status, "clicked": False}
+                    from autosurf.automations.pt_signin import classify_pt_challenge
+
+                    blocker_type, blocker_message = classify_pt_challenge(body)
+                    if blocker_type == "safeline":
+                        await page.screenshot(path=str(screenshot), full_page=True)
+                        details.update({
+                            "blocker_type": blocker_type, "screenshot": str(screenshot),
+                        })
+                        return with_browser_details(RunResult(
+                            RunOutcome.BLOCKED, blocker_message, details,
+                        ), browser_session)
                     already_selector = str(config.get("already_selector") or "").strip()
                     if already_selector and await _selector_is_visible(page, already_selector):
                         details["matched_selector"] = already_selector

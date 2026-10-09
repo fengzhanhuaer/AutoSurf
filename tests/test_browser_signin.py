@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,76 @@ from autosurf.automations.browser_session import (
 )
 from autosurf.domain.models import RunContext
 from autosurf.domain.models import RunOutcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prepared", [True, False])
+@pytest.mark.parametrize("blocked", [True, False])
+async def test_browser_signin_reuses_warmup_and_reports_safeline(
+    monkeypatch, tmp_path, prepared, blocked,
+):
+    url = "https://example.com/checkin"
+    events = []
+
+    class Body:
+        async def inner_text(self):
+            return "当前环境正在被调试 雷池 WAF" if blocked else "欢迎回来"
+
+    class Page:
+        def __init__(self):
+            self.url = url
+
+        def set_default_timeout(self, _timeout):
+            pass
+
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+        async def goto(self, target, **_kwargs):
+            events.append("navigate")
+            assert target == url
+            return SimpleNamespace(status=200)
+
+        async def screenshot(self, **_kwargs):
+            events.append("screenshot")
+
+    page = Page()
+
+    async def new_page():
+        return page
+
+    session = SimpleNamespace(
+        context=object(), mode="persistent_headful", profile_key="shared",
+        detached_waf_warmup=prepared, new_page=new_page,
+    )
+
+    @asynccontextmanager
+    async def playwright_manager():
+        events.append("connect")
+        yield object()
+
+    @asynccontextmanager
+    async def session_manager(*_args):
+        yield session
+
+    async def prepare(*_args):
+        events.append("warmup")
+        return prepared
+
+    monkeypatch.setenv("AUTOSURF_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("playwright.async_api.async_playwright", playwright_manager)
+    module = "autosurf.automations.browser_signin."
+    monkeypatch.setattr(module + "prepare_detached_browser_challenge", prepare)
+    monkeypatch.setattr(module + "persistent_chromium_session", session_manager)
+    result = await BrowserSignInHandler().run(RunContext("ordinary-warmup", {"url": url}, {}))
+    assert events[:2] == ["warmup", "connect"]
+    assert events.count("navigate") == (0 if prepared else 1)
+    assert result.outcome == (RunOutcome.BLOCKED if blocked else RunOutcome.SUCCESS)
+    if blocked:
+        assert result.details["blocker_type"] == "safeline"
+        assert result.details["clicked"] is False
+        assert "screenshot" in result.details
 
 
 @pytest.mark.asyncio

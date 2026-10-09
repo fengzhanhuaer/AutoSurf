@@ -1353,6 +1353,14 @@ class TjuptAdapter:
 
 
 def profile_refresh_skip_result(sign_in: RunResult | None, url: str) -> RunResult | None:
+    if (
+        sign_in is not None and sign_in.outcome == RunOutcome.BLOCKED
+        and (sign_in.details or {}).get("blocker_type") == "safeline"
+    ):
+        return RunResult(
+            RunOutcome.BLOCKED, "站点被雷池 WAF 拦截，未刷新个人信息",
+            {**(sign_in.details or {}), "url": url},
+        )
     if sign_in is None or sign_in.outcome != RunOutcome.AUTH_EXPIRED:
         return None
     return RunResult(
@@ -1415,13 +1423,24 @@ class PtSignInHandler:
                 browser_context = browser_session.context
                 page = await new_browser_session_page(browser_session)
                 page.set_default_timeout(timeout_ms)
+                prepared_signin_page = (
+                    bool(getattr(browser_session, "detached_waf_warmup", False))
+                    and page.url == url
+                )
                 try:
                     origin = pt_home_url(url)
                     adapter = next((item for item in self.adapters if item.matches(url)), None)
                     home_response = None
                     home_error = None
                     try:
-                        home_response = await _goto_pt_page(page, origin, timeout_ms)
+                        if not (
+                            prepared_signin_page
+                            or (
+                                bool(getattr(browser_session, "detached_waf_warmup", False))
+                                and page.url == origin
+                            )
+                        ):
+                            home_response = await _goto_pt_page(page, origin, timeout_ms)
                     except PlaywrightTimeoutError as exc:
                         await _save_screenshot(page, screenshot)
                         home_error = RunResult(
@@ -1443,7 +1462,9 @@ class PtSignInHandler:
                         if sign_in_result is None:
                             try:
                                 response = home_response
-                                if (parsed.path or "/") != "/" or parsed.query:
+                                if not prepared_signin_page and (
+                                    (parsed.path or "/") != "/" or parsed.query
+                                ):
                                     sign_in_result = await _classify_pt_homepage(
                                         page, context, response.status if response else None,
                                     )
@@ -2098,6 +2119,12 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
     current_outcome = classify_pt_page(page.url, None, current_body, context.config)
     if current_outcome == RunOutcome.AUTH_EXPIRED:
         return _classified_result(current_outcome, page.url, None)
+    if current_outcome == RunOutcome.BLOCKED:
+        blocker_type, _ = classify_pt_challenge(current_body)
+        if blocker_type == "safeline":
+            return _classified_result(
+                current_outcome, page.url, None, page_body=current_body,
+            )
 
     configured = str(context.config.get("profile_url") or "").strip()
     if not configured:
@@ -2105,7 +2132,7 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
         configured = discovery.profile_url if discovery and discovery.profile_url else ""
     profile_url = urljoin(site_url, configured) if configured else await discover_pt_profile_url(page)
     site_target = validated_http_url(site_url)
-    if not profile_url and site_target.path not in {"", "/"}:
+    if not profile_url and site_target.path not in {"", "/"} and page.url != site_url:
         await page.goto(site_url, wait_until="domcontentloaded", timeout=timeout_ms)
         profile_url = await discover_pt_profile_url(page)
     if not profile_url:
@@ -2117,7 +2144,9 @@ async def refresh_pt_profile_page(page: Any, context: RunContext, site_url: str,
     if site_domain and not _domain_matches(site_domain, parsed.hostname or ""):
         return RunResult(RunOutcome.FAILED, "个人信息页不属于当前 PT 站点", {"url": profile_url})
 
-    response = await _goto_pt_page(page, profile_url, timeout_ms)
+    response = None
+    if page.url != profile_url:
+        response = await _goto_pt_page(page, profile_url, timeout_ms)
     status_code = response.status if response else None
     body = (await page.locator("body").inner_text())[:1_000_000]
     upstream_error = classify_upstream_error(status_code, body)

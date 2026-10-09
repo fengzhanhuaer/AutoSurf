@@ -93,10 +93,22 @@ def _matching_page_has_normal_title(pages: list[dict[str, Any]], url: str) -> bo
     }
     for page in pages:
         current = urlparse(str(page.get("url") or ""))
-        if current.scheme != target.scheme or current.hostname != target.hostname:
+        if (
+            current.scheme != target.scheme
+            or current.hostname != target.hostname
+            or current.port != target.port
+            or not (
+                (current.path == target.path and current.query == target.query)
+                or (current.path in {"", "/"} and not current.query)
+            )
+        ):
             continue
         title = str(page.get("title") or "").strip().casefold()
-        if title and title not in generic_titles:
+        challenge_titles = ("雷池", "safeline", "正在被调试", "just a moment", "安全验证")
+        if (
+            title and title not in generic_titles
+            and not any(marker in title for marker in challenge_titles)
+        ):
             return True
     return False
 
@@ -129,17 +141,18 @@ async def detached_safeline_warmup(
     *,
     minimum_seconds: float = SAFELINE_WARMUP_MIN_SECONDS,
     timeout_seconds: float = SAFELINE_WARMUP_TIMEOUT_SECONDS,
-) -> bool:
+) -> str | None:
     """Open a SafeLine target in ordinary Chrome before any CDP attachment."""
     status = await asyncio.to_thread(_probe_http_status, url)
     if status != SAFELINE_CHALLENGE_STATUS:
-        return False
+        return None
     try:
-        await standalone_browser_pages(runtime)
+        existing_pages = await standalone_browser_pages(runtime)
+        existing_ids = {str(page.get("id") or "") for page in existing_pages}
         if not await _open_url_without_cdp(runtime, url):
-            return False
+            return None
     except Exception:
-        return False
+        return None
 
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -153,11 +166,16 @@ async def detached_safeline_warmup(
             pages = await standalone_browser_pages(runtime)
         except Exception:
             continue
-        if _matching_page_has_normal_title(pages, url):
-            return True
+        for page in pages:
+            target_id = str(page.get("id") or "")
+            if (
+                target_id and target_id not in existing_ids
+                and _matching_page_has_normal_title([page], url)
+            ):
+                return target_id
     # The regular Playwright path will reclassify a challenge that did not
     # finish within the detached window.
-    return False
+    return None
 
 
 class BrowserControlError(RuntimeError):
@@ -173,7 +191,7 @@ class CdpAutomationProvider:
 
     def __init__(self, endpoint: str = STANDALONE_CDP_ENDPOINT) -> None:
         self._endpoint = endpoint
-        self._prepared_urls: dict[str, str] = {}
+        self._prepared_targets: dict[str, tuple[str, str]] = {}
 
     async def prepare_detached_challenge(
         self,
@@ -187,12 +205,12 @@ class CdpAutomationProvider:
             display=None,
             cdp_endpoint=self._endpoint,
         )
-        warmed = await detached_safeline_warmup(runtime, url)
-        if warmed:
-            self._prepared_urls[run_context.execution_id] = url
+        target_id = await detached_safeline_warmup(runtime, url)
+        if target_id:
+            self._prepared_targets[run_context.execution_id] = (url, target_id)
         else:
-            self._prepared_urls.pop(run_context.execution_id, None)
-        return warmed
+            self._prepared_targets.pop(run_context.execution_id, None)
+        return target_id is not None
 
     async def _connect(self, playwright: Any, runtime: PersistentBrowserRuntime) -> Any:
         last_error: Exception | None = None
@@ -214,7 +232,9 @@ class CdpAutomationProvider:
         playwright: Any | None = None,
     ):
         validated_http_url(url)
-        prepared_url = self._prepared_urls.pop(run_context.execution_id, None)
+        prepared_target = self._prepared_targets.pop(run_context.execution_id, None)
+        if prepared_target is not None and prepared_target[0] != url:
+            prepared_target = None
         manager = None
         current_playwright = playwright
         if current_playwright is None:
@@ -234,25 +254,27 @@ class CdpAutomationProvider:
             await prepare_browser_for_run(connected, run_context, url)
 
             task_page = None
+            if prepared_target is not None:
+                task_page = await prepared_browser_task_page(
+                    connected.context, prepared_target[0], target_id=prepared_target[1],
+                )
+                if task_page is None:
+                    prepared_target = None
 
             async def create_page() -> Any:
                 nonlocal task_page
                 if task_page is None or task_page.is_closed():
-                    if prepared_url is not None:
-                        task_page = await prepared_browser_task_page(
-                            connected.context, prepared_url,
-                        )
-                    else:
-                        task_page = await persistent_browser_task_page(connected.context)
+                    task_page = await persistent_browser_task_page(connected.context)
                 return task_page
 
-            yield PersistentBrowserSession(
+            session = PersistentBrowserSession(
                 connected.context,
                 "shared",
                 connected.mode,
                 page_factory=create_page,
-                detached_waf_warmup=prepared_url is not None,
+                detached_waf_warmup=prepared_target is not None,
             )
+            yield session
         finally:
             if connected is not None and connected.context is not None:
                 with suppress(Exception):

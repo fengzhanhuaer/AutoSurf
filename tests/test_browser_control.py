@@ -32,6 +32,7 @@ from autosurf.browser_control import (
     BrowserControlService,
     BrowserDisplaySettings,
     CdpAutomationProvider,
+    _matching_page_has_normal_title,
     detached_safeline_warmup,
 )
 from autosurf.config import Settings
@@ -99,6 +100,17 @@ class FakeContext:
         page = FakePage()
         self.pages.append(page)
         return page
+
+    async def new_cdp_session(self, page):
+        class Session:
+            async def send(self, method):
+                assert method == "Target.getTargetInfo"
+                return {"targetInfo": {"targetId": getattr(page, "target_id", "warmup")}}
+
+            async def detach(self):
+                pass
+
+        return Session()
 
 
 class FakePlaywright:
@@ -210,7 +222,7 @@ async def test_prepared_task_page_adopts_warmup_tab_and_closes_previous_task_pag
     previous = FakePage("https://previous.example/")
     previous.window_name = "__autosurf_automation_window__"
     manual = FakePage("https://manual.example/")
-    warmup = FakePage("https://www.hdkyl.in/")
+    warmup = FakePage("https://www.hdkyl.in/attendance.php")
     context = FakeContext()
     context.pages = [manual, previous, warmup]
 
@@ -244,8 +256,59 @@ async def test_detached_safeline_warmup_skips_non_468(monkeypatch, tmp_path):
         cdp_endpoint="http://127.0.0.1:9222",
     )
 
-    assert await detached_safeline_warmup(runtime, "https://example.com/") is False
+    assert await detached_safeline_warmup(runtime, "https://example.com/") is None
     assert opened == []
+
+
+@pytest.mark.parametrize("page_url,title,ready", [
+    ("https://piggo.me/", "PigGo 首页", True),
+    ("https://piggo.me/other.php", "PigGo", False),
+    ("https://piggo.me:8443/attendance.php", "PigGo", False),
+    ("https://piggo.me/attendance.php?other=1", "PigGo", False),
+    ("https://piggo.me/attendance.php", "雷池 WAF", False),
+    ("https://piggo.me/attendance.php", "当前环境正在被调试", False),
+    ("https://piggo.me/attendance.php", "Just a moment...", False),
+    ("https://piggo.me/attendance.php", "PigGo :: 签到", True),
+])
+def test_warmup_requires_target_path_and_non_challenge_title(page_url, title, ready):
+    assert _matching_page_has_normal_title(
+        [{"url": page_url, "title": title}], "https://piggo.me/attendance.php",
+    ) is ready
+
+
+@pytest.mark.asyncio
+async def test_warmup_does_not_accept_existing_normal_tab(monkeypatch, tmp_path):
+    runtime = PersistentBrowserRuntime(
+        context=None, profile_path=tmp_path, mode="persistent_headful",
+        display=None, cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    async def pages(_runtime):
+        return [{"id": "old", "url": "https://piggo.me/attendance.php", "title": "PigGo"}]
+
+    async def open_url(*_args):
+        return True
+
+    monkeypatch.setattr("autosurf.browser_control._probe_http_status", lambda _url: 468)
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control._open_url_without_cdp", open_url)
+    assert await detached_safeline_warmup(
+        runtime, "https://piggo.me/attendance.php", minimum_seconds=0, timeout_seconds=0.01,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_prepared_page_requires_matching_target_id():
+    url = "https://piggo.me/attendance.php"
+    warmup = FakePage(url)
+    warmup.target_id = "new"
+    manual = FakePage(url)
+    manual.target_id = "old"
+    context = FakeContext()
+    context.pages = [warmup, manual]
+    assert await prepared_browser_task_page(context, url, target_id="new") is warmup
+    assert manual.closed is False
+    assert await prepared_browser_task_page(context, url, target_id="missing") is None
 
 
 @pytest.mark.asyncio
@@ -260,9 +323,12 @@ async def test_detached_safeline_warmup_opens_before_polling_normal_page(
 
     async def pages(_runtime):
         events.append("pages")
+        if "open" not in events:
+            return []
         return [{
+            "id": "warmup",
             "type": "page",
-            "url": "https://www.hdkyl.in/",
+            "url": "https://www.hdkyl.in/attendance.php",
             "title": "HDKylin - Powered by NexusPHP",
         }]
 
@@ -290,7 +356,7 @@ async def test_detached_safeline_warmup_opens_before_polling_normal_page(
         "https://www.hdkyl.in/attendance.php",
         minimum_seconds=0,
         timeout_seconds=1,
-    ) is True
+    ) == "warmup"
     assert events[:3] == ["probe", "pages", "open"]
     assert events[3:] == ["sleep", "pages"]
 
@@ -329,7 +395,7 @@ async def test_detached_safeline_warmup_times_out_without_marking_prepared(
         "https://www.hdkyl.in/attendance.php",
         minimum_seconds=0,
         timeout_seconds=0,
-    ) is False
+    ) is None
     assert opened == ["https://www.hdkyl.in/attendance.php"]
 
 
@@ -426,18 +492,19 @@ async def test_worker_cdp_provider_keeps_and_reuses_automation_window(tmp_path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("landing_path", ["/", "/attendance.php"])
 async def test_worker_cdp_provider_prepares_before_connect_and_adopts_warmup_page(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, landing_path,
 ):
     events = []
-    warmup_page = FakePage("https://www.hdkyl.in/")
+    warmup_page = FakePage("https://www.hdkyl.in" + landing_path)
     context = FakeContext()
     context.pages = [warmup_page]
     playwright = FakePlaywright()
 
     async def warmup(runtime, url):
         events.append(("warmup", url, runtime.cdp_endpoint))
-        return True
+        return "warmup"
 
     async def connect(_playwright, runtime):
         events.append(("connect", runtime.cdp_endpoint))
@@ -464,6 +531,27 @@ async def test_worker_cdp_provider_prepares_before_connect_and_adopts_warmup_pag
 
     assert events[0][0] == "warmup"
     assert events[1][0] == "connect"
+
+
+@pytest.mark.asyncio
+async def test_worker_cdp_provider_clears_warmup_when_target_disappears(monkeypatch):
+    url = "https://piggo.me/attendance.php"
+    context = FakeContext()
+    playwright = FakePlaywright()
+
+    async def warmup(*_args):
+        return "missing"
+
+    async def connect(_playwright, runtime):
+        return replace(runtime, context=context, browser_connection=object())
+
+    monkeypatch.setattr("autosurf.browser_control.detached_safeline_warmup", warmup)
+    monkeypatch.setattr("autosurf.browser_control.connect_standalone_browser", connect)
+    provider = CdpAutomationProvider()
+    run_context = RunContext("missing-warmup", {}, {})
+    assert await provider.prepare_detached_challenge(run_context, url) is True
+    async with provider.automation_session(run_context, url, playwright=playwright) as session:
+        assert session.detached_waf_warmup is False
 
 
 @pytest.mark.asyncio
