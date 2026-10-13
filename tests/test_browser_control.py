@@ -56,6 +56,7 @@ def settings(tmp_path):
 class FakePage:
     def __init__(self, url="about:blank"):
         self.url = url
+        self.target_id = f"target-{id(self)}"
         self.timeout = None
         self.closed = False
         self.window_name = ""
@@ -105,7 +106,7 @@ class FakeContext:
         class Session:
             async def send(self, method):
                 assert method == "Target.getTargetInfo"
-                return {"targetInfo": {"targetId": getattr(page, "target_id", "warmup")}}
+                return {"targetInfo": {"targetId": page.target_id}}
 
             async def detach(self):
                 pass
@@ -238,6 +239,89 @@ async def test_prepared_task_page_adopts_warmup_tab_and_closes_previous_task_pag
 
 
 @pytest.mark.asyncio
+async def test_prepared_task_page_closes_owned_target_after_name_reset():
+    previous = FakePage("https://old.example/")
+    manual = FakePage("https://old.example/")
+    warmup = FakePage("https://piggo.me/attendance.php")
+    context = FakeContext()
+    context.pages = [manual, previous, warmup]
+
+    selected = await prepared_browser_task_page(
+        context, warmup.url, target_id=warmup.target_id,
+        previous_target_id=previous.target_id,
+    )
+
+    assert selected is warmup
+    assert previous.closed is True
+    assert manual.closed is False
+
+
+@pytest.mark.asyncio
+async def test_task_target_missing_creates_replacement_without_adopting_manual_page(monkeypatch):
+    context = FakeContext()
+    manual = FakePage("https://example.com/")
+    context.pages = [manual]
+
+    async def create_page(current):
+        return await current.new_page()
+
+    monkeypatch.setattr("autosurf.automations.browser_session.new_browser_task_page", create_page)
+    selected = await persistent_browser_task_page(context, target_id="closed-target")
+    assert selected is not manual
+    assert manual.closed is False
+    assert selected.window_name == "__autosurf_automation_window__"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "cancel", "open_error"])
+async def test_failed_warmup_closes_only_its_new_site_pages(monkeypatch, tmp_path, failure):
+    url = "https://piggo.me/attendance.php"
+    old = {"id": "manual-old", "url": url, "title": "PigGo"}
+    warmup = {"id": "warmup-failed", "url": url, "title": "雷池 WAF"}
+    other = {"id": "manual-new", "url": "https://manual.example/", "title": "Manual"}
+    same_site_manual = {
+        "id": "manual-same-site", "url": "https://piggo.me/messages.php", "title": "Messages",
+    }
+    opened = False
+    closed = []
+
+    async def pages(_runtime):
+        return [old, warmup, other, same_site_manual] if opened else [old]
+
+    async def open_url(*_args):
+        nonlocal opened
+        opened = True
+        if failure == "open_error":
+            raise OSError("Chrome handoff error")
+        return True
+
+    async def cancel(_delay):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("autosurf.browser_control._probe_http_status", lambda _url: 468)
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control._open_url_without_cdp", open_url)
+    monkeypatch.setattr(
+        "autosurf.browser_control._close_detached_target",
+        lambda _runtime, target: closed.append(target),
+    )
+    if failure == "cancel":
+        monkeypatch.setattr("autosurf.browser_control.asyncio.sleep", cancel)
+    runtime = PersistentBrowserRuntime(
+        context=None, profile_path=tmp_path, mode="persistent_headful",
+        display=None, cdp_endpoint="http://127.0.0.1:9222",
+    )
+    if failure == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await detached_safeline_warmup(runtime, url, minimum_seconds=0, timeout_seconds=1)
+    else:
+        assert await detached_safeline_warmup(
+            runtime, url, minimum_seconds=0, timeout_seconds=0,
+        ) is None
+    assert closed == ["warmup-failed"]
+
+
+@pytest.mark.asyncio
 async def test_detached_safeline_warmup_skips_non_468(monkeypatch, tmp_path):
     opened = []
 
@@ -343,6 +427,10 @@ async def test_detached_safeline_warmup_opens_before_polling_normal_page(
     monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
     monkeypatch.setattr("autosurf.browser_control._open_url_without_cdp", open_url)
     monkeypatch.setattr("autosurf.browser_control.asyncio.sleep", sleep)
+    monkeypatch.setattr(
+        "autosurf.browser_control._close_detached_target",
+        lambda *_args: events.append("close"),
+    )
     runtime = PersistentBrowserRuntime(
         context=None,
         profile_path=tmp_path,
@@ -478,6 +566,8 @@ async def test_worker_cdp_provider_keeps_and_reuses_automation_window(tmp_path, 
     ) as session:
         assert await session.new_page() is task_page
 
+    task_page.window_name = ""
+    task_page.url = "https://different.example/"
     async with provider.automation_session(
         RunContext("worker-execution-2", {}, {}),
         "https://example.com/",
@@ -498,6 +588,7 @@ async def test_worker_cdp_provider_prepares_before_connect_and_adopts_warmup_pag
 ):
     events = []
     warmup_page = FakePage("https://www.hdkyl.in" + landing_path)
+    warmup_page.target_id = "warmup"
     context = FakeContext()
     context.pages = [warmup_page]
     playwright = FakePlaywright()
@@ -729,6 +820,8 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     assert connected == [(playwright, active_runtime)]
 
     task_playwright = FakePlaywright()
+    task_page.window_name = ""
+    task_page.url = "https://different.example/"
     async with service.automation_session(
         RunContext("execution-2", {}, {}),
         "https://example.com/",

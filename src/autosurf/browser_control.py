@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
@@ -21,6 +21,7 @@ from autosurf.automations.browser_session import (
     PersistentBrowserSession,
     STANDALONE_CDP_ENDPOINT,
     browser_profile_path,
+    browser_page_target_id,
     close_persistent_browser,
     connect_standalone_browser,
     launch_standalone_browser,
@@ -148,34 +149,71 @@ async def detached_safeline_warmup(
         return None
     try:
         existing_pages = await standalone_browser_pages(runtime)
-        existing_ids = {str(page.get("id") or "") for page in existing_pages}
-        if not await _open_url_without_cdp(runtime, url):
-            return None
     except Exception:
         return None
+    existing_ids = {str(page.get("id") or "") for page in existing_pages}
+    prepared_target_id = None
+    try:
+        if not await _open_url_without_cdp(runtime, url):
+            return None
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + max(float(timeout_seconds), 0)
+        minimum_ready_at = started + max(float(minimum_seconds), 0)
+        while loop.time() < deadline:
+            await asyncio.sleep(min(0.5, max(deadline - loop.time(), 0)))
+            if loop.time() < minimum_ready_at:
+                continue
+            try:
+                pages = await standalone_browser_pages(runtime)
+            except Exception:
+                continue
+            for page in pages:
+                target_id = str(page.get("id") or "")
+                if (
+                    target_id and target_id not in existing_ids
+                    and _matching_page_has_normal_title([page], url)
+                ):
+                    prepared_target_id = target_id
+                    return target_id
+        return None
+    except Exception:
+        return None
+    finally:
+        if prepared_target_id is None:
+            with suppress(Exception):
+                await _close_failed_warmup_pages(runtime, url, existing_ids)
 
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    deadline = started + max(float(timeout_seconds), 0)
-    minimum_ready_at = started + max(float(minimum_seconds), 0)
-    while loop.time() < deadline:
-        await asyncio.sleep(min(0.5, max(deadline - loop.time(), 0)))
-        if loop.time() < minimum_ready_at:
+
+async def _close_failed_warmup_pages(
+    runtime: PersistentBrowserRuntime, url: str, existing_ids: set[str],
+) -> None:
+    target = validated_http_url(url)
+    pages = await standalone_browser_pages(runtime)
+    for page in pages:
+        target_id = str(page.get("id") or "")
+        current = urlparse(str(page.get("url") or ""))
+        if (
+            not target_id or target_id in existing_ids
+            or (current.scheme, current.hostname, current.port)
+            != (target.scheme, target.hostname, target.port)
+            or not (
+                (current.path == target.path and current.query == target.query)
+                or (current.path in {"", "/"} and not current.query)
+            )
+        ):
             continue
-        try:
-            pages = await standalone_browser_pages(runtime)
-        except Exception:
-            continue
-        for page in pages:
-            target_id = str(page.get("id") or "")
-            if (
-                target_id and target_id not in existing_ids
-                and _matching_page_has_normal_title([page], url)
-            ):
-                return target_id
-    # The regular Playwright path will reclassify a challenge that did not
-    # finish within the detached window.
-    return None
+        with suppress(Exception):
+            await asyncio.to_thread(_close_detached_target, runtime, target_id)
+
+
+def _close_detached_target(runtime: PersistentBrowserRuntime, target_id: str) -> None:
+    if not runtime.cdp_endpoint:
+        return
+    with urlopen(
+        f"{runtime.cdp_endpoint}/json/close/{quote(target_id, safe='')}", timeout=2,
+    ) as response:
+        response.read()
 
 
 class BrowserControlError(RuntimeError):
@@ -192,6 +230,7 @@ class CdpAutomationProvider:
     def __init__(self, endpoint: str = STANDALONE_CDP_ENDPOINT) -> None:
         self._endpoint = endpoint
         self._prepared_targets: dict[str, tuple[str, str]] = {}
+        self._task_target_id: str | None = None
 
     async def prepare_detached_challenge(
         self,
@@ -257,14 +296,22 @@ class CdpAutomationProvider:
             if prepared_target is not None:
                 task_page = await prepared_browser_task_page(
                     connected.context, prepared_target[0], target_id=prepared_target[1],
+                    previous_target_id=self._task_target_id,
                 )
                 if task_page is None:
                     prepared_target = None
+                else:
+                    self._task_target_id = prepared_target[1]
 
             async def create_page() -> Any:
                 nonlocal task_page
                 if task_page is None or task_page.is_closed():
-                    task_page = await persistent_browser_task_page(connected.context)
+                    task_page = await persistent_browser_task_page(
+                        connected.context, target_id=self._task_target_id,
+                    )
+                    self._task_target_id = await browser_page_target_id(
+                        connected.context, task_page,
+                    )
                 return task_page
 
             session = PersistentBrowserSession(
@@ -379,6 +426,7 @@ class BrowserControlService:
         self._starting = False
         self._error: str | None = None
         self._automation_owner: str | None = None
+        self._task_target_id: str | None = None
         self._restart_count = 0
         self._stream_log: str | None = None
 
@@ -562,7 +610,12 @@ class BrowserControlService:
                     async def create_page() -> Any:
                         nonlocal task_page
                         if task_page is None or task_page.is_closed():
-                            task_page = await persistent_browser_task_page(connected.context)
+                            task_page = await persistent_browser_task_page(
+                                connected.context, target_id=self._task_target_id,
+                            )
+                            self._task_target_id = await browser_page_target_id(
+                                connected.context, task_page,
+                            )
                         return task_page
 
                     try:

@@ -446,8 +446,38 @@ async def new_browser_task_page(browser_context: Any) -> Any:
             await cdp.detach()
 
 
-async def persistent_browser_task_page(browser_context: Any) -> Any:
+async def browser_page_target_id(browser_context: Any, page: Any) -> str:
+    cdp = await browser_context.new_cdp_session(page)
+    try:
+        info = await cdp.send("Target.getTargetInfo")
+        return str(info["targetInfo"]["targetId"])
+    finally:
+        with suppress(Exception):
+            await cdp.detach()
+
+
+async def browser_page_for_target(browser_context: Any, target_id: str) -> Any | None:
+    for page in browser_context.pages:
+        if page.is_closed():
+            continue
+        try:
+            if await browser_page_target_id(browser_context, page) == target_id:
+                return page
+        except Exception:
+            continue
+    return None
+
+
+async def persistent_browser_task_page(
+    browser_context: Any, *, target_id: str | None = None,
+) -> Any:
     """Reuse one visible Chrome window for all serialized automation tasks."""
+    if target_id is not None:
+        page = await browser_page_for_target(browser_context, target_id)
+        if page is not None:
+            with suppress(Exception):
+                await page.bring_to_front()
+            return page
     for page in reversed(list(browser_context.pages)):
         is_closed = getattr(page, "is_closed", None)
         if callable(is_closed) and is_closed():
@@ -476,6 +506,7 @@ async def persistent_browser_task_page(browser_context: Any) -> Any:
 
 async def prepared_browser_task_page(
     browser_context: Any, url: str, *, target_id: str | None = None,
+    previous_target_id: str | None = None,
 ) -> Any:
     """Adopt a detached warm-up tab as the serialized automation page."""
     target = validated_http_url(url)
@@ -496,18 +527,11 @@ async def prepared_browser_task_page(
             )
         ):
             if target_id is not None:
-                cdp = None
                 try:
-                    cdp = await browser_context.new_cdp_session(page)
-                    info = await cdp.send("Target.getTargetInfo")
-                    if info["targetInfo"]["targetId"] != target_id:
+                    if await browser_page_target_id(browser_context, page) != target_id:
                         continue
                 except Exception:
                     continue
-                finally:
-                    if cdp is not None:
-                        with suppress(Exception):
-                            await cdp.detach()
             candidate = page
             break
     if candidate is None:
@@ -515,18 +539,22 @@ async def prepared_browser_task_page(
             return None
         return await persistent_browser_task_page(browser_context)
 
-    for page in pages:
-        if page is candidate:
-            continue
-        try:
-            if await page.evaluate("() => window.name") == AUTOMATION_WINDOW_NAME:
-                await page.close()
-        except Exception:
-            continue
     await candidate.evaluate(
         "name => { window.name = name; }",
         AUTOMATION_WINDOW_NAME,
     )
+    previous = (
+        await browser_page_for_target(browser_context, previous_target_id)
+        if previous_target_id is not None else None
+    )
+    for page in pages:
+        if page is candidate:
+            continue
+        try:
+            if page is previous or await page.evaluate("() => window.name") == AUTOMATION_WINDOW_NAME:
+                await page.close()
+        except Exception:
+            continue
     with suppress(Exception):
         await candidate.bring_to_front()
     return candidate
