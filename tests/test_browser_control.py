@@ -763,6 +763,10 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
 
     monkeypatch.setattr("autosurf.browser_control.prepare_browser_for_run", prepare)
     monkeypatch.setattr("autosurf.browser_control.save_browser_after_run", save)
+    async def pages(_runtime):
+        return [{"id": "control", "url": "about:blank", "title": ""}]
+
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
     monkeypatch.setattr(
         "autosurf.automations.browser_session.new_browser_task_page", create_task_page,
     )
@@ -837,6 +841,156 @@ async def test_browser_control_stays_running_and_leases_task_pages(tmp_path, mon
     assert closed == runtimes
     assert playwright.stopped is True
     assert (await service.status())["active"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned_process", [False, True])
+async def test_native_supervisor_recovers_unreachable_chrome(tmp_path, monkeypatch, owned_process):
+    runtimes = []
+    closed = []
+    available = True
+    recovered = asyncio.Event()
+
+    async def launcher(*_args, **_kwargs):
+        runtime = PersistentBrowserRuntime(
+            context=None, profile_path=tmp_path, mode="persistent_headful", display=None,
+            browser_process=FakeProcess() if owned_process else None,
+            cdp_endpoint="http://test.invalid:9222",
+        )
+        runtimes.append(runtime)
+        if len(runtimes) == 2:
+            recovered.set()
+        return runtime
+
+    async def pages(runtime):
+        if runtime is runtimes[0] and not available:
+            raise OSError("Chrome exited")
+        return [{"id": "visible", "url": "about:blank"}]
+
+    async def closer(runtime):
+        closed.append(runtime)
+        if runtime.browser_process is not None:
+            runtime.browser_process.terminate()
+
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control.BROWSER_CHECK_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr("autosurf.browser_control.RESTART_DELAY_SECONDS", 0.005)
+    service = BrowserControlService(browser_launcher=launcher, browser_closer=closer)
+    monkeypatch.setattr(service, "_run_once", service._run_native_once)
+    try:
+        assert (await service.start())["active"] is True
+        available = False
+        assert (await service.status())["active"] is False
+        await asyncio.wait_for(recovered.wait(), timeout=1)
+        assert (await service.status())["active"] is True
+        assert service._restart_count == 1
+        assert closed == [runtimes[0]]
+    finally:
+        await service.shutdown()
+    assert closed == runtimes
+
+
+@pytest.mark.asyncio
+async def test_native_supervisor_restores_one_page_without_accumulation(tmp_path, monkeypatch):
+    visible = [{"id": "original", "url": "about:blank"}]
+    created = []
+    launched = []
+    restored = asyncio.Event()
+    temporary_failures = 0
+    reads = 0
+
+    async def launcher(*_args, **_kwargs):
+        runtime = PersistentBrowserRuntime(
+            context=None, profile_path=tmp_path, mode="persistent_headful", display=None,
+            cdp_endpoint="http://test.invalid:9222",
+        )
+        launched.append(runtime)
+        return runtime
+
+    async def pages(_runtime):
+        nonlocal temporary_failures, reads
+        reads += 1
+        if temporary_failures:
+            temporary_failures -= 1
+            raise OSError("temporary CDP delay")
+        return list(visible)
+
+    def create_page(_runtime):
+        created.append("blank")
+        visible.append({"id": "restored", "url": "about:blank"})
+
+    async def closer(_runtime):
+        pass
+
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control._create_detached_blank_page", create_page)
+    monkeypatch.setattr("autosurf.browser_control.BROWSER_CHECK_INTERVAL_SECONDS", 0.005)
+    service = BrowserControlService(browser_launcher=launcher, browser_closer=closer)
+    monkeypatch.setattr(service, "_run_once", service._run_native_once)
+    try:
+        assert (await service.start())["active"] is True
+        visible.clear()
+        temporary_failures = 2
+
+        async def wait_for_checks():
+            while not created or reads < 10:
+                await asyncio.sleep(0.005)
+            restored.set()
+
+        await asyncio.wait_for(wait_for_checks(), timeout=1)
+        assert restored.is_set()
+        assert created == ["blank"]
+        assert len(visible) == 1
+        assert len(launched) == 1
+        assert (await service.status())["active"] is True
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreachable", [False, True])
+async def test_browser_status_is_inactive_without_reachable_pages(tmp_path, monkeypatch, unreachable):
+    async def pages(_runtime):
+        if unreachable:
+            raise OSError("connection refused")
+        return []
+
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    service = BrowserControlService()
+    service._runtime = PersistentBrowserRuntime(
+        context=None, profile_path=tmp_path, mode="persistent_headful", display=None,
+        cdp_endpoint="http://test.invalid:9222",
+    )
+    assert (await service.status())["active"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_count", [1, 2])
+async def test_failed_warmup_cleanup_keeps_last_page(tmp_path, monkeypatch, page_count):
+    from autosurf.browser_control import _close_failed_warmup_pages
+
+    visible = [
+        {"id": f"failed-{index}", "url": "https://piggo.me/attendance.php"}
+        for index in range(page_count)
+    ]
+    closed = []
+
+    async def pages(_runtime):
+        return list(visible)
+
+    def close_page(_runtime, target_id):
+        closed.append(target_id)
+        visible[:] = [page for page in visible if page["id"] != target_id]
+
+    monkeypatch.setattr("autosurf.browser_control.standalone_browser_pages", pages)
+    monkeypatch.setattr("autosurf.browser_control._close_detached_target", close_page)
+    runtime = PersistentBrowserRuntime(
+        context=None, profile_path=tmp_path, mode="persistent_headful", display=None,
+        cdp_endpoint="http://test.invalid:9222",
+    )
+    await _close_failed_warmup_pages(runtime, "https://piggo.me/attendance.php", {"closed-manual"})
+    assert len(visible) == 1
+    assert len(closed) == page_count - 1
 
 
 @pytest.mark.asyncio

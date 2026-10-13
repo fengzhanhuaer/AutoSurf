@@ -45,6 +45,8 @@ AUDIO_SAMPLE_RATE = 48_000
 AUDIO_CHANNELS = 2
 AUDIO_CHUNK_BYTES = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * 2 // 10
 RESTART_DELAY_SECONDS = 3
+BROWSER_CHECK_INTERVAL_SECONDS = 2
+BROWSER_CHECK_FAILURE_LIMIT = 3
 STARTUP_TIMEOUT_SECONDS = 30
 SAFELINE_CHALLENGE_STATUS = 468
 SAFELINE_PROBE_TIMEOUT_SECONDS = 5
@@ -203,6 +205,9 @@ async def _close_failed_warmup_pages(
             )
         ):
             continue
+        current_pages = await standalone_browser_pages(runtime)
+        if len(current_pages) <= 1:
+            return
         with suppress(Exception):
             await asyncio.to_thread(_close_detached_target, runtime, target_id)
 
@@ -213,6 +218,12 @@ def _close_detached_target(runtime: PersistentBrowserRuntime, target_id: str) ->
     with urlopen(
         f"{runtime.cdp_endpoint}/json/close/{quote(target_id, safe='')}", timeout=2,
     ) as response:
+        response.read()
+
+
+def _create_detached_blank_page(runtime: PersistentBrowserRuntime) -> None:
+    request = Request(f"{runtime.cdp_endpoint}/json/new?about:blank", method="PUT")
+    with urlopen(request, timeout=2) as response:
         response.read()
 
 
@@ -527,12 +538,15 @@ class BrowserControlService:
         title = ""
         if runtime is not None:
             if runtime.cdp_endpoint:
-                with suppress(Exception):
+                try:
                     pages = await standalone_browser_pages(runtime)
+                    active = active and bool(pages)
                     if pages:
                         page = pages[0]
                         url = str(page.get("url") or "")
                         title = str(page.get("title") or "")[:300]
+                except Exception:
+                    active = False
             elif runtime.context is not None:
                 pages = [page for page in runtime.context.pages if not page.is_closed()]
                 if pages:
@@ -762,7 +776,6 @@ class BrowserControlService:
         initial_ready = self._initial_ready
         stop_event = self._stop_event
         assert initial_ready is not None and stop_event is not None
-        first_attempt = True
         while not stop_event.is_set():
             self._starting = True
             try:
@@ -776,13 +789,10 @@ class BrowserControlService:
                 initial_ready.set()
             if stop_event.is_set():
                 break
-            if not first_attempt:
-                self._restart_count += 1
-            first_attempt = False
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=RESTART_DELAY_SECONDS)
             except TimeoutError:
-                pass
+                self._restart_count += 1
 
     async def _run_once(self, stop_event: asyncio.Event) -> None:
         if os.name == "nt":
@@ -874,6 +884,7 @@ class BrowserControlService:
     async def _run_native_once(self, stop_event: asyncio.Event) -> None:
         runtime = None
         log_tasks: list[asyncio.Task[None]] = []
+        waiters: set[asyncio.Task[Any]] = set()
         try:
             context = RunContext(
                 execution_id="browser-control",
@@ -899,28 +910,53 @@ class BrowserControlService:
             self._initial_ready.set()
 
             stop_wait = asyncio.create_task(stop_event.wait())
-            if process is None:
-                await stop_wait
-                return
-            browser_wait = asyncio.create_task(process.wait())
+            monitor_wait = asyncio.create_task(self._watch_native_browser(runtime, stop_event))
+            browser_wait = asyncio.create_task(process.wait()) if process is not None else None
+            waiters = {stop_wait, monitor_wait}
+            if browser_wait is not None:
+                waiters.add(browser_wait)
             done, pending = await asyncio.wait(
-                {stop_wait, browser_wait},
+                waiters,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            if browser_wait in done and not stop_event.is_set():
+            if monitor_wait in done and not stop_event.is_set():
+                monitor_wait.result()
+            if browser_wait is not None and browser_wait in done and not stop_event.is_set():
                 raise BrowserControlError(
                     f"Google Chrome 意外退出，状态码 {browser_wait.result()}",
                 )
         finally:
             self._runtime = None
+            for task in waiters:
+                task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
             for task in log_tasks:
                 task.cancel()
             await asyncio.gather(*log_tasks, return_exceptions=True)
             if runtime is not None:
                 await self._browser_closer(runtime)
+
+    async def _watch_native_browser(
+        self, runtime: PersistentBrowserRuntime, stop_event: asyncio.Event,
+    ) -> None:
+        failures = 0
+        while not stop_event.is_set():
+            try:
+                pages = await standalone_browser_pages(runtime)
+                if not pages:
+                    await asyncio.to_thread(_create_detached_blank_page, runtime)
+                failures = 0
+            except Exception as exc:
+                failures += 1
+                if failures >= BROWSER_CHECK_FAILURE_LIMIT:
+                    raise BrowserControlError("Google Chrome 已失联，正在恢复常驻窗口") from exc
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=BROWSER_CHECK_INTERVAL_SECONDS)
+            except TimeoutError:
+                pass
 
     @asynccontextmanager
     async def _connected_runtime(
