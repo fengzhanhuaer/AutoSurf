@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NetSurf · PT站点</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="NetSurf 概览"><span class="brand-mark" aria-hidden="true">N</span><strong>NetSurf</strong></a>
+    <nav aria-label="一级导航">
+      <a class="nav-link" data-group="pt" href="#overview" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>PT站点</a>
+      <a class="nav-link" data-group="settings" href="#automation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>设置</a>
+    </nav>
+    <div class="sidebar-footer"><span>浏览器签到助手</span><span id="version"></span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><nav id="secondary-nav" aria-label="二级菜单"></nav><span id="date"></span></header>
+    <main>
+      <div class="section-heading"><div><h1 id="page-title">概览</h1><p id="page-description">已启用站点的签到状态与账号数据。</p></div><div class="heading-actions"><button id="inspect" class="button secondary">刷新数据</button><button id="run-all" class="button primary">一键签到</button></div></div>
+      <section id="view-overview" class="panel" aria-label="站点概览">
+        <div class="panel-heading"><h2>已启用站点</h2><span><span id="enabled-count">1</span> 个站点 · 今日完成 <span id="completed-count">— / 1</span></span></div>
+        <div class="records-scroll"><table class="records-table overview-table"><thead><tr><th scope="col">站点</th><th scope="col">签到状态</th><th scope="col">用户等级</th><th scope="col">魔力值</th><th scope="col">做种积分</th><th scope="col">上传量</th><th scope="col">下载量</th><th scope="col">分享率</th><th scope="col">更新时间</th><th scope="col">操作</th></tr></thead><tbody id="overview-body"></tbody></table></div>
+        <p id="overview-empty" class="empty-state" hidden>没有已启用站点，请在“站点管理”中启用。</p>
+        <details class="inspection-report"><summary>逐站检查详情</summary><div class="records-scroll"><table class="records-table"><thead><tr><th>站点</th><th>状态</th><th>检查说明</th><th>操作</th></tr></thead><tbody id="inspection-body"></tbody></table></div></details>
+        <div class="overview-actions"><span>未读取到的账号数据显示 —；首次启用站点后，请打开并登录，再刷新数据。</span></div>
+      </section>
+      <section id="view-sites" aria-label="站点管理" hidden>
+        <div class="panel">
+        <div class="panel-heading"><h2>签到设置</h2><span>所有站点共用</span></div>
+        <form id="site-form">
+          <div class="config-grid">
+            <label for="start-time">开始签到时间<input id="start-time" type="time" value="08:00" required><small>每天，使用本机当地时间</small></label>
+            <label for="retry-interval">重试间隔（秒）<input id="retry-interval" type="number" min="30" max="86400" value="300" required><small>30–86400 秒</small></label>
+            <label for="retry-count">重试次数<input id="retry-count" type="number" min="0" max="10" value="3" required><small>首次失败后最多重试 0–10 次</small></label>
+            <label for="timeout">超时时间（秒）<input id="timeout" type="number" min="5" max="120" value="30" required><small>每次检查及签到，5–120 秒</small></label>
+          </div>
+          <div class="form-actions"><button id="save-site" type="submit" class="button primary">保存签到设置</button><span id="site-settings-status" role="status" aria-live="polite"></span></div>
+        </form>
+        <div class="setting-note">以上设置用于所有已启用站点。自动签到总开关在“设置”中；安全验证或签到结果未确认时，请在网页处理。</div>
+        </div>
+        <div class="panel site-management-panel"><div class="panel-heading"><h2>PT站点</h2><span id="catalog-count"></span></div><div class="site-search"><label for="site-search">搜索站点</label><input id="site-search" type="search" placeholder="站点名称或域名"></div><div class="setting-note">每个站点的“仅刷新”默认关闭；开启后，该站点只刷新账号数据，不签到。</div><p id="site-toggle-status" class="settings-status" role="status" aria-live="polite"></p><div class="records-scroll"><table class="records-table management-table"><thead><tr><th scope="col">站点</th><th scope="col">域名</th><th scope="col">启用</th><th scope="col">仅刷新</th><th scope="col">操作</th></tr></thead><tbody id="site-list"></tbody></table></div><p id="site-list-empty" class="empty-state" hidden>没有匹配的站点</p></div>
+      </section>
+      <section id="feedback-region" class="panel feedback-panel"><div class="status-detail"><span class="status-dot" aria-hidden="true"></span><div><p id="status" role="status" aria-live="polite">读取状态…</p><small id="time">尚无新的检查结果</small></div></div></section>
+      <section id="view-automation" hidden>
+        <div class="panel settings-panel">
+          <div class="panel-heading"><h2>自动签到</h2><span id="auto-mode">读取中</span></div>
+          <div class="setting-row"><div><label for="auto">启用自动签到</label><p>按共用的签到设置执行已启用站点；今天已确认完成的站点会跳过。</p></div><input id="auto" class="switch" type="checkbox" role="switch"></div>
+          <p id="settings-status" class="settings-status" role="status" aria-live="polite"></p>
+          <div class="setting-note">Chrome 需要运行。浏览器关闭或设备休眠时，恢复后补检；遇到安全验证，请在站点页面完成。</div>
+        </div>
+        <div class="panel backup-panel">
+          <div class="panel-heading"><h2>备份与还原</h2><span>本地文件</span></div>
+          <p class="backup-description">备份 NetSurf 设置和当前 Chrome 配置中所有网站的 Cookie，包括登录及分区 Cookie。无论站点是否启用、是否支持签到，都会包含。还原会覆盖设置及备份中对应的 Cookie。</p>
+          <div class="backup-actions"><button id="backup" class="button secondary">备份</button><button id="restore" class="button secondary">还原</button><input id="restore-file" type="file" accept="application/json,.json" hidden></div>
+          <p id="backup-status" class="settings-status" role="status" aria-live="polite"></p>
+          <div class="setting-note">备份文件包含登录凭据，请妥善保存。首次备份或还原时，需要允许访问所有网站的 Cookie。</div>
+        </div>
+      </section>
+      <section id="view-about" class="panel about-panel" aria-label="关于 NetSurf" hidden><span class="brand-mark" aria-hidden="true">N</span><h2>NetSurf</h2><p>在浏览器中管理 PT 站点签到。</p><dl><div><dt>版本</dt><dd id="about-version"></dd></div><div><dt>站点清单</dt><dd id="about-sites"></dd></div><div><dt>登录方式</dt><dd>使用当前浏览器登录</dd></div></dl></section>
+      <footer class="page-footer">NetSurf · 使用当前浏览器的站点登录</footer>
+    </main>
+  </div>
+  <script src="catalog.js"></script>
+  <script src="site-rules.js"></script>
+  <script src="sites.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>
