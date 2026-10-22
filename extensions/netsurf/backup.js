@@ -25,6 +25,7 @@
   function validate(document) {
     if (!document || document.format !== "netsurf-backup" || document.version !== 1 || typeof document.settings?.autoEnabled !== "boolean" || !document.settings.sites || Object.keys(document.settings.sites).some(key => !root.NetSurfSites.get(key)) || !Array.isArray(document.cookies) || document.cookies.length > 10000) throw new Error("不是受支持的 NetSurf 备份文件");
     const settings = root.NetSurfSites.settings(document.settings);
+    if (document.settings.periodicTasks !== undefined) settings.periodicTasks = root.NetSurfPeriodic.settings(document.settings.periodicTasks);
     const cookies = document.cookies.map(value => cookie(value));
     return {settings, cookies};
   }
@@ -32,6 +33,7 @@
   function create(state, cookies) {
     const normalized = root.NetSurfSites.settings(state);
     const settings = {...normalized, sites: Object.fromEntries(Object.entries(normalized.sites).map(([siteId, configured]) => [siteId, {enabled: configured.enabled, refreshOnly: configured.refreshOnly}]))};
+    if (state.periodicTasks !== undefined) settings.periodicTasks = root.NetSurfPeriodic.settings(state.periodicTasks);
     const document = {format: "netsurf-backup", version: 1, cookieScope: "all-sites", createdAt: new Date().toISOString(), settings, cookies};
     validate(document);
     return document;

@@ -45,6 +45,9 @@ h2 { font-size: 16px; font-weight: 650; }
 .panel { background: #fff; border: 1px solid #e7ebf2; border-radius: 10px; overflow: hidden; }
 .panel-heading { padding: 22px 26px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .panel-heading > span { color: #667085; font-size: 12px; }
+#view-overview .panel-heading { flex-wrap: wrap; }
+.daily-summary { display: flex; flex-wrap: wrap; justify-content: flex-end; column-gap: 4px; }
+.daily-summary > span { white-space: nowrap; }
 .table-heading, .site-row { display: grid; grid-template-columns: minmax(150px, 1.2fr) minmax(90px, .8fr) minmax(80px, .7fr) 196px; align-items: center; gap: 20px; padding: 0 26px; }
 .table-heading { padding-top: 11px; padding-bottom: 11px; background: #fafbfe; border-block: 1px solid #edf0f5; color: #667085; font-size: 12px; }
 .site-row { padding-top: 24px; padding-bottom: 24px; }
@@ -190,3 +193,9 @@ h2 { font-size: 16px; font-weight: 650; }
 .inspection-report summary { cursor: pointer; color: #526482; }
 .inspection-report td:last-child { white-space: normal; min-width: 260px; overflow-wrap: anywhere; }
 .heading-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.periodic-table { min-width: 880px; }
+#view-periodic .panel-heading { flex-wrap: wrap; }
+.periodic-table .row-actions { display: flex; gap: 8px; }
+.periodic-table small, .periodic-setting small { display: block; margin-top: 5px; color: #667085; font-weight: 400; }
+.periodic-table .periodic-result { min-width: 240px; max-width: 420px; white-space: normal; overflow-wrap: anywhere; }
+.periodic-setting { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 24px; border-top: 1px solid #e8edf5; cursor: pointer; }

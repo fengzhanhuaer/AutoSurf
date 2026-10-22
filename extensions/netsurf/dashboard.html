@@ -11,6 +11,7 @@
     <a class="brand" href="#overview" aria-label="NetSurf 概览"><span class="brand-mark" aria-hidden="true">N</span><strong>NetSurf</strong></a>
     <nav aria-label="一级导航">
       <a class="nav-link" data-group="pt" href="#overview" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>PT站点</a>
+      <a class="nav-link" data-group="periodic" href="#periodic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>定时任务</a>
       <a class="nav-link" data-group="settings" href="#automation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>设置</a>
     </nav>
     <div class="sidebar-footer"><span>浏览器签到助手</span><span id="version"></span></div>
@@ -20,7 +21,7 @@
     <main>
       <div class="section-heading"><div><h1 id="page-title">概览</h1><p id="page-description">已启用站点的签到状态与账号数据。</p></div><div class="heading-actions"><button id="inspect" class="button secondary">刷新数据</button><button id="run-all" class="button primary">一键签到</button></div></div>
       <section id="view-overview" class="panel" aria-label="站点概览">
-        <div class="panel-heading"><h2>已启用站点</h2><span><span id="enabled-count">1</span> 个站点 · 今日完成 <span id="completed-count">— / 1</span></span></div>
+        <div class="panel-heading"><h2>已启用站点</h2><span class="daily-summary"><span><span id="enabled-count">1</span> 个站点</span><span> · 今日签到 <span id="completed-count">— / 1</span></span><span id="refresh-summary" hidden> · 仅刷新 <span id="refresh-count">— / 0</span></span></span></div>
         <div class="records-scroll"><table class="records-table overview-table"><thead><tr><th scope="col">站点</th><th scope="col">签到状态</th><th scope="col">用户等级</th><th scope="col">魔力值</th><th scope="col">做种积分</th><th scope="col">上传量</th><th scope="col">下载量</th><th scope="col">分享率</th><th scope="col">更新时间</th><th scope="col">操作</th></tr></thead><tbody id="overview-body"></tbody></table></div>
         <p id="overview-empty" class="empty-state" hidden>没有已启用站点，请在“站点管理”中启用。</p>
         <details class="inspection-report"><summary>逐站检查详情</summary><div class="records-scroll"><table class="records-table"><thead><tr><th>站点</th><th>状态</th><th>检查说明</th><th>操作</th></tr></thead><tbody id="inspection-body"></tbody></table></div></details>
@@ -58,6 +59,12 @@
           <div class="setting-note">备份文件包含登录凭据，请妥善保存。首次备份或还原时，需要允许访问所有网站的 Cookie。</div>
         </div>
       </section>
+      <section id="view-periodic" aria-label="定时任务" hidden>
+        <div class="panel"><div class="panel-heading"><h2>每日签到</h2><span id="periodic-summary">读取中</span><button id="periodic-run-all" class="button primary" type="button" disabled>一键执行</button></div><p id="periodic-feedback" class="settings-status" role="status" aria-live="polite"></p><div class="records-scroll"><table class="records-table periodic-table"><thead><tr><th>站点</th><th>状态</th><th>上次结果</th><th>下次执行</th><th>操作</th></tr></thead><tbody id="periodic-task-list"></tbody></table></div></div>
+      </section>
+      <section id="view-periodic-settings" aria-label="每日签到设置" hidden>
+        <div class="panel"><div class="panel-heading"><h2>每日签到设置</h2></div><div class="setting-note">开启后每天 08:00（本机时间）自动签到，当天已完成会跳过。使用当前 Chrome 登录，浏览器需保持运行。</div><p id="periodic-settings-feedback" class="settings-status" role="status" aria-live="polite"></p><div id="periodic-settings-list"></div></div>
+      </section>
       <section id="view-about" class="panel about-panel" aria-label="关于 NetSurf" hidden><span class="brand-mark" aria-hidden="true">N</span><h2>NetSurf</h2><p>在浏览器中管理 PT 站点签到。</p><dl><div><dt>版本</dt><dd id="about-version"></dd></div><div><dt>站点清单</dt><dd id="about-sites"></dd></div><div><dt>登录方式</dt><dd>使用当前浏览器登录</dd></div></dl></section>
       <footer class="page-footer">NetSurf · 使用当前浏览器的站点登录</footer>
     </main>
@@ -66,5 +73,7 @@
   <script src="site-rules.js"></script>
   <script src="sites.js"></script>
   <script src="dashboard.js"></script>
+  <script src="periodic.js"></script>
+  <script src="periodic-dashboard.js"></script>
 </body>
 </html>

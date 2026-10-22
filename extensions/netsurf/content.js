@@ -1,6 +1,6 @@
 (() => {
   const version = chrome.runtime.getManifest().version;
-  const contentRevision = "2026-10-15-audiences-profile-v7";
+  const contentRevision = "2026-10-21-attendance-record-v66";
   const suppressAuto = globalThis.NetSurfReadOnlyInjection === true;
   delete globalThis.NetSurfReadOnlyInjection;
   if (globalThis.NetSurfContentStarted === contentRevision) return;
@@ -61,17 +61,26 @@
     }
   }
 
-  async function freshSnapshot(timeoutMs = 7000, dataOnly = false, reuseCurrentPage = false) {
+  async function freshSnapshot(timeoutMs = 7000, dataOnly = false, reuseCurrentPage = false, skipDetails = false) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+    let phase = "首页";
+    let requestPath = site?.homePath || "/index.php";
     try {
       if (piggo.profileApi) {
+        phase = "账号接口";
+        requestPath = "";
         const snapshot = await globalThis.NetSurfProfileApi.read(piggo.origin, piggo.profileApi, controller.signal);
         const status = dataOnly && snapshot.profile && ["profile_only", "ready", "already_done", "unknown"].includes(snapshot.status) ? "refreshed" : snapshot.status;
         return {...piggo.result(status, location.href), ...snapshot, status};
       }
       const navigationStatus = Number(globalThis.performance?.getEntriesByType?.("navigation")?.[0]?.responseStatus);
-      const reuseLoadedPage = reuseCurrentPage && piggo.isPiggo(location.href) && navigationStatus >= 200 && navigationStatus < 400;
+      const currentUrl = new URL(location.href);
+      const onHomepage = currentUrl.pathname === new URL(site?.homePath || "/index.php", piggo.origin).pathname || !currentUrl.search && !currentUrl.hash && piggo.homePaths.includes(currentUrl.pathname);
+      const loadedRecently = piggo.reuseRecentPage && onHomepage && Date.now() - Number(globalThis.performance?.timeOrigin || 0) <= 5 * 60 * 1000;
+      const navigationSucceeded = !Number.isFinite(navigationStatus) || navigationStatus === 0 || navigationStatus >= 200 && navigationStatus < 400;
+      const reuseLoadedPage = !globalThis.NetSurfRules?.get(location.origin)?.modalAttendance && (reuseCurrentPage || loadedRecently) && piggo.isPiggo(location.href) && navigationSucceeded && Object.values(piggo.profile(document)).some(Boolean);
       const response = reuseLoadedPage
         ? {url: location.href, status: 200, ok: true}
         : await readPage(`${piggo.origin}${site?.homePath || "/index.php"}`, controller.signal);
@@ -80,9 +89,10 @@
         ? document.cloneNode(true)
         : new DOMParser().parseFromString(await response.text(), "text/html");
       snapshot.querySelectorAll("script, style").forEach(element => element.remove());
-      const {status} = piggo.inspect(snapshot, response.url);
+      const inspection = piggo.inspect(snapshot, response.url);
+      const {status} = inspection;
       const diagnostic = diagnose(snapshot, response, status);
-      if (!["unknown", "ready", "already_done", "success", "profile_only"].includes(status) && !(dataOnly && status === "manual_required")) return {...piggo.result(status, response.url), diagnostic};
+      if (!["unknown", "ready", "already_done", "success", "profile_only"].includes(status) && !(dataOnly && status === "manual_required")) return {...piggo.result(status, response.url), ...(inspection.message ? {message: inspection.message} : {}), diagnostic};
       if (response.status === 468 || response.status === 403) return {...piggo.result("blocked", response.url), diagnostic};
       if (response.status === 401) return {...piggo.result("login_required", response.url), diagnostic};
       if (!response.ok) return {...piggo.result("error", response.url), diagnostic, message: `首页返回 HTTP ${response.status}`};
@@ -109,7 +119,7 @@
       const profile = piggo.profile(snapshot);
       let classUrl = piggo.classLink(snapshot);
       const accountUrl = piggo.accountLink(snapshot);
-      if (accountUrl && Object.values(profile).some(value => !value)) {
+      if (!skipDetails && accountUrl && Object.values(profile).some(value => !value)) {
         try {
           const accountPage = await optionalPage(accountUrl, "账号资料");
           if (accountPage?.response) Object.assign(diagnostic.auxiliary.at(-1), {sameUrl: accountPage.response.url === accountUrl, finalPath: new URL(accountPage.response.url).pathname});
@@ -126,7 +136,7 @@
           }
         } catch {}
       }
-      if (!profile.level && classUrl) {
+      if (!skipDetails && !profile.level && classUrl) {
         try {
           const target = new URL(classUrl);
           target.hash = "";
@@ -142,7 +152,10 @@
         const refreshed = Object.values(profile).some(Boolean);
         return {...piggo.result(refreshed ? "refreshed" : "unknown", response.url), profile, diagnostic, ...(!refreshed ? {message: "页面可访问，但未读取到当前账号数据"} : {})};
       }
-      if (piggo.statusPath) {
+      const protectAttendance = globalThis.NetSurfRules?.get(location.origin)?.protectAttendanceForm && skipDetails && (await chrome.storage.local.get(`operation:${site.id}`))[`operation:${site.id}`]?.awaitingConfirmation === true;
+      if (piggo.statusPath && !protectAttendance) {
+        phase = "签到状态";
+        requestPath = piggo.statusPath;
         const statusUrl = `${piggo.origin}${piggo.statusPath}`;
         const statusResponse = await readPage(statusUrl, controller.signal);
         if (!piggo.isPiggo(statusResponse.url)) return {...piggo.result("error", location.href), profile};
@@ -156,24 +169,26 @@
       }
       return {...piggo.result(status, response.url), profile, diagnostic};
     } catch (error) {
-      return {...piggo.result("error", location.href), message: error.name === "AbortError" ? "账号数据请求超时" : "账号数据请求失败，请检查站点网络或访问权限"};
+      return {...piggo.result("error", location.href), message: error.name === "AbortError" ? `${phase}请求超时` : `${phase}请求失败，请检查站点网络或访问权限`, diagnostic: {phase, path: requestPath.split(/[?#]/)[0], elapsedMs: Date.now() - startedAt, error: error.name === "AbortError" ? "timeout" : "request_failed"}};
     } finally {
       clearTimeout(timeout);
     }
   }
 
   async function publish() {
-    const {status} = piggo.inspect(document, location.href);
-    const key = `${location.pathname}:${status}`;
+    const inspection = piggo.inspect(document, location.href);
+    const {status} = inspection;
+    const key = `${location.pathname}:${status}:${inspection.challengePending === true}`;
     if (key === latestKey) return;
     latestKey = key;
-    await chrome.runtime.sendMessage({type: "observed", result: piggo.result(status, location.href)});
+    await chrome.runtime.sendMessage({type: "observed", result: {...piggo.result(status, location.href), ...(inspection.challengePending ? {challengePending: true} : {}), ...(inspection.message ? {message: inspection.message} : {})}});
   }
 
-  async function signin(timeoutMs) {
+  async function signin(timeoutMs, continuation = false, operationId) {
+    if (continuation && (!piggo.continueAttendanceForm || new URL(location.href).pathname !== site.signinPath)) return piggo.result("unknown", location.href);
     if (submitted) return piggo.result("pending", location.href);
     submitted = true;
-    const fresh = await freshSnapshot(timeoutMs);
+    const fresh = continuation ? piggo.result(piggo.inspect(document, location.href).status, location.href) : await freshSnapshot(timeoutMs, false, false, true);
     if (fresh.status !== "ready") {
       submitted = false;
       return fresh;
@@ -181,6 +196,18 @@
     if (await refreshOnly()) {
       submitted = false;
       return fresh;
+    }
+    const imageAdapter = {hdsky: globalThis.NetSurfHdsky, opencd: globalThis.NetSurfOpenCd, ptsbao: globalThis.NetSurfPtsbao}[globalThis.NetSurfRules?.get(location.origin)?.imageCaptcha];
+    if (imageAdapter) {
+      const {attempted, ...result} = await imageAdapter.signin(document, location.href, piggo.visible, operationId, timeoutMs, message => chrome.runtime.sendMessage(message));
+      submitted = attempted;
+      return {...piggo.result(result.status, location.href), ...result};
+    }
+    const sliderAdapter = {freefarm: globalThis.NetSurfFreeFarm, pt52: globalThis.NetSurfPt52}[globalThis.NetSurfRules?.get(location.origin)?.sliderCaptcha];
+    if (sliderAdapter && new URL(location.href).pathname === site.signinPath) {
+      const {attempted, ...result} = await sliderAdapter.signin(document, location.href, piggo.visible, operationId, timeoutMs, message => chrome.runtime.sendMessage(message));
+      submitted = attempted;
+      return {...piggo.result(result.status, location.href), ...result};
     }
     if (["rousi", "sunny"].includes(piggo.profileApi)) {
       const controller = new AbortController();
@@ -191,14 +218,21 @@
         return {...piggo.result(result.status, location.href), ...result};
       } finally { clearTimeout(timeout); }
     }
-    let control = piggo.action(document, location.href);
+    let control = piggo.action(document, location.href, true);
+    if (!control && piggo.revealAttendanceSelector) {
+      const reveal = document.querySelector(piggo.revealAttendanceSelector);
+      if (reveal && piggo.visible(reveal)) {
+        reveal.click();
+        control = piggo.action(document, location.href, true);
+      }
+    }
     if (!control) {
       const links = Array.from(document.querySelectorAll('a[href]'))
         .filter(piggo.visible)
         .filter(element => piggo.safeAttendanceLink(element.getAttribute("href"), location.href));
       control = links.length === 1 ? links[0] : links.length > 1 ? "ambiguous" : null;
     }
-    if (!control || control === "ambiguous") {
+    if (!control || control === "ambiguous" || continuation && control.tagName === "A") {
       submitted = false;
       return piggo.result(control === "ambiguous" ? "ambiguous" : "unknown", location.href);
     }
@@ -209,6 +243,23 @@
       await chrome.runtime.sendMessage({type: "observed", result: fresh});
       return fresh;
     }
+    if (piggo.nativeAttendanceNavigation && control.tagName === "A") {
+      const target = new URL(control.getAttribute("href"), location.href);
+      const entryAlias = globalThis.NetSurfRules?.get(location.origin)?.attendanceEntryAliases?.includes(target.pathname);
+      const permit = await chrome.runtime.sendMessage({type: "navigate-attendance", operationId, url: entryAlias ? new URL(site.signinPath, location.origin).href : target.href});
+      return permit?.accepted ? pending : {...piggo.result("error", location.href), message: "签到导航许可已失效，未再次跳转"};
+    }
+    if (piggo.continueAttendanceForm || globalThis.NetSurfRules?.get(location.origin)?.modalAttendance) {
+      const permit = await chrome.runtime.sendMessage({type: "submission-stage", operationId, stage: control.tagName === "A" ? "entry" : "submitted"});
+      if (!permit?.accepted) {
+        submitted = false;
+        return {...piggo.result("error", location.href), message: "签到提交许可已失效，未再次点击"};
+      }
+      if (globalThis.NetSurfRules?.get(location.origin)?.modalAttendance && (await refreshOnly() || piggo.action(document, location.href, true) !== control)) {
+        submitted = false;
+        return {...piggo.result("error", location.href), message: "签到控件或设置已变化，未再次点击"};
+      }
+    }
     control.click();
     return pending;
   }
@@ -217,12 +268,13 @@
     if (sender.id !== chrome.runtime.id) return;
     if (message.type === "netsurf-inspect") {
       if (message.fresh) {
-        refreshOnly().then(readOnly => freshSnapshot(message.timeoutMs, message.dataOnly === true || readOnly, message.reuseCurrentPage === true)).then(result => respond({...result, contentVersion: version, contentRevision})).catch(() => respond(piggo.result("error", location.href)));
+        refreshOnly().then(readOnly => freshSnapshot(message.timeoutMs, message.dataOnly === true || readOnly, message.reuseCurrentPage === true, message.skipDetails === true && !readOnly)).then(result => respond({...result, contentVersion: version, contentRevision})).catch(() => respond(piggo.result("error", location.href)));
         return true;
       }
-      respond({...piggo.result(piggo.inspect(document, location.href).status, location.href), contentVersion: version, contentRevision, pageReady: document.readyState !== "loading"});
+      const inspection = piggo.inspect(document, location.href);
+      respond({...piggo.result(inspection.status, location.href), ...(inspection.challengePending ? {challengePending: true} : {}), ...(inspection.message ? {message: inspection.message} : {}), contentVersion: version, contentRevision, pageReady: document.readyState !== "loading", hasProfile: Object.values(piggo.profile(document)).some(Boolean)});
     } else if (message.type === "netsurf-signin") {
-      signin(message.timeoutMs).then(respond).catch(() => respond(piggo.result("error", location.href)));
+      signin(message.timeoutMs, message.continuation === true, message.operationId).then(respond).catch(() => respond(piggo.result("error", location.href)));
       return true;
     }
   }

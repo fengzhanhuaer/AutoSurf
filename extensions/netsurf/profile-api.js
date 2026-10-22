@@ -13,7 +13,8 @@
     const uploaded = count.uploaded ?? count.upload;
     const downloaded = count.downloaded ?? count.download;
     const ratio = count.ratio ?? (Number(downloaded) > 0 ? (Number(uploaded) / Number(downloaded)).toFixed(3) : Number(uploaded) > 0 && Number(downloaded) === 0 ? "∞" : null);
-    return {level: rank.name || rank.title || rank.level || data.roleName || null, bonus: String(count.bonus ?? count.seedBonus ?? "") || null, seedingPoints: count.seedingPoints === undefined ? null : String(count.seedingPoints), uploaded: size(uploaded), downloaded: size(downloaded), ratio: ratio === null ? null : String(ratio)};
+    const seedingPoints = count.seedingPoints ?? (kind === "zhuque" ? count.seedBonus : undefined);
+    return {level: rank.name || rank.title || rank.level || data.roleName || null, bonus: String(count.bonus ?? count.seedBonus ?? "") || null, seedingPoints: seedingPoints === undefined ? null : String(seedingPoints), uploaded: size(uploaded), downloaded: size(downloaded), ratio: ratio === null ? null : String(ratio)};
   }
 
   async function read(origin, kind, signal, environment = root) {
@@ -21,6 +22,19 @@
     const hosts = {mteam: ["kp.m-team.cc"], zhuque: ["zhuque.in"], rousi: ["rousi.pro", "rousi.zip"], sunny: ["sunnypt.top"]};
     if (new URL(origin).protocol !== "https:" || new URL(origin).port || !hosts[kind]?.includes(host)) throw new Error("资料接口不属于当前站点");
     if (["rousi", "sunny"].includes(kind)) return modernRead(origin, kind, signal, environment);
+    if (kind === "mteam" && environment.document?.documentElement) {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline && !signal?.aborted) {
+        try {
+          const observed = JSON.parse(environment.document.documentElement.getAttribute("data-netsurf-mteam-profile"));
+          if (observed?.data?.id && observed.time <= Date.now() && Date.now() - observed.time < 60000) return {status: "profile_only", profile: profile(kind, observed.data), diagnostic: {path: "/api/member/profile", httpStatus: 200, accountFound: true, source: "page-client", entries: []}};
+        } catch {}
+        if (/\/login\/?$/.test(environment.location?.pathname || "")) return {status: "login_required", message: "M-Team 网页已跳转登录页，请在网页完成登录"};
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      return {status: "error", message: "M-Team 网页尚未返回账号资料，未判定登录失效，请稍后刷新"};
+    }
     const auth = kind === "mteam" ? environment.localStorage.getItem("auth") : null;
     if (kind === "mteam" && !auth) return {status: "login_required", message: "M-Team 当前浏览器没有有效登录状态"};
     const endpoints = kind === "mteam" ? ["https://api.m-team.cc/api/member/profile", "https://api.m-team.io/api/member/profile", "https://api2.m-team.cc/api/member/profile"] : [`${origin}/api/user/getInfo`];
@@ -28,6 +42,10 @@
     for (const endpoint of endpoints) {
       try {
         const options = {credentials: "include", cache: "no-store", redirect: "error", signal};
+        if (kind === "zhuque") {
+          const csrf = environment.document?.querySelector?.('meta[name="x-csrf-token"]')?.content?.trim();
+          if (csrf) options.headers = {"x-csrf-token": csrf};
+        }
         if (kind === "mteam") {
           const timestamp = Date.now();
           const encoder = new environment.TextEncoder();
@@ -45,6 +63,7 @@
         lastStatus = response.status;
         const diagnostic = {path: new URL(endpoint).pathname, httpStatus: response.status, accountFound: false, entries: []};
         if (response.status === 468) return {status: "blocked", diagnostic};
+        if (response.status === 403 && kind === "mteam") return {status: "blocked", message: "M-Team 资料接口拒绝访问，当前网页登录状态可能仍有效", diagnostic};
         if ([401, 403].includes(response.status)) return {status: "login_required", diagnostic};
         if (!response.ok) {
           if (kind === "zhuque" && response.status === 400 && environment.document) {
@@ -60,14 +79,16 @@
           return {status: "error", message: `资料接口返回 HTTP ${response.status}`, diagnostic};
         }
         const payload = await response.json();
-        if (kind === "mteam" && Number(payload.code) !== 0) return {status: Number(payload.code) === 1 || [401, 403].includes(Number(payload.code)) ? "login_required" : "error", message: `M-Team 资料接口返回状态 ${Number(payload.code)}`, diagnostic};
+        if (kind === "mteam" && Number(payload.code) !== 0) return {status: [1, 401].includes(Number(payload.code)) ? "login_required" : Number(payload.code) === 403 ? "blocked" : "error", message: `M-Team 资料接口返回状态 ${Number(payload.code)}`, diagnostic};
         const data = payload.data;
         if (!data?.id) return {status: "unknown", message: "资料接口未返回当前账号信息", diagnostic};
         if (kind === "mteam") {
           const updatedAuth = response.headers.get("authorization");
           const updatedDevice = response.headers.get("did");
-          if (updatedAuth) environment.localStorage.setItem("auth", updatedAuth);
-          if (updatedDevice) environment.localStorage.setItem("did", updatedDevice);
+          if (environment.localStorage.getItem("auth") === auth) {
+            if (updatedAuth) environment.localStorage.setItem("auth", updatedAuth);
+            if (updatedDevice) environment.localStorage.setItem("did", updatedDevice);
+          }
         }
         return {status: "profile_only", profile: profile(kind, data), diagnostic: {...diagnostic, accountFound: true}};
       } catch (error) {

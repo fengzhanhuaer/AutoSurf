@@ -16,7 +16,7 @@ function harness(origin = "https://zhuque.in") {
   }
   const originalFetch = (...args) => {
     requests.push(args);
-    return Promise.resolve(new Response(JSON.stringify({data: {id: 42, username: "private-name", authToken: "private-token", class: {name: "Power User"}, upload: 1024, download: 512, bonus: 42}})));
+    return Promise.resolve(new Response(JSON.stringify({data: {id: 42, username: "private-name", authToken: "private-token", class: {name: "Power User"}, upload: 1024, download: 512, bonus: 42, seedBonus: 84}})));
   };
   const context = vm.createContext({URL, Date, location: {origin, href: origin + "/user/info"}, fetch: originalFetch, XMLHttpRequest: FixtureRequest, document: {documentElement: {setAttribute: (key, value) => attributes.set(key, value), removeAttribute: key => attributes.delete(key)}}});
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../zhuque-observer.js"), "utf8"), context);
@@ -34,6 +34,7 @@ test("the page fetch keeps its original request and shares only account statisti
   assert.ok(serialized);
   assert.equal(/private|username|authToken/.test(serialized), false);
   assert.equal(JSON.parse(serialized).data.class.name, "Power User");
+  assert.equal(JSON.parse(serialized).data.seedBonus, "84");
 });
 
 test("XHR observations are scoped to the own GET endpoint and discard expired sessions", () => {

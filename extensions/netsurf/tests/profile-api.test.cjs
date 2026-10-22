@@ -5,7 +5,7 @@ const api = require("../profile-api.js");
 
 function environment(fetch, initial = {}) {
   const values = new Map(Object.entries(initial));
-  return {fetch, crypto: webcrypto, TextEncoder, FormData, btoa, localStorage: {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)}};
+  return {fetch, crypto: webcrypto, TextEncoder, FormData, btoa, document: initial.document, localStorage: {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)}};
 }
 
 test("Zhuque reads the current account API rather than a blank SPA shell", async () => {
@@ -13,10 +13,13 @@ test("Zhuque reads the current account API rather than a blank SPA shell", async
     assert.equal(url, "https://zhuque.in/api/user/getInfo");
     assert.equal(options.credentials, "include");
     assert.equal(options.method, undefined);
-    return new Response(JSON.stringify({data: {id: 42, class: {name: "Power User"}, upload: 1073741824, download: 536870912, bonus: 123.4}}));
-  }));
+    assert.equal(options.headers["x-csrf-token"], "fixture-csrf");
+    return new Response(JSON.stringify({data: {id: 42, class: {name: "Power User"}, upload: 1073741824, download: 536870912, bonus: 123.4, seedBonus: 567.8}}));
+  }, {document: {querySelector: selector => selector === 'meta[name="x-csrf-token"]' ? {content: " fixture-csrf "} : null}}));
   assert.equal(result.status, "profile_only");
   assert.equal(result.profile.level, "Power User");
+  assert.equal(result.profile.bonus, "123.4");
+  assert.equal(result.profile.seedingPoints, "567.8");
   assert.equal(result.profile.uploaded, "1.00 GiB");
   assert.equal(result.profile.ratio, "2.000");
   assert.equal(result.diagnostic.accountFound, true);

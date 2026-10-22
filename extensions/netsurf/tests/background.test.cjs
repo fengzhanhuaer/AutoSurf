@@ -370,6 +370,31 @@ test("submission is confirmed before closing the page and moving to the next sit
   assert.equal(runtime.alarms.has("netsurf-verify"), false);
 });
 
+test("an unknown attendance response rechecks the homepage before giving up", async () => {
+  let checksAfterSubmit = 0;
+  const runtime = harness({
+    tabs: [tab],
+    inspect: (tabId, message, actions) => {
+      if (!actions.some(action => action[0] === "signin" && action[1] === tabId)) return "ready";
+      checksAfterSubmit += 1;
+      return checksAfterSubmit === 1 ? "unknown" : "already_done";
+    }
+  });
+  const result = await runtime.send({type: "run"});
+  assert.equal(result.status, "already_done");
+  assert.ok(runtime.state.verifiedDay);
+  assert.equal(runtime.actions.filter(action => action[0] === "signin").length, 1);
+});
+
+test("an unknown refresh cannot downgrade today's confirmed completion", async () => {
+  const day = new Date().toLocaleDateString("en-CA");
+  const runtime = harness({tabs: [tab], inspect: "unknown", initial: {verifiedDay: day, lastResult: {status: "unknown", verified: true, time: new Date().toISOString()}}});
+  const result = await runtime.send({type: "inspect"});
+  assert.equal(result.status, "already_done");
+  assert.equal(runtime.state.verifiedDay, day);
+  assert.match(result.message, /已保留确认状态/);
+});
+
 test("unconfirmed task submission times out, closes and never automatically resubmits", async () => {
   const runtime = harness({initial: automaticSettings});
   await runtime.alarm("netsurf-daily");
@@ -395,6 +420,20 @@ test("read-only refresh can start while a slow task page is still loading", asyn
   const runtime = harness({tabs: [{id: 100, windowId: 5, active: false, url: "https://piggo.me/"}], inspect: () => ({status: "ready", path: "/index.php", pageReady: false})});
   await runtime.evaluate("waitForPage({id:100,url:'https://piggo.me/'},Date.now()+500,'piggo',false)");
   assert.equal(runtime.actions.filter(action => action[0] === "inspect").length, 2);
+});
+
+test("HDCity retries a failed background navigation inside the same timeout budget", async () => {
+  const runtime = harness({tabs: [{id: 100, windowId: 5, active: false, url: "about:blank"}], inspect: (tabId, message, actions) => actions.filter(action => action[0] === "update").length > 1 ? {status: "already_done", path: "/index.php", pageReady: true} : new Error("Page not loaded")});
+  const loaded = await runtime.evaluate("navigateTaskPage({id:100,url:'about:blank'},Date.now()+600,'hdcity.city',false)");
+  assert.equal(loaded.url, "https://hdcity.city/index.php");
+  assert.equal(runtime.actions.filter(action => action[0] === "update").length, 2);
+});
+
+test("a failed data refresh cannot downgrade an already completed page", async () => {
+  const runtime = harness({tabs: [{...tab}], inspect: (tabId, message, actions) => actions.filter(action => action[0] === "inspect").length >= 3 ? "error" : "already_done"});
+  const result = await runtime.evaluate("freshPage({id:12,url:'https://piggo.me/'},1)");
+  assert.equal(result.status, "already_done");
+  assert.match(result.message, /保留旧数据/);
 });
 
 test("worker recovery cleans only a session-owned task tab and cancels its stale verification", async () => {

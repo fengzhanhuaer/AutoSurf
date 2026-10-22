@@ -393,7 +393,7 @@
     "signinPath": "/",
     "profilePath": null,
     "mode": "profile",
-    "homePath": "/index.php"
+    "homePath": "/"
   },
   {
     "id": "nanyangpt.com",
@@ -407,7 +407,7 @@
     "signinPath": "/",
     "profilePath": null,
     "mode": "profile",
-    "homePath": "/index.php"
+    "homePath": "/"
   },
   {
     "id": "open.cd",

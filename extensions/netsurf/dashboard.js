@@ -14,6 +14,8 @@ let activeOperation = null;
 const routes = {
   overview: {group: "pt", label: "概览", description: "已启用站点的签到状态与账号数据。"},
   sites: {group: "pt", label: "站点管理", description: "设置共用签到计划，管理全部 PT 站点。"},
+  periodic: {group: "periodic", label: "概览", description: "NodeSeek 与 InvitesFun 每日签到状态。"},
+  "periodic-settings": {group: "periodic", label: "设置", description: "管理每日签到任务的启用状态。"},
   automation: {group: "settings", label: "常规", description: "管理自动签到和所有网站 Cookie 的备份。"},
   about: {group: "settings", label: "关于", description: "浏览器中的 PT 站点签到助手。"}
 };
@@ -59,17 +61,30 @@ function checkedToday(result) {
 
 function completed(result) { return checkedToday(result) && ["success", "already_done"].includes(result.status); }
 
+function refreshOnly(site) { return state.sites[site.id].refreshOnly || site.mode === "profile"; }
+
+function refreshed(result) {
+  return ["refreshed", "ready", "profile_only", "success", "already_done"].includes(result?.status) && Object.values(sites.profile(result?.profile)).some(Boolean);
+}
+
+function dailyCount(selected, matches) {
+  return (selected.length === 0 || selected.some(site => checkedToday(results[site.id])) ? String(selected.filter(site => checkedToday(results[site.id]) && matches(results[site.id])).length) : "—") + " / " + selected.length;
+}
+
 function renderOverview() {
   const enabled = enabledSites();
   element("overview-body").replaceChildren();
   element("overview-empty").hidden = enabled.length > 0;
   element("enabled-count").textContent = String(enabled.length);
-  const known = enabled.some(site => checkedToday(results[site.id]));
-  element("completed-count").textContent = enabled.length === 0 ? "0 / 0" : (known ? String(enabled.filter(site => completed(results[site.id])).length) : "—") + " / " + enabled.length;
-  const labels = {ready: "待签到", success: "已完成", already_done: "已完成", profile_only: "无需签到", blocked: "需验证", debugging: "需验证", login_required: "需登录", manual_required: "需处理", pending: "待确认", no_tab: "未打开", disabled: "已停用", error: "检查失败", unknown: "未识别", ambiguous: "需处理"};
+  const signInSites = enabled.filter(site => !refreshOnly(site));
+  const refreshSites = enabled.filter(refreshOnly);
+  element("completed-count").textContent = dailyCount(signInSites, completed);
+  element("refresh-count").textContent = dailyCount(refreshSites, refreshed);
+  element("refresh-summary").hidden = refreshSites.length === 0;
+  const labels = {ready: "待签到", success: "已完成", already_done: "已完成", profile_only: "无需签到", blocked: "需验证", debugging: "需验证", login_required: "需登录", manual_required: "需处理", pending: "核验中", no_tab: "未打开", disabled: "已停用", error: "检查失败", unknown: "未识别", ambiguous: "需处理"};
   for (const site of enabled) {
     const result = results[site.id];
-    const refreshed = result?.status === "refreshed" || state.sites[site.id].refreshOnly && ["ready", "profile_only"].includes(result?.status);
+    const refreshResult = result?.status === "refreshed" || refreshOnly(site) && refreshed(result);
     const working = busy && activeSiteId === site.id;
     const suffix = site.id === "piggo" ? "" : "-" + site.id;
     const row = node("tr", undefined, site.id === "piggo" ? "piggo-row" : "row-" + site.id);
@@ -77,10 +92,10 @@ function renderOverview() {
     const name = node("td");
     name.append(node("strong", site.name), node("small", new URL(site.origin).hostname));
     row.append(name);
-    const badge = node("span", working ? activeOperation === "run" || activeOperation === "run-all" ? "签到中" : "刷新中" : refreshed ? checkedToday(result) ? "已刷新" : "待刷新" : completed(result) ? "已完成" : ["success", "already_done"].includes(result?.status) ? "待核验" : labels[result?.status] || "待检查", "site-status" + suffix);
+    const badge = node("span", working ? activeOperation === "run" || activeOperation === "run-all" ? "签到中" : "刷新中" : refreshResult ? checkedToday(result) && refreshed(result) ? "已刷新" : "待刷新" : completed(result) ? "已完成" : ["success", "already_done"].includes(result?.status) ? "待核验" : result?.confirmationFailed ? "签到失败" : labels[result?.status] || "待检查", "site-status" + suffix);
     badge.setAttribute("title", working ? "正在后台访问站点，弱网环境可能需要更长时间" : result?.message || "尚未检查");
     badge.className = "status-badge";
-    badge.dataset.tone = completed(result) || refreshed && checkedToday(result) ? "success" : ["error", "blocked", "debugging", "login_required", "manual_required"].includes(result?.status) ? "warning" : "neutral";
+    badge.dataset.tone = (refreshResult ? refreshed(result) && checkedToday(result) : completed(result)) ? "success" : ["error", "blocked", "debugging", "login_required", "manual_required"].includes(result?.status) ? "warning" : "neutral";
     const status = node("td");
     status.append(badge);
     row.append(status);
@@ -91,8 +106,7 @@ function renderOverview() {
     const actions = node("td");
     const group = node("div");
     group.className = "site-actions";
-    const refreshOnly = state.sites[site.id].refreshOnly || site.mode === "profile";
-    for (const [type, text] of [["open", "打开"], ...(!refreshOnly ? [["refresh", "刷新"]] : []), ["run", refreshOnly ? "刷新" : "签到"]]) {
+    for (const [type, text] of [["open", "打开"], ...(!refreshOnly(site) ? [["refresh", "刷新"]] : []), ["run", refreshOnly(site) ? "刷新" : "签到"]]) {
       const button = node("button", text, type + suffix);
       button.className = "button " + (type === "run" ? "primary" : "secondary");
       button.disabled = busy || settingsBusy;
@@ -212,8 +226,8 @@ function setSettingsBusy(value) {
 }
 
 function updateControls() {
-  for (const button of document.querySelectorAll("button")) button.disabled = busy || settingsBusy;
-  for (const toggle of document.querySelectorAll("input[type=checkbox]")) toggle.disabled = toggle.dataset.fixed === "true" || settingsBusy || settingsLocked;
+  for (const button of document.querySelectorAll("button")) if (!button.closest?.("#view-periodic, #view-periodic-settings")) button.disabled = busy || settingsBusy;
+  for (const toggle of document.querySelectorAll("input[type=checkbox]")) if (!toggle.closest?.("#view-periodic, #view-periodic-settings")) toggle.disabled = toggle.dataset.fixed === "true" || settingsBusy || settingsLocked;
   element("auto").disabled = settingsBusy || settingsLocked;
   element("save-site").disabled = settingsBusy || settingsLocked;
 }

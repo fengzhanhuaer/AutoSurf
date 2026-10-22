@@ -80,8 +80,21 @@ test("HDCity recognizes its exact English entry with a Material icon prefix", ()
   const adapter = piggo.create("https://hdcity.city", "/sign");
   const snapshot = documentFixture("", [element("assignment_turned_inCheck in", {href: "/sign"})]);
   assert.equal(adapter.inspect(snapshot, "https://hdcity.city/index.php").status, "ready");
+  snapshot.querySelectorAll = selector => selector === 'a[href]' ? [element("assignment_turned_inChecked in", {href: "/sign"})] : [];
+  assert.equal(adapter.inspect(snapshot, "https://hdcity.city/index.php").status, "already_done");
   assert.equal(adapter.safeAttendanceLink("/sign?purchase=1", "https://hdcity.city/"), false);
   assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+});
+
+test("HDCity reads account data from its current Material homepage", () => {
+  const adapter = piggo.create("https://hdcity.city", "/sign");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "用户等级: Power User 魔力值: 123.4 上传量: 2.00 TiB 下载量: 1.00 TiB 分享率: 2.000"})};
+  const account = element("fixture", {href: "/userdetails.php?id=42"});
+  const document = {querySelectorAll: selector => selector.endsWith(", body") ? [block] : selector === "body a[href]" ? [account] : []};
+  assert.deepEqual(adapter.profile(document), {level: "Power User", bonus: "123.4", seedingPoints: null, uploaded: "2.00 TiB", downloaded: "1.00 TiB", ratio: "2.000"});
+  assert.equal(adapter.accountLink(document), "https://hdcity.city/userdetails.php?id=42");
+  assert.equal(adapter.reuseRecentPage, true);
+  assert.equal(adapter.navigationRetries, 1);
 });
 
 test("site currency labels are restricted to their own sites", () => {
@@ -89,6 +102,116 @@ test("site currency labels are restricted to their own sites", () => {
     const snapshot = documentFixture("", [element(label)]);
     assert.equal(piggo.create(origin).inspect(snapshot, origin + "/index.php").status, "ready");
     assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  }
+});
+
+test("ZhiMengPT recognizes its electricity sign-in and maps electricity to magic", () => {
+  const adapter = piggo.create("https://zmpt.cc");
+  const entry = element("[签到得电力]", {href: "/attendance.php"});
+  const snapshot = documentFixture("", [entry]);
+  assert.equal(adapter.inspect(snapshot, "https://zmpt.cc/index.php").status, "ready");
+  assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "用户等级: Elite User 电力值 789.5 做种积分: 1,646,531.5 上传量: 16.332 TB 下载量: 294.79 GB 分享率: 56.731"})};
+  const document = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : []};
+  assert.deepEqual(adapter.profile(document), {level: "Elite User", bonus: "789.5", seedingPoints: "1,646,531.5", uploaded: "16.332 TB", downloaded: "294.79 GB", ratio: "56.731"});
+  const rows = [[{textContent: "电力值"}, {textContent: "1,234.5 [明细]"}]].map(cells => ({querySelectorAll: () => cells}));
+  assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "1,234.5");
+});
+
+test("UBits recognizes its U coin sign-in and current account row", () => {
+  const adapter = piggo.create("https://ubits.club");
+  const entry = element("[签到得U币]", {href: "/attendance.php"});
+  const snapshot = documentFixture("", [entry]);
+  assert.equal(adapter.inspect(snapshot, "https://ubits.club/index.php").status, "ready");
+  assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "U币 [使用]: 1,058,119.5 上传量: 10.742 TB 下载量: 231.34 GB 分享率: 47.547"})};
+  const account = {getAttribute: () => "/userdetails.php?id=42"};
+  const row = {textContent: "欢迎回来 fixture", querySelectorAll: selector => selector === 'a[href]' ? [account] : []};
+  const document = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : selector === "tr" ? [row] : []};
+  assert.equal(adapter.accountLink(document), "https://ubits.club/userdetails.php?id=42");
+  assert.deepEqual(adapter.profile(document), {level: null, bonus: "1,058,119.5", seedingPoints: null, uploaded: "10.742 TB", downloaded: "231.34 GB", ratio: "47.547"});
+});
+
+test("TTG recognizes its scoped inline sign-in and header statistics", () => {
+  const adapter = piggo.create("https://totheglory.im");
+  const entry = element("签到", {href: "javascript:void(0);"});
+  entry.matches = selector => selector === "#signed";
+  const snapshot = documentFixture("", [entry]);
+  assert.equal(adapter.inspect(snapshot, "https://totheglory.im/index.php").status, "ready");
+  assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  const query = snapshot.querySelectorAll;
+  snapshot.querySelectorAll = selector => selector === "tr" ? [{textContent: "欢迎回来，fixture [已签到]"}] : selector === 'a[href]' ? [] : query(selector);
+  assert.equal(adapter.inspect(snapshot, "https://totheglory.im/index.php").status, "already_done");
+  const account = {getAttribute: () => "/userdetails.php?id=42"};
+  const row = {textContent: "欢迎回来，fixture 分享率: 3.500 上传量: 7.00 TiB 下载量: 2.00 TiB 积分: 123,456.7", querySelectorAll: selector => selector === 'a[href]' ? [account] : []};
+  const document = {querySelectorAll: selector => selector === "tr" ? [row] : []};
+  assert.equal(adapter.accountLink(document), "https://totheglory.im/userdetails.php?id=42");
+  assert.deepEqual(adapter.profile(document), {level: null, bonus: "123,456.7", seedingPoints: null, uploaded: "7.00 TiB", downloaded: "2.00 TiB", ratio: "3.500"});
+});
+
+test("SSD maps jasmine and seeding points during profile refresh", () => {
+  const adapter = piggo.create("https://springsunday.net", "/", true, "SSD");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "茉莉: 987,654.3 做种积分: 1.79 上传量: 9.538 TB 下载量: 170.82 GB 分享率: 57.176"})};
+  const document = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : []};
+  assert.deepEqual(adapter.profile(document), {level: null, bonus: "987,654.3", seedingPoints: "1.79", uploaded: "9.538 TB", downloaded: "170.82 GB", ratio: "57.176"});
+  assert.equal(adapter.inspect(document, "https://springsunday.net/index.php").status, "profile_only");
+  assert.equal(adapter.reuseRecentPage, true);
+  assert.equal(adapter.navigationRetries, 2);
+  const rows = [[{textContent: "茉莉"}, {textContent: "1,234.5"}]].map(cells => ({querySelectorAll: () => cells}));
+  assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "1,234.5");
+});
+
+test("SewerPT recognizes its gold sign-in and maps gold to magic", () => {
+  const adapter = piggo.create("https://sewerpt.com");
+  const entry = element("[签到得金币]", {href: "/attendance.php"});
+  const snapshot = documentFixture("欢迎回来 fixture 金币 [使用]: 108,689.1 分享率: 无限 上传量: 40.20 GB 下载量: 0.00 KB 做种积分: 108,689.1", [entry]);
+  assert.equal(adapter.inspect(snapshot, "https://sewerpt.com/index.php").status, "ready");
+  assert.equal(adapter.action(snapshot, "https://sewerpt.com/index.php"), entry);
+  assert.equal(adapter.reuseRecentPage, true);
+  assert.equal(adapter.navigationRetries, 2);
+  assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: snapshot.body.innerText})};
+  const profile = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : []};
+  assert.deepEqual(adapter.profile(profile), {level: null, bonus: "108,689.1", seedingPoints: "108,689.1", uploaded: "40.20 GB", downloaded: "0.00 KB", ratio: "∞"});
+  const rows = [[{textContent: "金币"}, {textContent: "123,456.7"}]].map(cells => ({querySelectorAll: () => cells}));
+  assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "123,456.7");
+});
+
+test("PTLGS recognizes its work-points sign-in and maps work points to magic", () => {
+  const adapter = piggo.create("https://ptlgs.org");
+  const entry = element("[签到得工分]", {href: "/attendance.php"});
+  const snapshot = documentFixture("欢迎回来 fixture 工分 [使用]: 98,765.4 分享率: 无限 上传量: 12.34 TB 下载量: 56.78 GB 做种积分: 123.45", [entry]);
+  assert.equal(adapter.inspect(snapshot, "https://ptlgs.org/index.php").status, "ready");
+  assert.equal(adapter.action(snapshot, "https://ptlgs.org/index.php"), entry);
+  assert.equal(adapter.reuseRecentPage, true);
+  assert.equal(adapter.navigationRetries, 2);
+  assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: snapshot.body.innerText})};
+  const profile = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : []};
+  assert.deepEqual(adapter.profile(profile), {level: null, bonus: "98,765.4", seedingPoints: "123.45", uploaded: "12.34 TB", downloaded: "56.78 GB", ratio: "∞"});
+  const rows = [[{textContent: "工分"}, {textContent: "5,432.1"}]].map(cells => ({querySelectorAll: () => cells}));
+  assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "5,432.1");
+});
+
+test("PterClub recognizes its inline cat-food sign-in and cleans the current rank", () => {
+  for (const origin of ["https://pterclub.net", "https://pterclub.com"]) {
+    const adapter = piggo.create(origin);
+    const entry = element("签到得猫粮", {href: "/index.php"});
+    entry.matches = selector => selector === "#do-attendance";
+    const snapshot = documentFixture("欢迎回来 fixture 猫粮 [使用 | 站免池]: 88,765.4 分享率: 2.500 上传量: 10.00 TB 下载量: 4.00 TB 做种积分: 321.5", [entry]);
+    assert.equal(adapter.inspect(snapshot, `${origin}/index.php`).status, "ready");
+    assert.equal(adapter.action(snapshot, `${origin}/index.php`), entry);
+    entry.innerText = "已签到";
+    assert.equal(adapter.inspect(snapshot, `${origin}/index.php`).status, "already_done");
+    entry.innerText = "签到得猫粮";
+    snapshot.querySelectorAll = selector => selector === "tr" ? [{textContent: "欢迎回来 fixture 猫粮: 88,765.4 (签到已得10)"}] : selector === 'a[href]' ? [] : [];
+    assert.equal(adapter.inspect(snapshot, `${origin}/index.php`).status, "already_done");
+    const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: snapshot.body.innerText})};
+    const rows = [[{textContent: "等级"}, {textContent: "加菲猫 POWER USER", querySelectorAll: () => []}], [{textContent: "猫粮"}, {textContent: "88,765.4", querySelectorAll: () => []}]].map(cells => ({querySelectorAll: () => cells}));
+    const profile = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : selector === "tr" ? rows : []};
+    assert.deepEqual(adapter.profile(profile, true), {level: "POWER USER", bonus: "88,765.4", seedingPoints: "321.5", uploaded: "10.00 TB", downloaded: "4.00 TB", ratio: "2.500"});
+    assert.equal(adapter.reuseRecentPage, true);
+    assert.equal(adapter.navigationRetries, 2);
   }
 });
 
