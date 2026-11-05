@@ -1,5 +1,6 @@
 (function (root) {
   const rules = {
+    "discfan.net": {refreshInNewPage: true},
     "haidan.cc": {modalAttendance: true, homePaths: ["/"], detailFillOnly: true, profileMetrics: {bonus: "#magic_num"}},
     "haidan.video": {modalAttendance: true, homePaths: ["/"], detailFillOnly: true, profileMetrics: {bonus: "#magic_num"}},
     "htpt.cc": {
@@ -31,6 +32,7 @@
     },
     "agsvpt.com": {
       homePaths: ["/"],
+      refreshInNewPage: true,
       duplicateAttendanceLinks: true,
       preferAttendanceSubmit: true,
       reuseRecentPage: true,
@@ -61,6 +63,10 @@
     },
     "piggo.me": {
       homePaths: ["/"],
+      renderedCalendar: true,
+      continueAttendanceForm: true,
+      profileSelector: ".user-strip",
+      profilePatterns: {bonus: /饲料\s*(?:\[使用\]\s*)?(?:\[勋章\]\s*)?[:：]\s*([\d,.]+)/},
       waitForSecurityChallenge: true,
       nativeAttendanceNavigation: true,
       reuseRecentPage: true,
@@ -82,6 +88,13 @@
       profileRow: /^\s*欢迎回来/,
       attendanceDoneText: /[（(]\s*签到已得\s*[\d,.]+\s*[）)]/
     },
+    "pthome.net": {
+      reuseRecentPage: true,
+      navigationRetries: 2,
+      profileRow: /^\s*欢迎回来/,
+      attendanceDoneText: /[（(]\s*签到已得\s*[\d,.]+\s*[）)]/
+    },
+    "ptcafe.club": {reuseRecentPage: true, navigationRetries: 2},
     "kp.m-team.cc": {profileApi: "mteam"},
     "audiences.me": {
       statusPageKeepsForm: true,
@@ -159,6 +172,8 @@
     "open.cd": {imageCaptcha: "opencd", reuseRecentPage: true, manualMessage: "OpenCD 图片验证码未能可靠识别，请在网页中处理"},
     "u2.dmhy.org": {refreshOnly: true, manualMessage: "U2 签到需要人工验证，插件仅刷新账号数据"},
     "pttime.org": {
+      reuseRecentPage: true,
+      navigationRetries: 2,
       attendanceQuery: true,
       attendancePaths: ["/attendance.php"],
       attendanceLabel: /^\s*签到领魔力\s*$/
@@ -228,8 +243,19 @@
       profileRow: /欢迎回来/
     },
     "hdcity.city": {
-      profileSelector: "body",
-      detailFillOnly: true,
+      homePaths: ["/", "/index.php", "/userdetails"],
+      ownAccountPath: "/userdetails",
+      accountSelector: '.button-group > a[href="userdetails"], .button-group > a[href="/userdetails"]',
+      profileSelector: '.button-group:has(> a[href="userdetails"]), .button-group:has(> a[href="/userdetails"])',
+      materialMetricIcons: true,
+      profilePatterns: {level: /\[([A-Za-z]+(?: [A-Za-z]+)*)\]/},
+      profileMetrics: {bonus: '.button-group:has(> a[href="userdetails"]) > a[href="mybonus"], .button-group:has(> a[href="/userdetails"]) > a[href="/mybonus"]'},
+      detailProfilePatterns: {
+        bonus: /^Karma Points\s*[:：]?\s*([\d,.]+)/i,
+        uploaded: /^Uploaded\s*[:：]\s*([\d,.]+\s*[KMGTPE]i?B)/i,
+        downloaded: /^Uploaded\s*[:：][\s\S]*?Downloaded\s*[:：]\s*([\d,.]+\s*[KMGTPE]i?B)/i,
+        ratio: /^Uploaded\s*[:：][\s\S]*?Sharing Ratio\s*[:：]\s*([\d,.]+|∞|Inf)/i
+      },
       levelFromProfileImage: true,
       levelFromProfileText: true,
       reuseRecentPage: true,
@@ -240,7 +266,11 @@
     },
     "hddolby.com": {
       attendancePaths: ["/attendance.php"],
-      attendanceLabel: /^\s*签到得鲸币\s*$/
+      attendanceLabel: /^\s*签到得鲸币\s*$/,
+      profileRow: /^\s*欢迎回来/,
+      attendanceDoneText: /[（(]\s*签到已得\s*[\d,.]+\s*[）)]/,
+      profilePatternPriority: true,
+      profilePatterns: {bonus: /鲸币\s*\[使用\]\s*[:：]\s*([\d,.]+)/}
     },
     "crabpt.vip": {
       attendancePaths: ["/attendance.php"],
@@ -275,6 +305,7 @@
       }
     },
     "52pt.site": {
+      pausedAttendanceSelector: '#game[href="bakatestfinal.php"]',
       continueAttendanceForm: true,
       nativeAttendanceNavigation: true,
       sliderCaptcha: "pt52",
@@ -291,6 +322,7 @@
     }
   };
   rules["pterclub.com"] = rules["pterclub.net"];
+  rules["uhddolby.com"] = rules["hddolby.com"];
   function get(origin) {
     try {
       const target = new URL(origin);

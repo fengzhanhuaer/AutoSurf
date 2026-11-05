@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "130",
   "name": "NetSurf",
-  "version": "0.4.89",
+  "version": "0.4.96",
   "description": "NetSurf Dashboard：PT 站点签到、NodeSeek/InvitesFun 定时签到、浏览器设置与所有网站 Cookie 的备份还原。",
   "permissions": ["storage", "alarms", "scripting", "offscreen"],
   "content_security_policy": {"extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"},

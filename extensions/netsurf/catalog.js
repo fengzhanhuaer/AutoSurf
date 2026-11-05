@@ -195,16 +195,16 @@
     "signinPath": "/sign",
     "profilePath": null,
     "mode": "signin",
-    "homePath": "/index.php"
+    "homePath": "/userdetails"
   },
   {
     "id": "hddolby.com",
     "name": "HD Dolby",
-    "domain": "hddolby.com",
-    "origin": "https://www.hddolby.com",
+    "domain": "uhddolby.com",
+    "origin": "https://www.uhddolby.com",
     "hosts": [
-      "www.hddolby.com",
-      "hddolby.com"
+      "www.uhddolby.com",
+      "uhddolby.com"
     ],
     "signinPath": "/attendance.php",
     "profilePath": null,
@@ -474,10 +474,10 @@
       "piggo.me",
       "www.piggo.me"
     ],
-    "signinPath": "/attendance.php",
+    "signinPath": "/calendar",
     "profilePath": null,
     "mode": "signin",
-    "homePath": "/index.php"
+    "homePath": "/"
   },
   {
     "id": "pt.0ff.cc",

@@ -1,6 +1,6 @@
 (() => {
   const version = chrome.runtime.getManifest().version;
-  const contentRevision = "2026-10-21-attendance-record-v66";
+  const contentRevision = "2026-11-04-failure-recovery-v75";
   const suppressAuto = globalThis.NetSurfReadOnlyInjection === true;
   delete globalThis.NetSurfReadOnlyInjection;
   if (globalThis.NetSurfContentStarted === contentRevision) return;
@@ -61,7 +61,7 @@
     }
   }
 
-  async function freshSnapshot(timeoutMs = 7000, dataOnly = false, reuseCurrentPage = false, skipDetails = false) {
+  async function freshSnapshot(timeoutMs = 7000, dataOnly = false, reuseCurrentPage = false, skipDetails = false, preflight = false) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const startedAt = Date.now();
@@ -75,10 +75,23 @@
         const status = dataOnly && snapshot.profile && ["profile_only", "ready", "already_done", "unknown"].includes(snapshot.status) ? "refreshed" : snapshot.status;
         return {...piggo.result(status, location.href), ...snapshot, status};
       }
+      if (globalThis.NetSurfRules?.get(location.origin)?.renderedCalendar && document.querySelector('#app, .user-strip')) {
+        // The SPA's HTML response is only a shell, even when its document status is 404.
+        let inspection;
+        while (true) {
+          inspection = piggo.inspect(document, location.href);
+          if (Object.values(piggo.profile(document)).some(Boolean) && (dataOnly || inspection.status !== "unknown") || ["blocked", "debugging", "login_required", "manual_required"].includes(inspection.status)) break;
+          await wait(200, controller.signal);
+        }
+        const profile = piggo.profile(document);
+        const refreshed = dataOnly && Object.values(profile).some(Boolean) && !["blocked", "debugging", "login_required"].includes(inspection.status);
+        const status = refreshed ? "refreshed" : inspection.status;
+        return {...piggo.result(status, location.href), profile, diagnostic: diagnose(document, {url: location.href, status: 200}, status)};
+      }
       const navigationStatus = Number(globalThis.performance?.getEntriesByType?.("navigation")?.[0]?.responseStatus);
       const currentUrl = new URL(location.href);
       const onHomepage = currentUrl.pathname === new URL(site?.homePath || "/index.php", piggo.origin).pathname || !currentUrl.search && !currentUrl.hash && piggo.homePaths.includes(currentUrl.pathname);
-      const loadedRecently = piggo.reuseRecentPage && onHomepage && Date.now() - Number(globalThis.performance?.timeOrigin || 0) <= 5 * 60 * 1000;
+      const loadedRecently = preflight && piggo.reuseRecentPage && onHomepage && Date.now() - Number(globalThis.performance?.timeOrigin || 0) <= 5 * 60 * 1000;
       const navigationSucceeded = !Number.isFinite(navigationStatus) || navigationStatus === 0 || navigationStatus >= 200 && navigationStatus < 400;
       const reuseLoadedPage = !globalThis.NetSurfRules?.get(location.origin)?.modalAttendance && (reuseCurrentPage || loadedRecently) && piggo.isPiggo(location.href) && navigationSucceeded && Object.values(piggo.profile(document)).some(Boolean);
       const response = reuseLoadedPage
@@ -116,10 +129,10 @@
           controller.signal.removeEventListener("abort", abort);
         }
       }
-      const profile = piggo.profile(snapshot);
+      const profile = piggo.profile(snapshot, new URL(response.url).pathname === globalThis.NetSurfRules?.get(location.origin)?.ownAccountPath);
       let classUrl = piggo.classLink(snapshot);
       const accountUrl = piggo.accountLink(snapshot);
-      if (!skipDetails && accountUrl && Object.values(profile).some(value => !value)) {
+      if (!skipDetails && accountUrl && accountUrl !== response.url && Object.values(profile).some(value => !value)) {
         try {
           const accountPage = await optionalPage(accountUrl, "账号资料");
           if (accountPage?.response) Object.assign(diagnostic.auxiliary.at(-1), {sameUrl: accountPage.response.url === accountUrl, finalPath: new URL(accountPage.response.url).pathname});
@@ -188,7 +201,7 @@
     if (continuation && (!piggo.continueAttendanceForm || new URL(location.href).pathname !== site.signinPath)) return piggo.result("unknown", location.href);
     if (submitted) return piggo.result("pending", location.href);
     submitted = true;
-    const fresh = continuation ? piggo.result(piggo.inspect(document, location.href).status, location.href) : await freshSnapshot(timeoutMs, false, false, true);
+    const fresh = continuation ? piggo.result(piggo.inspect(document, location.href).status, location.href) : await freshSnapshot(timeoutMs, false, false, true, true);
     if (fresh.status !== "ready") {
       submitted = false;
       return fresh;
@@ -255,7 +268,7 @@
         submitted = false;
         return {...piggo.result("error", location.href), message: "签到提交许可已失效，未再次点击"};
       }
-      if (globalThis.NetSurfRules?.get(location.origin)?.modalAttendance && (await refreshOnly() || piggo.action(document, location.href, true) !== control)) {
+      if ((globalThis.NetSurfRules?.get(location.origin)?.modalAttendance || globalThis.NetSurfRules?.get(location.origin)?.renderedCalendar) && (await refreshOnly() || piggo.action(document, location.href, true) !== control || continuation && location.pathname !== site.signinPath)) {
         submitted = false;
         return {...piggo.result("error", location.href), message: "签到控件或设置已变化，未再次点击"};
       }
@@ -268,7 +281,7 @@
     if (sender.id !== chrome.runtime.id) return;
     if (message.type === "netsurf-inspect") {
       if (message.fresh) {
-        refreshOnly().then(readOnly => freshSnapshot(message.timeoutMs, message.dataOnly === true || readOnly, message.reuseCurrentPage === true, message.skipDetails === true && !readOnly)).then(result => respond({...result, contentVersion: version, contentRevision})).catch(() => respond(piggo.result("error", location.href)));
+        refreshOnly().then(readOnly => freshSnapshot(message.timeoutMs, message.dataOnly === true || readOnly, message.reuseCurrentPage === true, message.skipDetails === true && !readOnly, message.preflight === true && !readOnly)).then(result => respond({...result, contentVersion: version, contentRevision})).catch(() => respond(piggo.result("error", location.href)));
         return true;
       }
       const inspection = piggo.inspect(document, location.href);

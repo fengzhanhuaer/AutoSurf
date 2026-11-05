@@ -5,7 +5,7 @@ const sites = globalThis.NetSurfSites;
 const backup = globalThis.NetSurfBackup;
 const periodic = globalThis.NetSurfPeriodicBackground.create(chrome);
 const captchaOcr = globalThis.NetSurfCaptchaBackground.create(chrome, sites, readState);
-const contentRevision = "2026-10-21-attendance-record-v66";
+const contentRevision = "2026-11-04-failure-recovery-v75";
 let actionQueue = Promise.resolve();
 let settingsQueue = Promise.resolve();
 let scheduleQueue = Promise.resolve();
@@ -23,7 +23,7 @@ function adapter(siteId = "piggo", url) {
 }
 
 async function readState(siteId = "piggo") {
-  const fields = ["verifiedDay", "refreshedDay", "operation", "lastResult", "schedule"];
+  const fields = ["verifiedDay", "refreshedDay", "operation", "lastResult", "schedule", "refreshSchedule"];
   const state = await chrome.storage.local.get(["autoEnabled", "sites", "scheduleConfig", ...fields.map(field => sites.key(field, siteId))]);
   return {...sites.settings(state), ...Object.fromEntries(fields.map(field => [field, state[sites.key(field, siteId)]]))};
 }
@@ -78,7 +78,7 @@ async function confirmationFailure(tab, siteId, reason = "核验超时，未取�
   if (state.lastResult?.verified && ["success", "already_done"].includes(state.lastResult.status) && state.verifiedDay === today()) return state.lastResult;
   await chrome.storage.local.set({[sites.key("operation", siteId)]: {...state.operation, day: today(), awaitingConfirmation: true}});
   const url = tab?.url || sites.get(siteId).origin;
-  return save({...adapter(siteId, url).result("error", url), confirmationFailed: true, message: `签到核验失败：${reason}；已停止提交及自动核验，可手动刷新检查结果，避免重复签到`, diagnostic: {...snapshot?.diagnostic, phase: "签到核验", path: new URL(url).pathname, elapsedMs: state.operation?.startedAt ? Math.max(0, Date.now() - state.operation.startedAt) : 0}}, tab?.id, false, siteId);
+  return save({...adapter(siteId, url).result("error", url), confirmationFailed: true, ...(snapshot?.refreshCheck && snapshot.status === "error" ? {refreshCheck: true} : {}), message: `签到核验失败：${reason}；已停止提交及自动核验，可手动刷新检查结果，避免重复签到`, diagnostic: {...snapshot?.diagnostic, phase: "签到核验", path: new URL(url).pathname, elapsedMs: state.operation?.startedAt ? Math.max(0, Date.now() - state.operation.startedAt) : 0}}, tab?.id, false, siteId);
 }
 
 async function save(result, tabId, verified = false, siteId = "piggo") {
@@ -89,6 +89,18 @@ async function save(result, tabId, verified = false, siteId = "piggo") {
 
 async function persistResult(result, tabId, verified, siteId) {
   const previous = await readState(siteId);
+  const rawResult = {...result};
+  if (result.profileRefresh) {
+    const succeeded = verified && ["refreshed","ready","already_done","success","profile_only"].includes(result.status) && Object.values(sites.profile(result.profile)).some(Boolean);
+    const profile = sites.profile(previous.lastResult?.profile);
+    if (succeeded) for (const [key,value] of Object.entries(sites.profile(result.profile))) if (value) profile[key]=value;
+    const refreshState = {status:succeeded ? "success" : "error",message:succeeded ? "账号数据已刷新" : result.message || "未读取到账号资料",time:result.time || new Date().toISOString()};
+    const saved = {...(previous.lastResult || result),siteId,profile,
+      signinState:previous.lastResult?.signinState || (previous.lastResult ? Object.fromEntries(["status","message","time","verified","confirmedDay","confirmationFailed"].filter(key=>previous.lastResult[key]!==undefined).map(key=>[key,previous.lastResult[key]])) : {status:"unknown"}),
+      refreshState,profileTime:succeeded ? refreshState.time : previous.lastResult?.profileTime || previous.lastResult?.time};
+    await chrome.storage.local.set({[sites.key("lastResult",siteId)]:saved,...(succeeded ? {[sites.key("refreshedDay",siteId)]:today()} : {})});
+    return saved;
+  }
   if (result.status === "ready" && confirmedPersistentForm(previous, siteId)) {
     result = {...result, status: "already_done", confirmedDay: previous.verifiedDay, message: "今日已有已确认签到记录，不重复提交"};
     verified = true;
@@ -98,7 +110,14 @@ async function persistResult(result, tabId, verified, siteId) {
     result = {...result, status: "already_done", confirmedDay: previous.verifiedDay, confirmationFailed: false, refreshError: result.message || "页面通信失败", message: `今日已签到；本次账号刷新失败：${result.message || "页面通信失败"}；已保留确认状态`};
     verified = true;
   }
-  if (unresolvedSubmission(previous) && previous.lastResult?.confirmationFailed && !result.confirmationFailed && (!verified || result.status === "pending")) return previous.lastResult;
+  if (unresolvedSubmission(previous) && previous.lastResult?.confirmationFailed && !result.confirmationFailed && (!verified || result.status === "pending")) {
+    if (rawResult.refreshCheck && rawResult.status === "error") {
+      const kept = {...previous.lastResult, refreshState: {status: "error", message: rawResult.message || "账号数据刷新失败", time: rawResult.time}};
+      await chrome.storage.local.set({[sites.key("lastResult", siteId)]: kept});
+      return kept;
+    }
+    return previous.lastResult;
+  }
   if (result.status === "pending" && previous.lastResult?.verified && ["success", "already_done"].includes(previous.lastResult.status) && previous.lastResult.tabId === tabId && previous.operation?.tabId === tabId && new Date(previous.lastResult.time).getTime() >= previous.operation.startedAt) return previous.lastResult;
   if (verified && result.status === "unknown" && previous.verifiedDay === today()) {
     result = {...result, status: "already_done", message: "今日已签到；本次页面未识别签到入口，已保留确认状态"};
@@ -107,6 +126,13 @@ async function persistResult(result, tabId, verified, siteId) {
   const profileSucceeded = !refreshFailed && verified && ["ready", "success", "already_done", "profile_only", "refreshed", "unknown", "pending"].includes(result.status) && Object.values(sites.profile(result.profile)).some(Boolean);
   if (profileSucceeded) for (const [field, value] of Object.entries(sites.profile(result.profile))) if (value) profile[field] = value;
   const saved = {...result, siteId, profile, tabId, verified, profileTime: profileSucceeded ? result.time : previous.lastResult?.profileTime || previous.lastResult?.time};
+  const compact = value => value && Object.fromEntries(["status", "message", "time", "verified", "confirmedDay", "confirmationFailed"].filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+  const priorSignin = previous.lastResult?.signinState || (previous.lastResult?.status !== "refreshed" ? compact(previous.lastResult) : null);
+  saved.signinState = rawResult.refreshCheck && !rawResult.confirmationFailed && !["success", "already_done", "ready"].includes(rawResult.status)
+    ? priorSignin : result.status === "refreshed" ? priorSignin : compact({...result, verified});
+  saved.refreshState = previous.lastResult?.refreshState;
+  if (profileSucceeded) saved.refreshState = {status: "success", message: "账号数据已刷新", time: result.time};
+  else if (rawResult.refreshCheck || refreshFailed) saved.refreshState = {status: "error", message: rawResult.message || "账号数据刷新失败", time: rawResult.time};
   const state = {[sites.key("lastResult", siteId)]: saved};
   if (profileSucceeded) state[sites.key("refreshedDay", siteId)] = today();
   if (verified && ["success", "already_done"].includes(result.status)) {
@@ -150,9 +176,9 @@ async function injectContent(tab, siteId) {
   await chrome.scripting.executeScript({target: {tabId: tab.id}, injectImmediately: true, files: ["catalog.js", "site-rules.js", "sites.js", "profile-api.js", "hdsky.js", "opencd.js", "ptsbao.js", "freefarm.js", "pt52.js", "piggo.js", "content.js"]});
 }
 
-async function freshPage(tab, timeoutSeconds = 30, reuseCurrentPage = false, skipDetails = false) {
+async function freshPage(tab, timeoutSeconds = 30, reuseCurrentPage = false, skipDetails = false, preflight = false, profileOnly = false) {
   const siteId = sites.resolve(tab.url)?.id || "piggo";
-  const dataOnly = (await readState(siteId)).sites[siteId].refreshOnly;
+  const dataOnly = profileOnly || (await readState(siteId)).sites[siteId].refreshOnly;
   const deadline = Date.now() + timeoutSeconds * 1000;
   await ensureContent(tab, siteId, Math.max(1, Math.min(3000, deadline - Date.now())));
   let current = await pageMessage(tab.id, {type: "inspect"}, Math.max(1, Math.min(3000, deadline - Date.now())));
@@ -165,7 +191,7 @@ async function freshPage(tab, timeoutSeconds = 30, reuseCurrentPage = false, ski
   if (["blocked", "debugging", "login_required"].includes(current.status) || current.status === "manual_required" && !dataOnly && !adapter(siteId, tab.url).statusPath) return current;
   const remaining = Math.max(1, deadline - Date.now());
   const reusable = reuseCurrentPage && ["ready", "success", "already_done", "profile_only", "manual_required"].includes(current.status);
-  const refreshed = await pageMessage(tab.id, {type: "inspect", fresh: true, dataOnly, reuseCurrentPage: reusable, skipDetails, timeoutMs: Math.max(1, remaining - 250)}, remaining + 1000);
+  const refreshed = await pageMessage(tab.id, {type: "inspect", fresh: true, dataOnly, reuseCurrentPage: reusable, skipDetails, preflight, timeoutMs: Math.max(1, remaining - 250)}, remaining + 1000);
   if (refreshed.status === "error" && ["success", "already_done"].includes(current.status)) return {...current, message: `${current.message}；账号数据刷新失败，已保留旧数据`};
   if (!dataOnly && ["success", "already_done"].includes(current.status) && ["ready", "unknown"].includes(refreshed.status)) return {...refreshed, status: current.status, message: current.message};
   if (refreshed.status === "ready" && confirmedPersistentForm(await readState(siteId), siteId)) return {...refreshed, status: "already_done", confirmedDay: today(), message: "今日已有已确认签到记录，不重复提交"};
@@ -180,7 +206,7 @@ async function run(tab, automatic = false, attemptDeadline = null, siteId = site
   if (automatic && (!state.autoEnabled || (!configured.refreshOnly && state.verifiedDay === today()))) return null;
   const deadline = attemptDeadline || Date.now() + configured.timeout * 1000;
   if (Date.now() >= deadline) return save(page.result("error", tab.url), tab.id, false, siteId);
-  const snapshot = await freshPage(tab, (deadline - Date.now()) / 1000, reuseCurrentPage, true);
+  const snapshot = await freshPage(tab, (deadline - Date.now()) / 1000, reuseCurrentPage, true, true);
   if (snapshot.status !== "ready") return save(snapshot, tab.id, true, siteId);
   const current = await readState(siteId);
   if (!current.sites[siteId].enabled) return {siteId, status: "disabled", message: `${sites.get(siteId).name} 已停用`};
@@ -206,12 +232,13 @@ async function run(tab, automatic = false, attemptDeadline = null, siteId = site
   return save(page.result("pending", tab.url), tab.id, true, siteId);
 }
 
-async function inspectSite(siteId, background = false) {
+async function inspectSite(siteId, background = false, passive = false) {
   const state = await readState(siteId);
   const site = sites.get(siteId);
   if (!state.sites[siteId].enabled) return {siteId, status: "disabled", message: `${site.name} 已停用`};
+  if (passive && state.lastResult?.confirmationFailed) return state.lastResult;
+  if (background) return refreshSite(siteId, true);
   if (state.lastResult?.status === "pending" || unresolvedSubmission(state)) return refreshSite(siteId);
-  if (background) return refreshSite(siteId);
   const tab = await selectTab(siteId);
   if (!tab) {
     if (state.lastResult?.status === "no_tab" && state.verifiedDay === today()) {
@@ -222,8 +249,8 @@ async function inspectSite(siteId, background = false) {
     if (state.lastResult) return state.lastResult;
     return save({status: "no_tab", message: `先打开 ${site.name} 并登录`}, undefined, false, siteId);
   }
-  try { return save(await freshPage(tab, state.sites[siteId].timeout), tab.id, true, siteId); }
-  catch { return save(adapter(siteId, tab.url).result("error", tab.url), tab.id, false, siteId); }
+  try { return save({...await freshPage(tab, state.sites[siteId].timeout), refreshCheck: true}, tab.id, true, siteId); }
+  catch { return save({...adapter(siteId, tab.url).result("error", tab.url), refreshCheck: true}, tab.id, false, siteId); }
 }
 
 async function handle(message, sender) {
@@ -319,7 +346,7 @@ async function handle(message, sender) {
           continue;
         }
         await chrome.storage.local.set({inspection: {current: item.name, siteId: item.id, completed: results.length + skipped, total: enabled.length, running: true}});
-        results.push([item.id, signin ? await batchSignIn(item.id) : await inspectSite(item.id, true)]);
+        results.push([item.id, signin ? await batchSignIn(item.id) : await inspectSite(item.id, true, message.passive === true)]);
       }
       await chrome.storage.local.set({inspection: {completed: results.length + skipped, total: enabled.length, running: false}});
     } else {
@@ -329,12 +356,12 @@ async function handle(message, sender) {
         const current = await readState(item.id);
         (current.lastResult?.status === "pending" || unresolvedSubmission(current) ? pending : ordinary).push(item);
       }
-      results.push(...await Promise.all(ordinary.map(async item => [item.id, await inspectSite(item.id)])));
-      for (const item of pending) results.push([item.id, await inspectSite(item.id)]);
+      results.push(...await Promise.all(ordinary.map(async item => [item.id, await inspectSite(item.id, false, message.passive === true)])));
+      for (const item of pending) results.push([item.id, await inspectSite(item.id, false, message.passive === true)]);
     }
     return {results: Object.fromEntries(results), skipped};
   }
-  if (message.type === "inspect") return recordActivity("inspect", await inspectSite(siteId, message.background === true));
+  if (message.type === "inspect") return recordActivity("inspect", await inspectSite(siteId, message.background === true, message.passive === true));
   if (message.type === "run") {
     const state = await readState(siteId);
     if (!state.sites[siteId].enabled) return {siteId, status: "disabled", message: `${site.name} 已停用`};
@@ -372,7 +399,7 @@ async function handle(message, sender) {
     }
     let validated;
     try { validated = backup.validate(message.backup); } catch (error) { return {error: error.message}; }
-    const reset = Object.fromEntries(sites.catalog.flatMap(item => ["operation", "verifiedDay", "refreshedDay", "lastResult", "schedule"].map(field => [sites.key(field, item.id), null])));
+    const reset = Object.fromEntries(sites.catalog.flatMap(item => ["operation", "verifiedDay", "refreshedDay", "lastResult", "schedule", "refreshSchedule"].map(field => [sites.key(field, item.id), null])));
     await chrome.storage.local.set({autoEnabled: false, ...reset});
     const previousPeriodic = await periodic.read();
     await chrome.storage.local.set({periodicTasks: Object.fromEntries(Object.entries(previousPeriodic.tasks).map(([taskId, configured]) => [taskId, {...configured, enabled: false}]))});
@@ -489,7 +516,7 @@ async function waitForPage(tab, deadline, siteId, requireReady = true) {
         await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - Date.now()))));
         continue;
       }
-      if (NetSurfRules.get(sites.get(siteId).origin)?.refreshInNewPage && current.status === "unknown" && !current.hasProfile) {
+      if ((NetSurfRules.get(sites.get(siteId).origin)?.refreshInNewPage || NetSurfRules.get(sites.get(siteId).origin)?.renderedCalendar) && current.status === "unknown" && !current.hasProfile) {
         await new Promise(resolve => setTimeout(resolve, 100));
         continue;
       }
@@ -520,7 +547,7 @@ async function navigateTaskPage(tab, deadline, siteId, requireReady = true) {
   throw failure || new Error("站点加载超时");
 }
 
-async function refreshSite(siteId) {
+async function refreshSite(siteId, profileOnly = false) {
   const state = await readState(siteId);
   if (!state.sites[siteId].enabled) return {siteId, status: "disabled", message: `${sites.get(siteId).name} 已停用`};
   const site = sites.get(siteId);
@@ -529,7 +556,7 @@ async function refreshSite(siteId) {
   let tab = await selectTab(siteId);
   const attendancePage = tab && new URL(tab.url).pathname === new URL(site.signinPath, site.origin).pathname && new URL(site.signinPath, site.origin).pathname !== new URL(site.homePath, site.origin).pathname;
   const recoverAttendance = unresolvedSubmission(state) && attendancePage && !state.sites[siteId].refreshOnly;
-  if (state.sites[siteId].refreshOnly && attendancePage || ["zhuque.in", "kp.m-team.cc"].includes(siteId) || NetSurfRules.get(site.origin)?.refreshInNewPage && !recoverAttendance) tab = undefined;
+  if ((profileOnly || state.sites[siteId].refreshOnly) && (attendancePage || NetSurfRules.get(site.origin)?.renderedCalendar) || ["zhuque.in", "kp.m-team.cc"].includes(siteId) || NetSurfRules.get(site.origin)?.refreshInNewPage && !recoverAttendance) tab = undefined;
   let created = false;
   try {
     if (!await chrome.permissions.contains({origins: sites.origins(sites.get(siteId))})) throw new Error("未授予站点访问权限，请在站点管理重新启用");
@@ -542,15 +569,17 @@ async function refreshSite(siteId) {
     const current = await readState(siteId);
     if (!current.sites[siteId].enabled) return {siteId, status: "disabled", message: `${sites.get(siteId).name} 已停用`};
     if (Date.now() >= deadline) throw new Error("页面加载超时");
-    const snapshot = await freshPage(tab, (deadline - Date.now()) / 1000, created);
+    const snapshot = {...await freshPage(tab, (deadline - Date.now()) / 1000, created, false, false, profileOnly), refreshCheck: true};
+    if (profileOnly) return await save({...snapshot,profileRefresh:true},tab.id,true,siteId);
     if (unresolvedSubmission(state) && ["ready", "unknown", "pending", "error"].includes(snapshot.status)) {
       if (snapshot.status !== "error") await save(snapshot, tab.id, true, siteId);
       return await confirmationFailure(tab, siteId, snapshot.status === "error" ? snapshot.message || "只读核验请求失败" : "只读核验未发现今日签到完成标记", snapshot);
     }
     return await save(snapshot, tab.id, true, siteId);
   } catch (error) {
+    if (profileOnly) return await save({...adapter(siteId,tab?.url).result("error",tab?.url || site.origin),profileRefresh:true,message:`资料刷新失败：${error.message || "页面通信失败"}`},tab?.id,false,siteId);
     if (unresolvedSubmission(state)) return await confirmationFailure(tab, siteId, `只读核验失败：${error.message || "页面通信失败"}`);
-    return await save({...adapter(siteId, tab?.url).result("error", tab?.url || sites.get(siteId).origin), message: `后台刷新失败：${error.message || "页面通信失败"}`}, tab?.id, false, siteId);
+    return await save({...adapter(siteId, tab?.url).result("error", tab?.url || sites.get(siteId).origin), message: `后台刷新失败：${error.message || "页面通信失败"}`, refreshCheck: true}, tab?.id, false, siteId);
   } finally {
     if (created) await closeTaskTab();
   }
@@ -622,7 +651,19 @@ async function confirmSubmission(tab, deadline, siteId, manual = false) {
   return confirmationFailure(tab, siteId, failureReason || (snapshot?.status === "error" ? snapshot.message || "核验请求失败" : undefined), snapshot);
 }
 
+async function dailyProfileRefresh(siteId) {
+  const state=await readState(siteId);
+  if (!state.autoEnabled || !state.sites[siteId].enabled || new Date()<sites.start(state.sites[siteId]) || state.refreshedDay===today() || state.refreshSchedule?.day===today()) return;
+  await chrome.storage.local.set({[sites.key("refreshSchedule",siteId)]:{day:today(),attemptedAt:Date.now()}});
+  return recordActivity("refresh",await refreshSite(siteId,true));
+}
+
 async function scheduledRun(tab, retry, siteId = "piggo", refreshRequested = false) {
+  try { return await scheduledSignin(tab,retry,siteId,refreshRequested); }
+  finally { if (!refreshRequested) await dailyProfileRefresh(siteId); }
+}
+
+async function scheduledSignin(tab, retry, siteId = "piggo", refreshRequested = false) {
   await closeTaskTab();
   const state = await readState(siteId);
   const configured = state.sites[siteId];
@@ -697,7 +738,7 @@ function resumeSchedule() {
         continue;
       }
       if (state.lastResult?.status !== "pending" && !unresolvedSubmission(state)) continue;
-      if (state.lastResult?.confirmationFailed) continue;
+      if (state.lastResult?.confirmationFailed) { await dailyProfileRefresh(site.id); continue; }
       if (state.sites[site.id].enabled) await refreshSite(site.id);
       else await confirmationFailure(null, site.id, "站点已停用，核验已停止");
     }

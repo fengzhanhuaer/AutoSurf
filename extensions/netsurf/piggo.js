@@ -76,6 +76,8 @@
   function action(document, url, includeScopedHidden = false) {
     if (profileOnly) return null;
     if (!isPiggo(url)) return null;
+    const calendar = calendarAttendance(document, url);
+    if (calendar) return calendar.control;
     if (rule?.modalAttendance) return modalAttendance(document, url)?.control || null;
     const candidates = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"]'))
       .filter(element => visible(element) || includeScopedHidden && rule?.hiddenAttendanceSelector && element.tagName === "A" && !element.disabled && !element.hidden && element.matches?.(rule.hiddenAttendanceSelector) === true && rule.attendanceLabel?.test((element.textContent || "").trim()) && safeAttendanceLink(element.getAttribute("href"), url))
@@ -108,6 +110,31 @@
     return candidates[0] || null;
   }
 
+  function calendarAttendance(document, url) {
+    if (!rule?.renderedCalendar || !isPiggo(url) || !document.querySelector?.('.user-strip')) return null;
+    const target = new URL(url);
+    if (target.search || target.hash) return {status: "unknown", control: null};
+    if (target.pathname === "/calendar") {
+      // The pill refers to the selected date, which may be a historical make-up day.
+      const currentDays = document.querySelectorAll('.cal-cell.today.on');
+      const fields = document.querySelectorAll('.cal-toolbar .cal-yms select');
+      const now = new Date();
+      if (currentDays.length !== 1 || fields.length !== 2 || Number(fields[0].value) !== now.getFullYear() || Number(fields[1].value) !== now.getMonth() + 1 || Number(currentDays[0].querySelector('.cal-num')?.textContent) !== now.getDate()) return {status: "unknown", control: null};
+      const pills = Array.from(document.querySelectorAll('.cal-toolbar .cal-att-pill'));
+      if (pills.length !== 1) return {status: pills.length > 1 ? "ambiguous" : "unknown", control: null};
+      const pill = pills[0];
+      const label = pill.textContent.replace(/\s+/g, " ").trim();
+      const shown = !pill.hidden && !pill.closest('[hidden], [style*="display: none"], [style*="display:none"]') && (!document.defaultView || document.defaultView.getComputedStyle(pill).visibility !== "hidden" && pill.getBoundingClientRect().width > 0);
+      if (shown && pill.tagName === "SPAN" && /^已签到(?:\s*·\s*\+[\d,]+)?$/.test(label)) return {status: "already_done", control: null};
+      if (pill.disabled) return {status: "pending", control: null};
+      if (pill.matches('button.cal-att-pill.act[type="button"]') && visible(pill) && /^签到(?:\s*·\s*\+[\d,]+)?$/.test(label)) return {status: "ready", control: pill};
+      return {status: "unknown", control: null};
+    }
+    if (target.pathname !== "/") return {status: "unknown", control: null};
+    const links = Array.from(document.querySelectorAll('.account-menu a.nav[href="/calendar"]')).filter(link => link.textContent.trim() === "签到/万年历" && !link.hidden);
+    return {status: links.length === 1 ? "ready" : links.length > 1 ? "ambiguous" : "unknown", control: links.length === 1 ? links[0] : null};
+  }
+
   function modalAttendance(document, url) {
     const target = new URL(url);
     if (!isPiggo(url) || !["/", "/index.php"].includes(target.pathname) || target.search || target.hash) return null;
@@ -128,6 +155,10 @@
 
   function inspect(document, url) {
     const text = (document.body?.innerText || document.body?.textContent || "").slice(0, 120000);
+    const gatewayCode = document.title?.match(/\b(502|503|504):?\s*(?:Bad gateway|Service (?:unavailable|temporarily unavailable)|Gateway time-?out)\b/i)?.[1];
+    if (isPiggo(url) && gatewayCode && /Cloudflare Ray ID:/i.test(text) && /\bHost\s+Error\b/i.test(text)) return {status: "error", control: null, message: `站点服务器返回 HTTP ${gatewayCode}，请稍后重试`};
+    if (isPiggo(url) && /^站点关闭维护中[，,]\s*请稍后再访问\s*(?:\.{3}|…{1,2})\s*谢谢[。.!！]?$/.test(text.trim())) return {status: "error", control: null, message: "站点正在维护，请稍后重试"};
+    if (isPiggo(url) && rule?.pausedAttendanceSelector && Array.from(document.querySelectorAll(rule.pausedAttendanceSelector)).some(element => (element.innerText || element.textContent || "").trim() === "做种会员签到处")) return {status: "manual_required", control: null, message: "52PT 已限制脚本签到，请在网站手动完成后刷新"};
     const password = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
     const imageInspection = {hdsky, opencd, ptsbao}[rule?.imageCaptcha]?.inspect(document, url, visible);
     const pt52Inspection = rule?.sliderCaptcha === "pt52" ? pt52.inspect(document, url) : null;
@@ -147,6 +178,9 @@
         return source.href === "https://challenge.rivers.chaitin.cn/challenge/v2/challenge.js" || source.origin === origin && source.pathname === "/.safeline/challenge/v2/challenge.js" && !source.search && !source.hash;
       } catch { return false; }
     })) return {status, control: null, challengePending: true, message: "等待站点自动安全验证"};
+    if (["blocked", "debugging", "login_required", "manual_required"].includes(status)) return {status, control: null};
+    const calendar = calendarAttendance(document, url);
+    if (calendar) return calendar;
     if (status !== "unknown") return {status, control: null};
     if (rule?.modalAttendance) return modalAttendance(document, url) || {status: "unknown", control: null};
     if (rule?.sliderCaptcha === "freefarm") {
@@ -191,6 +225,7 @@
       try {
         const target = new URL(link.getAttribute("href"), origin);
         target.hash = "";
+        if (rule?.ownAccountPath && target.origin === origin && target.pathname === rule.ownAccountPath && !target.search) return target.href;
         return target.origin === origin && target.pathname === (rule?.accountPath || "/userdetails.php") && /^\d+$/.test(target.searchParams.get("id")) && [...target.searchParams.keys()].length === 1 ? target.href : null;
       } catch { return null; }
     }).filter(Boolean);
@@ -246,13 +281,17 @@
     const text = blocks.map(block => {
       const copy = block.cloneNode(true);
       for (const image of copy.querySelectorAll("img[title], img[alt]")) image.replaceWith(` ${image.getAttribute("title") || image.getAttribute("alt")}： `);
+      if (rule?.materialMetricIcons) for (const icon of copy.querySelectorAll('i.material-icons[title]')) icon.replaceWith(` ${icon.getAttribute("title")} `);
       return copy.textContent;
     }).join("\n") + `\n${rowText}` + (details && rule?.fullProfileText ? `\n${document.body?.textContent || ""}` : "");
     const headerRanks = rule?.levelFromUserbar ? Array.from(text.matchAll(/[（(]\s*((?:Nexus\s*Master|Staff\s*Leader|Ultimate\s*User|Extreme\s*User|Crazy\s*User|Insane\s*User|Veteran\s*User|Elite\s*User|Power\s*User|Administrator|Moderator|Uploader|Sysop|Peasant|VIP|User))\s*[)）]/gi), match => siteTools.level(match[1])) : [];
     const headerLevel = new Set(headerRanks).size === 1 ? headerRanks[0] : null;
     const patterns = {level: /(?:用户等级|用戶等級|等级|等級)\s*[:：]\s*\[?([\w -]{1,40})/i, bonus: /(?<!做[种種]|[种種]子|Seeding\s)(?:魔力值?|[积積]分|爆米花(?:系统)?|Bonus)\s*[:：]?\s*([\d,.]+)/i, seedingPoints: /(?:做[种種][积積]分|[种種]子[积積]分|Seeding\s*(?:Points?|Score))\s*[:：]?\s*([\d,.]+)/i, uploaded: /(?:上传量?|上傳量?|Uploaded)\s*[:：]?\s*([\d,.]+\s*(?:[KMGTPE]i?B|B|Bytes?))/i, downloaded: /(?:下载量?|下載量?|Downloaded)\s*[:：]?\s*([\d,.]+\s*(?:[KMGTPE]i?B|B|Bytes?))/i, ratio: /(?:分享率|分享比率|Ratio)\s*[:：]?\s*([\d,.]+|∞|Inf|无限|無限)/i};
     for (const [field, pattern] of Object.entries(patterns)) values[field] = text.match(pattern)?.[1]?.trim() || null;
-    for (const [field, pattern] of Object.entries(rule?.profilePatterns || {})) if (!values[field]) values[field] = text.match(pattern)?.[1]?.trim() || null;
+    for (const [field, pattern] of Object.entries(rule?.profilePatterns || {})) {
+      const match = text.match(pattern)?.[1]?.trim();
+      if (match && (!values[field] || rule?.profilePatternPriority)) values[field] = match;
+    }
     if (!values.level && rule?.levelListSelector) {
       const ranks = Array.from(document.querySelectorAll(rule.levelListSelector)).map(entry => entry.textContent.match(/^\s*Class\s*:\s*([^\r\n:]{1,40})\s*$/i)?.[1]?.trim()).filter(Boolean);
       if (new Set(ranks).size === 1) values.level = ranks[0];
@@ -266,6 +305,13 @@
       if (value) values[field] = value;
     }
     if (details) {
+      if (rule?.detailProfilePatterns) for (const element of document.querySelectorAll('div.text')) {
+        const source = element.textContent.replace(/\s+/g, " ").trim();
+        for (const [field, pattern] of Object.entries(rule.detailProfilePatterns)) {
+          const match = source.match(pattern);
+          if (match) values[field] = match[1];
+        }
+      }
       for (const container of document.querySelectorAll('[class*="stat"], [class*="metric"]')) {
         const labelElement = container.querySelector?.('[class*="label"], [class*="title"], [class*="name"]');
         const valueElement = container.querySelector?.('[class*="value"], [class*="number"], [class*="amount"]');

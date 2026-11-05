@@ -59,16 +59,17 @@ function checkedToday(result) {
   return result?.verified === true && (result.confirmedDay ? result.confirmedDay === sites.day() : new Date(result.time).toDateString() === new Date().toDateString());
 }
 
-function completed(result) { return checkedToday(result) && ["success", "already_done"].includes(result.status); }
+function completed(result) { const signin = result?.signinState || result; return checkedToday(signin) && ["success", "already_done"].includes(signin.status); }
 
 function refreshOnly(site) { return state.sites[site.id].refreshOnly || site.mode === "profile"; }
 
 function refreshed(result) {
+  if (result?.refreshState) return result.refreshState.status === "success" && Object.values(sites.profile(result.profile)).some(Boolean);
   return ["refreshed", "ready", "profile_only", "success", "already_done"].includes(result?.status) && Object.values(sites.profile(result?.profile)).some(Boolean);
 }
 
-function dailyCount(selected, matches) {
-  return (selected.length === 0 || selected.some(site => checkedToday(results[site.id])) ? String(selected.filter(site => checkedToday(results[site.id]) && matches(results[site.id])).length) : "—") + " / " + selected.length;
+function dailyCount(selected, matches, isToday = checkedToday) {
+  return (selected.length === 0 || selected.some(site => isToday(results[site.id])) ? String(selected.filter(site => isToday(results[site.id]) && matches(results[site.id])).length) : "—") + " / " + selected.length;
 }
 
 function renderOverview() {
@@ -77,14 +78,13 @@ function renderOverview() {
   element("overview-empty").hidden = enabled.length > 0;
   element("enabled-count").textContent = String(enabled.length);
   const signInSites = enabled.filter(site => !refreshOnly(site));
-  const refreshSites = enabled.filter(refreshOnly);
+  const refreshSites = enabled;
   element("completed-count").textContent = dailyCount(signInSites, completed);
-  element("refresh-count").textContent = dailyCount(refreshSites, refreshed);
-  element("refresh-summary").hidden = refreshSites.length === 0;
+  element("refresh-count").textContent = dailyCount(refreshSites, refreshed, result => result?.refreshState ? checkedToday({...result.refreshState, verified: true}) : checkedToday(result));
+  element("refresh-summary").hidden = false;
   const labels = {ready: "待签到", success: "已完成", already_done: "已完成", profile_only: "无需签到", blocked: "需验证", debugging: "需验证", login_required: "需登录", manual_required: "需处理", pending: "核验中", no_tab: "未打开", disabled: "已停用", error: "检查失败", unknown: "未识别", ambiguous: "需处理"};
   for (const site of enabled) {
     const result = results[site.id];
-    const refreshResult = result?.status === "refreshed" || refreshOnly(site) && refreshed(result);
     const working = busy && activeSiteId === site.id;
     const suffix = site.id === "piggo" ? "" : "-" + site.id;
     const row = node("tr", undefined, site.id === "piggo" ? "piggo-row" : "row-" + site.id);
@@ -92,13 +92,25 @@ function renderOverview() {
     const name = node("td");
     name.append(node("strong", site.name), node("small", new URL(site.origin).hostname));
     row.append(name);
-    const badge = node("span", working ? activeOperation === "run" || activeOperation === "run-all" ? "签到中" : "刷新中" : refreshResult ? checkedToday(result) && refreshed(result) ? "已刷新" : "待刷新" : completed(result) ? "已完成" : ["success", "already_done"].includes(result?.status) ? "待核验" : result?.confirmationFailed ? "签到失败" : labels[result?.status] || "待检查", "site-status" + suffix);
-    badge.setAttribute("title", working ? "正在后台访问站点，弱网环境可能需要更长时间" : result?.message || "尚未检查");
+    const signin = result?.signinState || result;
+    const signing = working && ["run", "run-all"].includes(activeOperation) && !refreshOnly(site);
+    const refreshing = working && !signing;
+    const badge = node("span", refreshOnly(site) ? "无需签到" : signing ? "签到中" : completed(result) ? "已完成" : ["success", "already_done"].includes(signin?.status) ? "待核验" : signin?.confirmationFailed ? "签到失败" : signin?.status === "refreshed" ? "待检查" : labels[signin?.status] || "待检查", "site-status" + suffix);
+    badge.setAttribute("title", signin?.message || "尚未检查签到状态");
     badge.className = "status-badge";
-    badge.dataset.tone = (refreshResult ? refreshed(result) && checkedToday(result) : completed(result)) ? "success" : ["error", "blocked", "debugging", "login_required", "manual_required"].includes(result?.status) ? "warning" : "neutral";
+    badge.dataset.tone = !refreshOnly(site) && completed(result) ? "success" : !refreshOnly(site) && ["error", "blocked", "debugging", "login_required", "manual_required"].includes(signin?.status) ? "warning" : "neutral";
     const status = node("td");
     status.append(badge);
     row.append(status);
+    const refresh = result?.refreshState || (result?.refreshError ? {status: "error", message: result.refreshError} : refreshed(result) && result?.verified ? {status: "success", time: result.profileTime || result.time, confirmedDay: result.confirmedDay} : result?.status === "error" && !result.confirmationFailed ? {status: "error", message: result.message} : null);
+    const freshToday = refresh?.status === "success" && checkedToday({...refresh, verified: true});
+    const refreshBadge = node("span", refreshing ? "刷新中" : refresh?.status === "error" ? "刷新失败" : freshToday ? "已刷新" : "待刷新", "refresh-status" + suffix);
+    refreshBadge.className = "status-badge";
+    refreshBadge.dataset.tone = refreshing ? "neutral" : refresh?.status === "error" ? "warning" : freshToday ? "success" : "neutral";
+    refreshBadge.setAttribute("title", refreshing ? "正在读取账号数据" : refresh?.message || "尚无今日资料刷新记录");
+    const refreshCell = node("td");
+    refreshCell.append(refreshBadge);
+    row.append(refreshCell);
     const profile = sites.profile(result?.profile);
     for (const field of sites.profileFields) row.append(node("td", profile[field] || "—", "profile-" + field + suffix));
     const timestamp = new Date(result?.profileTime || result?.time);
@@ -271,7 +283,13 @@ async function request(type, extra = {}, showProgress = true) {
       results = {...results, ...result.results};
       latestResult = {message: (type === "run-all" ? "已检查签到 " : "已检查刷新 ") + Object.keys(result.results).length + " 个启用站点" + (result.skipped ? "，已跳过 " + result.skipped + " 个站点" : "")};
       displayFeedback(latestResult);
-    } else display(result, siteId);
+    } else {
+      display(result, siteId);
+      if (type === "inspect" && extra.background === true && result.refreshState) {
+        latestResult = result.refreshState;
+        displayFeedback(latestResult);
+      }
+    }
   } catch (error) {
     if (setting) feedback.textContent = type === "settings" ? "设置保存失败：" + error.message : error.message;
     else displayFeedback({message: error.message + "；若刚尝试签到，请先确认网页结果。"});
@@ -288,7 +306,8 @@ async function request(type, extra = {}, showProgress = true) {
 
 function refresh(background = false, showProgress = true) {
   const enabled = enabledSites();
-  return !background && enabled.length === 1 ? request("inspect", {siteId: enabled[0].id, background}, showProgress) : request("inspect-all", {background}, showProgress);
+  const passive = showProgress ? {} : {passive: true};
+  return !background && enabled.length === 1 ? request("inspect", {siteId: enabled[0].id, background, ...passive}, showProgress) : request("inspect-all", {background, ...passive}, showProgress);
 }
 
 element("run-all").addEventListener("click", () => request("run-all"));
