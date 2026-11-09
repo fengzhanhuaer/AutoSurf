@@ -43,6 +43,31 @@ test("M-Team uses only the signed own-profile endpoint and never exports its ses
   assert.equal(JSON.stringify(result).includes("session"), false);
 });
 
+test("M-Team preserves a newer browser session and does not call access denial a logout", async () => {
+  let runtime;
+  runtime = environment(async () => {
+    runtime.localStorage.setItem("auth", "new-browser-session");
+    runtime.localStorage.setItem("did", "new-browser-device");
+    return new Response(JSON.stringify({code: 0, data: {id: 42}}), {headers: {authorization: "old-response-session", did: "old-response-device"}});
+  }, {auth: "original-session"});
+  assert.equal((await api.read("https://kp.m-team.cc", "mteam", undefined, runtime)).status, "profile_only");
+  assert.equal(runtime.localStorage.getItem("auth"), "new-browser-session");
+  assert.equal(runtime.localStorage.getItem("did"), "new-browser-device");
+  for (const httpStatus of [401, 403]) {
+    const denied = environment(async () => new Response("", {status: httpStatus}), {auth: "session"});
+    assert.equal((await api.read("https://kp.m-team.cc", "mteam", undefined, denied)).status, httpStatus === 401 ? "login_required" : "blocked");
+  }
+});
+
+test("M-Team reuses the page client's statistics without sending a second authenticated request", async () => {
+  const runtime = environment(() => { throw new Error("No duplicate profile request"); }, {document: {documentElement: {getAttribute: () => JSON.stringify({time: Date.now(), data: {id: true, memberStatus: {name: "VIP"}, memberCount: {uploaded: 1024, downloaded: 512, bonus: "42"}}})}}});
+  const result = await api.read("https://kp.m-team.cc", "mteam", undefined, runtime);
+  assert.equal(result.status, "profile_only");
+  assert.equal(result.profile.bonus, "42");
+  assert.equal(result.diagnostic.source, "page-client");
+  assert.equal(runtime.localStorage.getItem("auth"), undefined);
+});
+
 test("API adapter rejects other origins and stops unauthenticated sessions", async () => {
   const runtime = environment(() => { throw new Error("Unexpected request"); });
   for (const origin of ["https://evil.test", "http://kp.m-team.cc", "https://kp.m-team.cc.evil.test"]) await assert.rejects(api.read(origin, "mteam", undefined, runtime));

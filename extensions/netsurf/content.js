@@ -1,6 +1,6 @@
 (() => {
   const version = chrome.runtime.getManifest().version;
-  const contentRevision = "2026-11-04-failure-recovery-v75";
+  const contentRevision = "2026-11-07-hxpt-home-v82";
   const suppressAuto = globalThis.NetSurfReadOnlyInjection === true;
   delete globalThis.NetSurfReadOnlyInjection;
   if (globalThis.NetSurfContentStarted === contentRevision) return;
@@ -75,18 +75,47 @@
         const status = dataOnly && snapshot.profile && ["profile_only", "ready", "already_done", "unknown"].includes(snapshot.status) ? "refreshed" : snapshot.status;
         return {...piggo.result(status, location.href), ...snapshot, status};
       }
-      if (globalThis.NetSurfRules?.get(location.origin)?.renderedCalendar && document.querySelector('#app, .user-strip')) {
+      if (globalThis.NetSurfRules?.get(location.origin)?.renderedHome || globalThis.NetSurfRules?.get(location.origin)?.renderedCalendar && document.querySelector('#app, .user-strip')) {
         // The SPA's HTML response is only a shell, even when its document status is 404.
         let inspection;
+        let revealAfter = 0;
         while (true) {
+          if (globalThis.NetSurfRules?.get(location.origin)?.renderedHome && Date.now() >= revealAfter && !document.querySelector('.usermenu__drop')) {
+            const trigger = document.querySelector('button.usermenu__trigger[aria-expanded="false"]');
+            if (trigger && piggo.visible(trigger)) { trigger.click(); revealAfter = Date.now() + 1000; }
+          }
           inspection = piggo.inspect(document, location.href);
           if (Object.values(piggo.profile(document)).some(Boolean) && (dataOnly || inspection.status !== "unknown") || ["blocked", "debugging", "login_required", "manual_required"].includes(inspection.status)) break;
           await wait(200, controller.signal);
         }
         const profile = piggo.profile(document);
+        if (!dataOnly && globalThis.NetSurfRules?.get(location.origin)?.renderedHome && ["ready", "already_done", "pending", "error"].includes(inspection.status) && Object.values(profile).some(Boolean)) {
+          // The official frontend can retain an old calendar and even show a
+          // failure after the server has recorded today's attendance. Check its
+          // read-only status before any submission and during confirmation.
+          const statusUrl = new URL("/api/v1/attendance", location.origin).href;
+          const day = new Date().toDateString();
+          const statusController = new AbortController();
+          const abort = () => statusController.abort();
+          controller.signal.addEventListener("abort", abort, {once: true});
+          if (controller.signal.aborted) abort();
+          const statusTimeout = setTimeout(abort, 4000);
+          try {
+            const response = await fetch(statusUrl, {credentials: "same-origin", cache: "no-store", redirect: "error", signal: statusController.signal});
+            const body = response.ok && response.url === statusUrl && /application\/json/i.test(response.headers.get("content-type") || "") ? await response.json() : null;
+            if (day !== new Date().toDateString() || body?.code !== 0 || typeof body.data?.checked_today !== "boolean") throw new Error("Invalid attendance status");
+            if (body.data.checked_today) inspection = {status: "already_done", message: "官网当日签到状态已确认完成"};
+            else if (inspection.status === "already_done") inspection = {status: "unknown", message: "官网当日签到状态与日历不一致，已停止提交"};
+          } catch {
+            inspection = {status: "unknown", message: "未能核验官网当日签到状态，已停止提交；账号资料仍可刷新"};
+          } finally {
+            clearTimeout(statusTimeout);
+            controller.signal.removeEventListener("abort", abort);
+          }
+        }
         const refreshed = dataOnly && Object.values(profile).some(Boolean) && !["blocked", "debugging", "login_required"].includes(inspection.status);
         const status = refreshed ? "refreshed" : inspection.status;
-        return {...piggo.result(status, location.href), profile, diagnostic: diagnose(document, {url: location.href, status: 200}, status)};
+        return {...piggo.result(status, location.href), ...(!refreshed && inspection.message ? {message: inspection.message} : {}), profile, diagnostic: diagnose(document, {url: location.href, status: 200}, status)};
       }
       const navigationStatus = Number(globalThis.performance?.getEntriesByType?.("navigation")?.[0]?.responseStatus);
       const currentUrl = new URL(location.href);
@@ -190,7 +219,9 @@
 
   async function publish() {
     const inspection = piggo.inspect(document, location.href);
-    const {status} = inspection;
+    // HXPT's rendered calendar is an entry hint. Only a fresh official status
+    // response may confirm it, including when the old DOM remains after an error.
+    const status = globalThis.NetSurfRules?.get(location.origin)?.renderedHome && ["success", "already_done"].includes(inspection.status) ? "pending" : inspection.status;
     const key = `${location.pathname}:${status}:${inspection.challengePending === true}`;
     if (key === latestKey) return;
     latestKey = key;
@@ -268,7 +299,7 @@
         submitted = false;
         return {...piggo.result("error", location.href), message: "签到提交许可已失效，未再次点击"};
       }
-      if ((globalThis.NetSurfRules?.get(location.origin)?.modalAttendance || globalThis.NetSurfRules?.get(location.origin)?.renderedCalendar) && (await refreshOnly() || piggo.action(document, location.href, true) !== control || continuation && location.pathname !== site.signinPath)) {
+      if ((globalThis.NetSurfRules?.get(location.origin)?.modalAttendance || globalThis.NetSurfRules?.get(location.origin)?.renderedCalendar || globalThis.NetSurfRules?.get(location.origin)?.renderedHome) && (await refreshOnly() || piggo.action(document, location.href, true) !== control || continuation && location.pathname !== site.signinPath)) {
         submitted = false;
         return {...piggo.result("error", location.href), message: "签到控件或设置已变化，未再次点击"};
       }
@@ -285,7 +316,8 @@
         return true;
       }
       const inspection = piggo.inspect(document, location.href);
-      respond({...piggo.result(inspection.status, location.href), ...(inspection.challengePending ? {challengePending: true} : {}), ...(inspection.message ? {message: inspection.message} : {}), contentVersion: version, contentRevision, pageReady: document.readyState !== "loading", hasProfile: Object.values(piggo.profile(document)).some(Boolean)});
+      const status = globalThis.NetSurfRules?.get(location.origin)?.renderedHome && ["success", "already_done"].includes(inspection.status) ? "pending" : inspection.status;
+      respond({...piggo.result(status, location.href), ...(inspection.challengePending ? {challengePending: true} : {}), ...(inspection.message ? {message: inspection.message} : {}), contentVersion: version, contentRevision, pageReady: document.readyState !== "loading", hasProfile: Object.values(piggo.profile(document)).some(Boolean), ...(globalThis.NetSurfRules?.get(location.origin)?.renderedHome ? {canReadRenderedHome: Boolean(document.querySelector('button.usermenu__trigger'))} : {})});
     } else if (message.type === "netsurf-signin") {
       signin(message.timeoutMs, message.continuation === true, message.operationId).then(respond).catch(() => respond(piggo.result("error", location.href)));
       return true;

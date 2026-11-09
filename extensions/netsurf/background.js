@@ -5,7 +5,7 @@ const sites = globalThis.NetSurfSites;
 const backup = globalThis.NetSurfBackup;
 const periodic = globalThis.NetSurfPeriodicBackground.create(chrome);
 const captchaOcr = globalThis.NetSurfCaptchaBackground.create(chrome, sites, readState);
-const contentRevision = "2026-11-04-failure-recovery-v75";
+const contentRevision = "2026-11-07-hxpt-home-v82";
 let actionQueue = Promise.resolve();
 let settingsQueue = Promise.resolve();
 let scheduleQueue = Promise.resolve();
@@ -474,14 +474,18 @@ async function rebuildSchedule() {
   for (const site of sites.catalog) {
     const configured = initial.sites[site.id];
     if (!configured.enabled) {
-      for (const type of ["daily", "retry", "verify"]) await chrome.alarms.clear(alarmName(type, site.id));
+      for (const type of ["daily", "retry", "refresh-retry", "verify"]) await chrome.alarms.clear(alarmName(type, site.id));
       continue;
     }
     const state = await readState(site.id);
-    await chrome.alarms.create(alarmName("daily", site.id), {when: sites.nextStart(configured, {...state, verifiedDay: configured.refreshOnly ? null : state.verifiedDay})});
-    for (const [type, field] of [["retry", "retryAt"], ["verify", "verifyAt"]]) {
+    const dailyState = configured.refreshOnly ? {...state, verifiedDay: null, schedule: state.refreshSchedule} : state;
+    await chrome.alarms.create(alarmName("daily", site.id), {when: sites.nextStart(configured, dailyState)});
+    for (const [type, field, source] of [["retry", "retryAt", "schedule"], ["refresh-retry", "retryAt", "refreshSchedule"], ["verify", "verifyAt", "schedule"]]) {
       const name = alarmName(type, site.id);
-      if (!state.lastResult?.confirmationFailed && (type !== "retry" || !unresolvedSubmission(state)) && state.schedule?.day === today() && (configured.refreshOnly || state.verifiedDay !== today()) && Number.isFinite(state.schedule[field])) await chrome.alarms.create(name, {when: Math.max(Date.now() + 1000, state.schedule[field])});
+      const record = state[source];
+      const eligible = type === "refresh-retry" ? true : configured.refreshOnly || state.verifiedDay !== today();
+      const blocked = type === "refresh-retry" ? false : state.lastResult?.confirmationFailed;
+      if (!blocked && (type !== "retry" || !unresolvedSubmission(state)) && record?.day === today() && eligible && Number.isFinite(record[field])) await chrome.alarms.create(name, {when: Math.max(Date.now() + 1000, record[field])});
       else await chrome.alarms.clear(name);
     }
   }
@@ -516,11 +520,11 @@ async function waitForPage(tab, deadline, siteId, requireReady = true) {
         await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - Date.now()))));
         continue;
       }
-      if ((NetSurfRules.get(sites.get(siteId).origin)?.refreshInNewPage || NetSurfRules.get(sites.get(siteId).origin)?.renderedCalendar) && current.status === "unknown" && !current.hasProfile) {
+      if ((NetSurfRules.get(sites.get(siteId).origin)?.refreshInNewPage || NetSurfRules.get(sites.get(siteId).origin)?.renderedCalendar) && current.status === "unknown" && !current.hasProfile && !(NetSurfRules.get(sites.get(siteId).origin)?.renderedHome && current.canReadRenderedHome)) {
         await new Promise(resolve => setTimeout(resolve, 100));
         continue;
       }
-      if (current.path && (!requireReady || current.pageReady !== false || NetSurfRules.get(sites.get(siteId).origin)?.signinBeforeLoadComplete && current.status === "ready" && current.hasProfile)) return;
+      if (current.path && (!requireReady || current.pageReady !== false || NetSurfRules.get(sites.get(siteId).origin)?.renderedHome && current.canReadRenderedHome || NetSurfRules.get(sites.get(siteId).origin)?.signinBeforeLoadComplete && current.status === "ready" && current.hasProfile)) return;
       await new Promise(resolve => setTimeout(resolve, 100));
     } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
   }
@@ -556,7 +560,8 @@ async function refreshSite(siteId, profileOnly = false) {
   let tab = await selectTab(siteId);
   const attendancePage = tab && new URL(tab.url).pathname === new URL(site.signinPath, site.origin).pathname && new URL(site.signinPath, site.origin).pathname !== new URL(site.homePath, site.origin).pathname;
   const recoverAttendance = unresolvedSubmission(state) && attendancePage && !state.sites[siteId].refreshOnly;
-  if ((profileOnly || state.sites[siteId].refreshOnly) && (attendancePage || NetSurfRules.get(site.origin)?.renderedCalendar) || ["zhuque.in", "kp.m-team.cc"].includes(siteId) || NetSurfRules.get(site.origin)?.refreshInNewPage && !recoverAttendance) tab = undefined;
+  const loadedHome = NetSurfRules.get(site.origin)?.renderedHome && tab?.status === "complete" && new URL(tab.url).pathname === "/" && !new URL(tab.url).search && !new URL(tab.url).hash;
+  if ((profileOnly || state.sites[siteId].refreshOnly) && (attendancePage || NetSurfRules.get(site.origin)?.renderedCalendar) || ["zhuque.in", "kp.m-team.cc"].includes(siteId) || NetSurfRules.get(site.origin)?.refreshInNewPage && !recoverAttendance && !loadedHome) tab = undefined;
   let created = false;
   try {
     if (!await chrome.permissions.contains({origins: sites.origins(sites.get(siteId))})) throw new Error("未授予站点访问权限，请在站点管理重新启用");
@@ -590,7 +595,9 @@ async function batchSignIn(siteId) {
   if (unresolvedSubmission(state)) return recordActivity("run", await refreshSite(siteId));
   await closeTaskTab();
   let tab = await selectTab(siteId);
-  if (NetSurfRules.get(sites.get(siteId).origin)?.refreshInNewPage) tab = undefined;
+  const rule = NetSurfRules.get(sites.get(siteId).origin);
+  const loadedHome = rule?.renderedHome && tab?.status === "complete" && new URL(tab.url).pathname === "/" && !new URL(tab.url).search && !new URL(tab.url).hash;
+  if (rule?.refreshInNewPage && !loadedHome) tab = undefined;
   let created = false;
   const deadline = Date.now() + state.sites[siteId].timeout * 1000;
   try {
@@ -651,28 +658,53 @@ async function confirmSubmission(tab, deadline, siteId, manual = false) {
   return confirmationFailure(tab, siteId, failureReason || (snapshot?.status === "error" ? snapshot.message || "核验请求失败" : undefined), snapshot);
 }
 
-async function dailyProfileRefresh(siteId) {
-  const state=await readState(siteId);
-  if (!state.autoEnabled || !state.sites[siteId].enabled || new Date()<sites.start(state.sites[siteId]) || state.refreshedDay===today() || state.refreshSchedule?.day===today()) return;
-  await chrome.storage.local.set({[sites.key("refreshSchedule",siteId)]:{day:today(),attemptedAt:Date.now()}});
-  return recordActivity("refresh",await refreshSite(siteId,true));
+async function scheduledRun(tab, retry, siteId = "piggo", refreshRequested = false) {
+  const initial = await readState(siteId);
+  const configured = initial.sites[siteId];
+  if (refreshRequested && !configured.refreshOnly) return;
+  if (refreshRequested || configured.refreshOnly) return scheduledRefresh(siteId, retry, refreshRequested);
+  const result = await scheduledSignin(tab, retry, siteId);
+  if (unresolvedSubmission(initial)) await scheduledRefresh(siteId, false, false);
+  return result;
 }
 
-async function scheduledRun(tab, retry, siteId = "piggo", refreshRequested = false) {
-  try { return await scheduledSignin(tab,retry,siteId,refreshRequested); }
-  finally { if (!refreshRequested) await dailyProfileRefresh(siteId); }
+async function scheduledRefresh(siteId, retry = false, allowWhenDisabled = false) {
+  const state = await readState(siteId);
+  const configured = state.sites[siteId];
+  if ((!allowWhenDisabled && !state.autoEnabled) || !configured.enabled || !allowWhenDisabled && new Date() < sites.start(configured) || state.refreshedDay === today() || !retry && state.refreshSchedule?.day === today() && (Number(state.refreshSchedule.attempts) > 0 || state.lastResult?.confirmationFailed)) return;
+  const previous = state.refreshSchedule?.day === today() ? state.refreshSchedule : {day: today(), attempts: 0, failures: 0};
+  const count = Number(previous.attempts) || 0;
+  if ((!retry && count > 0) || count >= configured.retryCount + 1) return;
+  const attempts = count + 1;
+  await chrome.storage.local.set({[sites.key("refreshSchedule", siteId)]: {...previous, day: today(), attempts, retryAt: null}});
+  let result;
+  try {
+    result = await refreshSite(siteId, true);
+  } catch (error) {
+    result = {status: "error", message: error.message || "资料刷新失败"};
+  }
+  const failed = result?.refreshState?.status === "error" || result?.status === "error";
+  const next = {...previous, day: today(), attempts, failures: (Number(previous.failures) || 0) + (failed ? 1 : 0), retryAt: null};
+  if (failed && count < configured.retryCount) next.retryAt = Date.now() + configured.retryInterval * 1000;
+  await chrome.storage.local.set({[sites.key("refreshSchedule", siteId)]: next});
+  await recordActivity("refresh", result);
+  await reschedule();
+  return result;
 }
+
+async function dailyProfileRefresh(siteId) { return scheduledRefresh(siteId); }
 
 async function scheduledSignin(tab, retry, siteId = "piggo", refreshRequested = false) {
   await closeTaskTab();
   const state = await readState(siteId);
   const configured = state.sites[siteId];
-  if (refreshRequested && !configured.refreshOnly) return;
-  if ((!state.autoEnabled && !refreshRequested) || !configured.enabled || (!configured.refreshOnly && state.verifiedDay === today()) || (!refreshRequested && new Date() < sites.start(configured))) return;
+  if (refreshRequested || configured.refreshOnly) return;
+  if (!state.autoEnabled || !configured.enabled || state.verifiedDay === today() || new Date() < sites.start(configured)) return;
   const count = state.schedule?.day === today() ? state.schedule.attempts : 0;
   if ((!retry && count > 0) || count >= configured.retryCount + 1) return;
   if (!configured.refreshOnly && unresolvedSubmission(state)) return;
-  await chrome.storage.local.set({[sites.key("schedule", siteId)]: {day: today(), attempts: count + 1}});
+  const previous = state.schedule?.day === today() ? state.schedule : {day: today(), attempts: 0, failures: 0};
+  await chrome.storage.local.set({[sites.key("schedule", siteId)]: {...previous, day: today(), attempts: count + 1, retryAt: null}});
   let result;
   let created = false;
   const deadline = Date.now() + configured.timeout * 1000;
@@ -687,10 +719,7 @@ async function scheduledSignin(tab, retry, siteId = "piggo", refreshRequested = 
       catch (error) { await chrome.tabs.remove(tab.id); throw error; }
       tab = await navigateTaskPage(tab, deadline, siteId, !(configured.refreshOnly || refreshRequested));
     }
-    if (configured.refreshOnly || refreshRequested) {
-      const current = await readState(siteId);
-      if (current.sites[siteId].enabled && (refreshRequested || current.autoEnabled) && Date.now() < deadline) result = await save(await freshPage(tab, (deadline - Date.now()) / 1000, created), tab.id, true, siteId);
-    } else result = await run(tab, true, deadline, siteId, created);
+    result = await run(tab, true, deadline, siteId, created);
     if (result?.status === "pending") result = await confirmSubmission(tab, deadline, siteId);
   } catch {
     result = unresolvedSubmission(await readState(siteId)) ? await confirmationFailure(tab, siteId, "核验中断，未取得成功证据") : await save(adapter(siteId, tab?.url).result("error", tab?.url || sites.get(siteId).origin), tab?.id, false, siteId);
@@ -699,7 +728,7 @@ async function scheduledSignin(tab, retry, siteId = "piggo", refreshRequested = 
   await recordActivity("auto", result);
   const latest = await readState(siteId);
   if (!latest.autoEnabled || !latest.sites[siteId].enabled) return;
-  const schedule = {day: today(), attempts: count + 1};
+  const schedule = {...previous, day: today(), attempts: count + 1, failures: (Number(previous.failures) || 0) + (result?.status === "error" ? 1 : 0), retryAt: null};
   if (result?.status === "error" && !unresolvedSubmission(latest) && count < configured.retryCount) schedule.retryAt = Date.now() + configured.retryInterval * 1000;
   await chrome.storage.local.set({[sites.key("schedule", siteId)]: schedule});
   await reschedule();
@@ -707,10 +736,14 @@ async function scheduledSignin(tab, retry, siteId = "piggo", refreshRequested = 
 
 async function alarmAction(alarm) {
   if (alarm.name.startsWith("netsurf-periodic:")) return periodic.alarm(alarm.name);
-  const matched = /^netsurf-(daily|retry|verify)(?::(.+))?$/.exec(alarm.name);
+  const matched = /^netsurf-(daily|retry|refresh-retry|verify)(?::(.+))?$/.exec(alarm.name);
   if (!matched) return;
   const siteId = matched[2] || "piggo";
   if (!sites.get(siteId)) return;
+  if (matched[1] === "refresh-retry") {
+    await scheduledRefresh(siteId, true);
+    return reschedule();
+  }
   if (matched[1] !== "verify") {
     await scheduledRun(null, matched[1] === "retry", siteId);
     return reschedule();

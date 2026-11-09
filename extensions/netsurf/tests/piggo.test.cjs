@@ -21,11 +21,21 @@ function documentFixture(text, controls = [], {password = false, captcha = false
   };
 }
 
+test("a Cloudflare origin gateway error is not a human verification request", () => {
+  const adapter = piggo.create("https://pt.btschool.club", "/index.php");
+  const page = documentFixture("Bad gateway Error code 502 You Browser Working Cloudflare Working pt.btschool.club Host Error Cloudflare Ray ID: fixture");
+  page.title = "btschool.club | 502: Bad gateway";
+  assert.equal(adapter.inspect(page, "https://pt.btschool.club/index.php").status, "error");
+  assert.match(adapter.inspect(page, "https://pt.btschool.club/index.php").message, /HTTP 502/);
+  page.title = "Just a moment...";
+  assert.equal(adapter.inspect(page, "https://pt.btschool.club/index.php").status, "blocked");
+});
+
 test("NetSurf keeps automatic host access scoped and asks for all-cookie access optionally", () => {
   assert.equal(manifest.name, "NetSurf");
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.action.default_popup, undefined);
-  assert.deepEqual(manifest.permissions, ["storage", "alarms", "scripting"]);
+  assert.deepEqual(manifest.permissions, ["storage", "alarms", "scripting", "offscreen"]);
   assert.deepEqual(manifest.optional_permissions, ["cookies"]);
   assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
   assert.deepEqual(manifest.host_permissions, ["https://piggo.me/*"]);
@@ -45,6 +55,107 @@ test("generic adapters use the site's attendance path and retain origin checks",
   assert.equal(piggo.create("https://example.test", "/", true).action(documentFixture("签到", [element("签到")]), "https://example.test/"), null);
 });
 
+test("BTSchool permits only its exact daily bonus action", () => {
+  const adapter = piggo.create("https://pt.btschool.club", "/attendance.php");
+  const current = "https://pt.btschool.club/index.php";
+  const target = `${current}?action=addbonus`;
+  assert.equal(adapter.safeAttendanceLink(target, current), true);
+  assert.equal(adapter.inspect(documentFixture("每日签到", [element("每日签到", {href: target})]), current).status, "ready");
+  assert.equal(adapter.classify({url: target, text: "签到成功"}), "success");
+  assert.equal(adapter.classify({url: current, text: "签到成功"}), "unknown");
+  for (const href of ["/index.php?action=delete", "/index.php?action=addbonus&other=1", "/index.php?action=addbonus#sign", "https://evil.test/index.php?action=addbonus"]) {
+    assert.equal(adapter.safeAttendanceLink(href, current), false);
+    assert.equal(adapter.classify({url: new URL(href, current).href, text: "签到成功"}), "unknown");
+  }
+});
+
+test("GGPT recognizes its G-value reward entry without broadening safe targets", () => {
+  const adapter = piggo.create("https://www.gamegamept.com", "/attendance.php");
+  const current = "https://www.gamegamept.com/index.php";
+  const entry = element("[签到得G值]");
+  assert.equal(adapter.action(documentFixture("", [entry]), current), entry);
+  assert.equal(adapter.inspect(documentFixture("", [entry]), current).status, "ready");
+  for (const href of ["https://evil.test/attendance.php", "/logout.php", "/attendance.php?submit=1", "/attendance.php#sign"]) {
+    assert.equal(adapter.action(documentFixture("", [element("[签到得G值]", {href})]), current), null);
+  }
+  assert.equal(adapter.classify({url: current, text: "签到成功"}), "unknown");
+  assert.equal(adapter.classify({url: "https://www.gamegamept.com/attendance.php", text: "今日已签到"}), "already_done");
+  assert.equal(piggo.create("https://example.test").action(documentFixture("", [entry]), "https://example.test/index.php"), null);
+});
+
+test("OurBits and PTHome recognize reward text only in the current account row", () => {
+  for (const host of ['ourbits.club','pthome.net']) {
+  const adapter = piggo.create(`https://${host}`, "/attendance.php");
+  const snapshot = documentFixture("");
+  let rowText = "欢迎回来 tester 魔力值 [使用]: 100 (签到已得50)";
+  snapshot.querySelectorAll = selector => selector === "tr" ? [{textContent: rowText}] : [];
+  assert.equal(adapter.inspect(snapshot, `https://${host}/index.php`).status, "already_done");
+  for (const text of ["公告：欢迎回来，昨天(签到已得50)", "欢迎回来 tester 签到得魔力", "历史记录 (签到已得50)"]) {
+    rowText = text;
+    assert.equal(adapter.inspect(snapshot, `https://${host}/index.php`).status, "unknown");
+  }
+  assert.equal(piggo.create("https://example.test").inspect(snapshot, "https://example.test/index.php").status, "unknown");
+  }
+});
+
+test("Dolby migrated hosts recognize the account welcome reward and keep whale coins separate", () => {
+  for (const host of ['www.uhddolby.com','uhddolby.com']) {
+    const adapter = piggo.create(`https://${host}`, '/attendance.php');
+    let text = '欢迎回来 fixture 鲸币 [使用]: 11,383,551.8 (签到已得300) 做种积分: 3,758,387.4 上传量: 34.199 TB 下载量: 50.160 TB';
+    const snapshot = {body:{textContent:''},querySelectorAll: selector => selector === 'tr' ? [{textContent:text}] : []};
+    assert.equal(adapter.inspect(snapshot, `https://${host}/index.php`).status, 'already_done');
+    const profile = adapter.profile(snapshot);
+    assert.equal(profile.bonus, '11,383,551.8');
+    assert.equal(profile.seedingPoints, '3,758,387.4');
+    text = '公告 历史签到已得300 鲸币 [使用]: 999999';
+    assert.equal(adapter.inspect(snapshot, `https://${host}/index.php`).status, 'unknown');
+    assert.equal(adapter.profile(snapshot).bonus, null);
+  }
+});
+
+test("only PigGo's known transient SafeLine page can wait for automatic verification", () => {
+  const text = "安全检测能力由 雷池 WAF 驱动";
+  let source = "https://challenge.rivers.chaitin.cn/challenge/v2/challenge.js";
+  const snapshot = documentFixture(text);
+  snapshot.querySelectorAll = selector => selector === 'script[src]' ? [{getAttribute: () => source}] : [];
+  const adapter = piggo.create();
+  assert.equal(adapter.inspect(snapshot, "https://piggo.me/attendance.php").challengePending, true);
+  for (const suffix of [" 无法连接人机验证服务", " 访问已被拦截", " 请求频率过高", " 客户端异常"]) {
+    snapshot.body.innerText = text + suffix;
+    assert.equal(adapter.inspect(snapshot, "https://piggo.me/attendance.php").challengePending, undefined);
+  }
+  snapshot.body.innerText = text;
+  for (const invalid of ["https://evil.test/challenge/v2/challenge.js", "https://challenge.rivers.chaitin.cn/challenge/v2/challenge.js?evil=1"]) {
+    source = invalid;
+    assert.equal(adapter.inspect(snapshot, "https://piggo.me/attendance.php").challengePending, undefined);
+  }
+  source = "https://challenge.rivers.chaitin.cn/challenge/v2/challenge.js";
+  assert.equal(piggo.create("https://ourbits.club").inspect(snapshot, "https://ourbits.club/attendance.php").challengePending, undefined);
+});
+
+test("HDArea recognizes completed text only in its current welcome row", () => {
+  const adapter = piggo.create("https://hdarea.club");
+  const snapshot = documentFixture("");
+  let rowText = "欢迎回来 fixture 魔力值 [使用]: 100 [已签到] (20)";
+  snapshot.querySelectorAll = selector => selector === "tr" ? [{textContent: rowText}] : [];
+  assert.equal(adapter.inspect(snapshot, "https://hdarea.club/index.php").status, "already_done");
+  for (const text of ["公告 欢迎回来 fixture [已签到]", "历史记录 [已签到]", "欢迎回来 fixture [签到]"]) {
+    rowText = text;
+    assert.equal(adapter.inspect(snapshot, "https://hdarea.club/index.php").status, "unknown");
+  }
+  rowText = "欢迎回来 fixture [已签到]";
+  assert.equal(piggo.create("https://example.test").inspect(snapshot, "https://example.test/index.php").status, "unknown");
+});
+
+test("PigGo recognizes its non-link reward and makeup-card text", () => {
+  const snapshot = documentFixture("");
+  let rowText = "欢迎回来 tester 魔力值 [使用]: 100 [签到已得10, 补签卡: 25]";
+  snapshot.querySelectorAll = selector => selector === "tr" ? [{textContent: rowText}] : [];
+  assert.equal(piggo.inspect(snapshot, "https://piggo.me/index.php").status, "already_done");
+  rowText = "公告 欢迎回来 tester [签到已得10, 补签卡: 25]";
+  assert.equal(piggo.inspect(snapshot, "https://piggo.me/index.php").status, "unknown");
+});
+
 test("52PT has scoped legacy entries and requires manual slider completion", () => {
   const adapter = piggo.create("https://52pt.site", "/bakatest.php", false, "52PT");
   const entry = element("签到赚魔力", {href: "/52bakatestdate0823.php"});
@@ -62,6 +173,82 @@ test("52PT has scoped legacy entries and requires manual slider completion", () 
   assert.equal(piggo.safeAttendanceLink("/52bakatestdate0823.php", "https://piggo.me/"), false);
 });
 
+test("JPopsuki reads Up/Down and only its own scoped user.php profile", () => {
+  const adapter = piggo.create("https://jpopsuki.eu", "/", true);
+  const text = "Up: 70.02 GB Down: 323.69 MB Ratio: 221.51 Bonus: 311055";
+  const block = {cloneNode: () => ({textContent: text, querySelectorAll: () => []})};
+  let href = "/user.php?id=42";
+  const link = {getAttribute: () => href};
+  const snapshot = {querySelectorAll: selector => selector === "ul.stats > li" ? [{textContent: "Class: Member"}, {textContent: "Class Stats"}]
+    : selector === "#userinfo a[href]" ? [link] : selector.includes("#userinfo") && !selector.includes("a[href]") ? [block] : []};
+  assert.equal(adapter.accountLink(snapshot), "https://jpopsuki.eu/user.php?id=42");
+  assert.deepEqual(adapter.profile(snapshot, true), {level: "Member", bonus: "311055", seedingPoints: null, uploaded: "70.02 GB", downloaded: "323.69 MB", ratio: "221.51"});
+  for (const target of ["https://evil.test/user.php?id=42", "/user.php?action=edit&id=42", "/user.php?id=42&other=1", "/userdetails.php?id=42"]) {
+    href = target;
+    assert.equal(adapter.accountLink(snapshot), null);
+  }
+  href = "/user.php?id=42";
+  assert.equal(piggo.create("https://example.test").accountLink(snapshot), null);
+});
+
+test("HhanClub reads only its own sidebar and exposes a scoped reveal control", () => {
+  const adapter = piggo.create("https://hhanclub.net");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "分享率： [分享率]: 20.376 憨豆： 1,065,011 上传： 1.187 TB 下载： 59.64 GB"})};
+  const ownLink = {getAttribute: () => "/userdetails.php?id=42"};
+  const snapshot = {querySelectorAll: selector => selector.includes("#user-info-panel") ? selector.endsWith("a[href]") ? [ownLink] : [block] : []};
+  assert.equal(adapter.accountLink(snapshot), "https://hhanclub.net/userdetails.php?id=42");
+  assert.equal(adapter.revealAttendanceSelector, "#user-avatar");
+  assert.deepEqual(adapter.profile(snapshot), {level: null, bonus: "1,065,011", seedingPoints: null, uploaded: "1.187 TB", downloaded: "59.64 GB", ratio: "20.376"});
+  const details = {...snapshot, querySelectorAll: selector => selector === 'img[title], img[alt]' ? [{getAttribute: name => name === "title" ? "Power User(憨声憨气)" : ""}] : snapshot.querySelectorAll(selector)};
+  assert.equal(adapter.profile(details, true).level, "Power User");
+  assert.equal(piggo.create("https://example.test").profile(snapshot).bonus, null);
+  assert.equal(piggo.create("https://example.test").revealAttendanceSelector, undefined);
+});
+
+test("HXPT reads statistics and its own account link from the redesigned profile bar", () => {
+  const adapter = piggo.create("https://www.hxpt.org");
+  const text = "fixture 火花 [火花商店] [我的火花]: 12,345.6 分享率: 2.000 上传量: 2.00 TB 下载量: 1.00 TB";
+  const block = {cloneNode: () => ({textContent: text, querySelectorAll: () => []})};
+  const ownLink = element("fixture", {href: "/userdetails.php?id=42"});
+  const snapshot = {querySelectorAll: selector => selector.includes(".cute-top-profile") ? selector.endsWith("a[href]") ? [ownLink] : [block] : []};
+  assert.equal(adapter.accountLink(snapshot), "https://www.hxpt.org/userdetails.php?id=42");
+  assert.deepEqual(adapter.profile(snapshot), {level: null, bonus: "12,345.6", seedingPoints: null, uploaded: "2.00 TB", downloaded: "1.00 TB", ratio: "2.000"});
+  assert.equal(piggo.create("https://example.test").profile(snapshot).bonus, null);
+});
+
+test("HDSky allows local image OCR but preserves explicit refresh-only and unknown CAPTCHA protection", () => {
+  const sites = require("../sites.js");
+  const adapter = piggo.create("https://hdsky.me");
+  assert.equal(sites.refreshOnlyRequired("hdsky.me"), false);
+  assert.equal(sites.settings({sites: {"hdsky.me": {enabled: true, refreshOnly: false}}}).sites["hdsky.me"].refreshOnly, false);
+  assert.equal(sites.settings({sites: {"hdsky.me": {enabled: true, refreshOnly: true}}}).sites["hdsky.me"].refreshOnly, true);
+  const inspection = adapter.inspect(documentFixture("签到(Show Up)", [], {captcha: true}), "https://hdsky.me/index.php");
+  assert.equal(inspection.status, "manual_required");
+  assert.equal(inspection.control, null);
+  assert.match(adapter.result("manual_required", "https://hdsky.me/").message, /图片验证码/);
+});
+
+test("CHDBits requires refresh-only even when stored settings request sign-in", () => {
+  const sites = require("../sites.js");
+  assert.equal(sites.refreshOnlyRequired("ptchdbits.co"), true);
+  assert.equal(sites.settings({sites: {"ptchdbits.co": {enabled: true, refreshOnly: false}}}).sites["ptchdbits.co"].refreshOnly, true);
+  assert.equal(sites.refreshOnlyRequired("piggo"), false);
+});
+
+test("XingYunGePT recognizes its scoped sign-in and star currency", () => {
+  const adapter = piggo.create("https://pt.xingyungept.org");
+  const entry = element("[签到得星焱]");
+  const snapshot = documentFixture("", [entry]);
+  assert.equal(adapter.inspect(snapshot, "https://pt.xingyungept.org/index.php").status, "ready");
+  assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "星焱 [使用]: 123,456.7 做种积分: 987.6"})};
+  const document = {querySelectorAll: selector => selector.includes("#info_block") ? [block] : []};
+  assert.equal(adapter.profile(document).bonus, "123,456.7");
+  assert.equal(adapter.profile(document).seedingPoints, "987.6");
+  const rows = [[{textContent: "星焱"}, {textContent: "456.7"}]].map(cells => ({querySelectorAll: () => cells}));
+  assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "456.7");
+});
+
 test("CrabPT recognizes its scoped crab currency entry", () => {
   const adapter = piggo.create("https://crabpt.vip");
   const snapshot = documentFixture("", [element("[签到得蟹币]")]);
@@ -73,6 +260,10 @@ test("HDDolby recognizes its scoped whale currency entry", () => {
   const adapter = piggo.create("https://hddolby.com");
   const snapshot = documentFixture("", [element("签到得鲸币")]);
   assert.equal(adapter.inspect(snapshot, "https://hddolby.com/index.php").status, "ready");
+  for (const host of ["uhddolby.com", "www.uhddolby.com"]) {
+    const origin = `https://${host}`;
+    assert.equal(piggo.create(origin).inspect(snapshot, `${origin}/index.php`).status, "ready");
+  }
   assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
 });
 
@@ -89,12 +280,38 @@ test("HDCity recognizes its exact English entry with a Material icon prefix", ()
 test("HDCity reads account data from its current Material homepage", () => {
   const adapter = piggo.create("https://hdcity.city", "/sign");
   const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "用户等级: Power User 魔力值: 123.4 上传量: 2.00 TiB 下载量: 1.00 TiB 分享率: 2.000"})};
-  const account = element("fixture", {href: "/userdetails.php?id=42"});
-  const document = {querySelectorAll: selector => selector.endsWith(", body") ? [block] : selector === "body a[href]" ? [account] : []};
+  const account = element("fixture", {href: "/userdetails"});
+  const document = {querySelectorAll: selector => selector.startsWith('#info_block,') ? [block] : selector === '.button-group > a[href="userdetails"], .button-group > a[href="/userdetails"]' ? [account] : []};
   assert.deepEqual(adapter.profile(document), {level: "Power User", bonus: "123.4", seedingPoints: null, uploaded: "2.00 TiB", downloaded: "1.00 TiB", ratio: "2.000"});
-  assert.equal(adapter.accountLink(document), "https://hdcity.city/userdetails.php?id=42");
+  assert.equal(adapter.accountLink(document), "https://hdcity.city/userdetails");
   assert.equal(adapter.reuseRecentPage, true);
   assert.equal(adapter.navigationRetries, 1);
+});
+
+test("MonikaDesign reads scoped transfer metrics and Nanyang reads magic beans", () => {
+  const metrics = {'.top-nav__stats-up': '1.25 TiB', '.top-nav__stats-down': '500.00 GiB', '.top-nav__stats-ratio': '2.560'};
+  const snapshot = {querySelectorAll: () => [], querySelector: selector => ({textContent: metrics[selector], getAttribute: () => ''})};
+  const profile = piggo.create('https://monikadesign.uk', '/', true).profile(snapshot);
+  assert.equal(profile.uploaded, '1.25 TiB');
+  assert.equal(profile.downloaded, '500.00 GiB');
+  assert.equal(profile.ratio, '2.560');
+  const header = {querySelectorAll: selector => selector === 'tr' ? [{textContent: '用户组：小小学士 魔力豆 (12,345.6)'}] : []};
+  assert.equal(piggo.create('https://nanyangpt.com', '/', true).profile(header).bonus, '12,345.6');
+  const compact = {querySelectorAll: () => [], querySelector: () => ({textContent: '魔力豆 (766,494.8)', getAttribute: () => ''})};
+  assert.equal(piggo.create('https://nanyangpt.com', '/', true).profile(compact).bonus, '766,494.8');
+  assert.equal(piggo.create('https://example.test', '/', true).profile(header).bonus, null);
+});
+
+test("AGSV recognizes its ice-crystal attendance and balance", () => {
+  const adapter = piggo.create("https://www.agsvpt.com", "/attendance.php");
+  const snapshot = documentFixture("", [element("[签到得冰晶]")]);
+  assert.equal(adapter.inspect(snapshot, "https://www.agsvpt.com/index.php").status, "ready");
+  assert.equal(adapter.inspect(documentFixture("", [element("[签到得冰晶]"), element("[签到得冰晶]")]), "https://www.agsvpt.com/index.php").status, "ready");
+  const submit = element("立即签到", {tag: "INPUT"});
+  assert.equal(adapter.action(documentFixture("", [element("[签到得冰晶]"), submit]), "https://www.agsvpt.com/attendance.php"), submit);
+  const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "冰晶 [使用]: 12,345.6"})};
+  assert.equal(adapter.profile({querySelectorAll: selector => selector.includes("#info_block") ? [block] : []}).bonus, "12,345.6");
+  assert.equal(piggo.create("https://example.test").inspect(snapshot, "https://example.test/index.php").status, "unknown");
 });
 
 test("site currency labels are restricted to their own sites", () => {
@@ -118,11 +335,24 @@ test("ZhiMengPT recognizes its electricity sign-in and maps electricity to magic
   assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "1,234.5");
 });
 
+test("PTSBao reuses its loaded homepage and requires scoped completion evidence", () => {
+  const adapter = piggo.create("https://ptsbao.club");
+  const home = "https://ptsbao.club/index.php";
+  assert.equal(adapter.reuseRecentPage, true);
+  assert.equal(piggo.create("https://www.ptsbao.club").reuseRecentPage, true);
+  assert.equal(adapter.inspect(documentFixture("", [element("[签到得魔力]")]), home).status, "ready");
+  assert.equal(adapter.inspect(documentFixture("", [element("[签到已得25]")]), home).status, "already_done");
+  assert.equal(adapter.inspect(documentFixture("聊天：我签到成功了"), home).status, "unknown");
+  assert.equal(adapter.safeAttendanceLink("https://evil.test/attendance.php", home), false);
+});
+
 test("UBits recognizes its U coin sign-in and current account row", () => {
   const adapter = piggo.create("https://ubits.club");
   const entry = element("[签到得U币]", {href: "/attendance.php"});
   const snapshot = documentFixture("", [entry]);
   assert.equal(adapter.inspect(snapshot, "https://ubits.club/index.php").status, "ready");
+  assert.equal(adapter.reuseRecentPage, true);
+  assert.equal(adapter.inspect(documentFixture("", [element("[签到已得25, 补签卡: 2]", {href: "/attendance.php"})]), "https://ubits.club/index.php").status, "already_done");
   assert.equal(piggo.create("https://audiences.me").inspect(snapshot, "https://audiences.me/index.php").status, "unknown");
   const block = {cloneNode: () => ({querySelectorAll: () => [], textContent: "U币 [使用]: 1,058,119.5 上传量: 10.742 TB 下载量: 231.34 GB 分享率: 47.547"})};
   const account = {getAttribute: () => "/userdetails.php?id=42"};
@@ -191,6 +421,33 @@ test("PTLGS recognizes its work-points sign-in and maps work points to magic", (
   assert.deepEqual(adapter.profile(profile), {level: null, bonus: "98,765.4", seedingPoints: "123.45", uploaded: "12.34 TB", downloaded: "56.78 GB", ratio: "∞"});
   const rows = [[{textContent: "工分"}, {textContent: "5,432.1"}]].map(cells => ({querySelectorAll: () => cells}));
   assert.equal(adapter.profile({querySelectorAll: selector => selector === "tr" ? rows : []}, true).bonus, "5,432.1");
+});
+
+test("52PT's current restricted entry stops before the retired status endpoint", () => {
+  const adapter = piggo.create("https://52pt.site", "/bakatest.php");
+  const entry = element("做种会员签到处", {href: "bakatestfinal.php"});
+  const snapshot = documentFixture("欢迎回来 fixture", [entry]);
+  snapshot.querySelectorAll = selector => selector === '#game[href="bakatestfinal.php"]' || selector.startsWith('a[href]') ? [entry] : [];
+  assert.equal(adapter.inspect(snapshot, "https://52pt.site/index.php").status, "manual_required");
+  assert.match(adapter.inspect(snapshot, "https://52pt.site/index.php").message, /限制脚本/);
+  assert.equal(adapter.inspect(snapshot, "https://evil.test/index.php").status, "unknown");
+  entry.innerText = "签到记录";
+  assert.equal(adapter.inspect(snapshot, "https://52pt.site/index.php").status, "unknown");
+});
+
+test("maintenance-only pages report the site outage without matching announcements", () => {
+  for (const origin of ["https://hdvideo.top", "https://ptsbao.club"]) {
+    const adapter = piggo.create(origin);
+    const snapshot = documentFixture("站点关闭维护中，请稍后再访问...谢谢", []);
+    const inspection = adapter.inspect(snapshot, origin + "/index.php");
+    assert.equal(inspection.status, "error");
+    assert.match(inspection.message, /维护/);
+    assert.equal(inspection.control, null);
+    assert.equal(adapter.inspect(snapshot, "https://evil.test/").status, "unknown");
+    const entry = element("签到", {href: "/attendance.php"});
+    const announcement = documentFixture("欢迎回来 fixture 公告：站点关闭维护中，请稍后再访问...谢谢", [entry]);
+    assert.equal(adapter.inspect(announcement, origin + "/index.php").status, "ready");
+  }
 });
 
 test("PterClub recognizes its inline cat-food sign-in and cleans the current rank", () => {
@@ -309,6 +566,45 @@ test("inspection finds a single safe entry and ignores hidden or unrelated contr
   const entry = element("[签到]");
   const document = documentFixture("欢迎", [element("删除账号"), element("签到", {href: "/logout.php"}), element("签到", {hidden: true}), entry]);
   assert.deepEqual(piggo.inspect(document, "https://piggo.me/"), {status: "ready", control: entry});
+});
+
+test("HXPT permits only its scoped hidden official entry during explicit sign-in", () => {
+  const adapter = piggo.create("https://www.hxpt.org");
+  const current = "https://www.hxpt.org/";
+  function entry(label = "签到得火花", options = {}, scoped = true) {
+    return {...element(label, options), textContent: label, getBoundingClientRect: () => ({width: 0, height: 0}), matches: selector => scoped && selector === ".cute-top-profile__dropdown a.cute-top-profile__attendance-link"};
+  }
+  const official = entry();
+  assert.equal(adapter.action(documentFixture("", [official]), current), null);
+  assert.equal(adapter.action(documentFixture("", [official]), current, true), official);
+  for (const rejected of [entry("签到"), entry("签到得火花", {}, false), entry("签到得火花", {hidden: true}), entry("签到得火花", {disabled: true}), entry("签到得火花", {href: "https://evil.test/attendance.php"}), entry("签到得火花", {href: "/logout.php"}), entry("签到得火花", {href: "/attendance.php?submit=1"}), entry("签到得火花", {href: "/attendance.php#sign"}), entry("签到得火花", {tag: "BUTTON"})]) {
+    assert.equal(adapter.action(documentFixture("", [rejected]), current, true), null);
+  }
+  assert.equal(adapter.action(documentFixture("", [official, entry()]), current, true), "ambiguous");
+  assert.equal(adapter.action(documentFixture("", [official]), "https://evil.test/", true), null);
+  assert.equal(piggo.action(documentFixture("", [official]), "https://piggo.me/", true), null);
+  assert.equal(adapter.inspect(documentFixture("", [official], {captcha: true}), current).status, "manual_required");
+});
+
+test("Haitang prefers only its current-day same-origin attendance form over calendar links", () => {
+  const adapter = piggo.create("https://www.htpt.cc");
+  const current = "https://www.htpt.cc/attendance.php";
+  const submit = element("立即签到（第 1 天，可获得 10 魔力值）", {tag: "INPUT"});
+  const calendar = {...element("签到", {tag: "BUTTON"}), form: null};
+  assert.equal(adapter.continueAttendanceForm, true);
+  assert.equal(adapter.action(documentFixture("", [element("签到"), submit, calendar, element("补签")]), current), submit);
+  for (const rejected of [element("立即签到（第 1 天，可获得 10 魔力值）", {tag: "INPUT", action: "https://evil.test/attendance.php"}), element("立即签到（第 1 天，可获得 10 魔力值）", {tag: "INPUT", action: "/attendance.php?action=retroactive"}), calendar]) {
+    assert.equal(adapter.action(documentFixture("", [rejected]), current), null);
+  }
+  assert.equal(adapter.action(documentFixture("", [submit]), "https://www.htpt.cc/index.php"), null);
+  assert.equal(adapter.inspect(documentFixture("", [submit], {captcha: true}), current).status, "manual_required");
+});
+
+test("unreachable human verification remains blocked with a precise reason", () => {
+  const result = piggo.inspect(documentFixture("无法连接人机验证服务", [element("签到")]), "https://piggo.me/attendance.php");
+  assert.equal(result.status, "blocked");
+  assert.equal(result.control, null);
+  assert.equal(result.message, "无法连接人机验证服务，请稍后在站点重试验证");
 });
 
 test("ambiguous entries require manual interaction", () => {

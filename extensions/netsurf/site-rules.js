@@ -225,7 +225,13 @@
       attendanceLabel: /^[\[【]?\s*签到得憨豆\s*[\]】]?$/
     },
     "hxpt.org": {
-      profileSelector: ".cute-top-profile",
+      renderedHome: true,
+      continueAttendanceForm: true,
+      profileSelector: ".cute-top-profile, .usermenu__drop",
+      profileLevelSelector: ".usermenu__name-row > .sticker",
+      profileStatSelector: ".usermenu__stats > .userstat",
+      ownAccountPath: "/my",
+      accountSelector: '.usermenu__links a[href="/my"], .cute-top-profile a[href]',
       hiddenAttendanceSelector: ".cute-top-profile__dropdown a.cute-top-profile__attendance-link",
       homePaths: ["/"],
       refreshInNewPage: true,

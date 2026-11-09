@@ -55,3 +55,20 @@ test("XHR observations are scoped to the own GET endpoint and discard expired se
   const other = harness("https://evil.test");
   assert.equal(other.context.fetch, other.originalFetch);
 });
+
+test("M-Team observes only the site's own profile response without exposing authentication", () => {
+  const runtime = harness("https://kp.m-team.cc");
+  const request = new runtime.FixtureRequest();
+  request.open("POST", "https://api.m-team.cc/api/member/profile");
+  request.send();
+  request.load({code: 0, data: {id: 42, username: "private-name", auth: "private-token", memberStatus: {name: "VIP"}, memberCount: {uploaded: 1024, downloaded: 512, bonus: 42}}});
+  const serialized = runtime.attributes.get("data-netsurf-mteam-profile");
+  assert.equal(JSON.parse(serialized).data.memberStatus.name, "VIP");
+  assert.equal(/private|username|auth/.test(serialized), false);
+  request.load({code: 401, data: {id: 42}});
+  assert.equal(runtime.attributes.size, 0);
+  request.open("POST", "https://evil.test/api/member/profile");
+  request.send();
+  request.load({code: 0, data: {id: 42}});
+  assert.equal(runtime.attributes.size, 0);
+});

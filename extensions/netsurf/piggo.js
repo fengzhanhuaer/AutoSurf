@@ -76,6 +76,8 @@
   function action(document, url, includeScopedHidden = false) {
     if (profileOnly) return null;
     if (!isPiggo(url)) return null;
+    const home = homeAttendance(document, url);
+    if (home) return home.control;
     const calendar = calendarAttendance(document, url);
     if (calendar) return calendar.control;
     if (rule?.modalAttendance) return modalAttendance(document, url)?.control || null;
@@ -108,6 +110,45 @@
       return "ambiguous";
     }
     return candidates[0] || null;
+  }
+
+  function homeAttendance(document, url) {
+    if (!rule?.renderedHome || !document.querySelector?.('.usermenu')) return null;
+    const target = new URL(url);
+    if (!isPiggo(url) || target.pathname !== "/" || target.search || target.hash || !/^\/users\/\d+$/.test(document.querySelector('.usermenu__name')?.getAttribute('href') || '')) return {status: "unknown", control: null};
+    const cards = document.querySelectorAll('aside.attendance-card');
+    if (cards.length !== 1 || !/签到得魔力/.test(cards[0].querySelector('.brand-panel__head > h2')?.textContent || '')) return {status: "unknown", control: null};
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const calendar = cards[0].querySelector('.attendance-calendar');
+    const days = calendar?.querySelectorAll('.attendance-calendar__day.is-today') || [];
+    if (calendar?.getAttribute('aria-label') !== `${now.getFullYear()}年${now.getMonth() + 1}月签到日历` || days.length !== 1 || days[0].querySelector('strong')?.textContent.trim() !== String(now.getDate())) return {status: "unknown", control: null};
+    const day = days[0];
+    const label = day.getAttribute('title') || '';
+    const done = day.classList.contains('is-done') && new RegExp(`^${date} · 已签 \\+[\\d,.]+$`).test(label);
+    const ready = day.classList.contains('is-missed') && label === `${date} · 未签到`;
+    if (!done && !ready) return {status: "unknown", control: null};
+    // This is the homepage's current-account summary, not individual calendar cells.
+    const summaries = Array.from(document.querySelectorAll('.mhome-strip__txt > i'))
+      .map(element => element.textContent.replace(/\s+/g, " ").trim());
+    const states = summaries.map(text => text.match(/^今日(未签|已签到?)\s*·\s*连续签到\s*\d+\s*天\s*·\s*累计\s*\d+\s*天$/)?.[1]).filter(Boolean);
+    if (summaries.length > 1 || summaries.length && (states.length !== 1 || states[0].startsWith("已签") !== done)) return {status: "unknown", control: null};
+    if (done) return {status: "already_done", control: null};
+    const failure = cards[0].querySelector('.attendance-msg')?.textContent.trim();
+    if (failure && /失败|错误|稍后|异常/.test(failure)) return {status: "error", control: null, message: `官网反馈：${failure.slice(0, 160)}`};
+    const controls = [...cards[0].querySelectorAll('.brand-panel__head button.brand-button'), ...document.querySelectorAll('.mhome-strip > button.mhome-strip__btn')].filter(button => {
+      if (button.textContent.trim() !== "立即签到" || button.hidden || button.closest('[hidden]')) return false;
+      if (button.matches('button.mhome-strip__btn')) return Boolean(button.closest('.mhome-strip'));
+      return button.closest('aside.attendance-card') === cards[0];
+    }).filter(button => {
+      // Disabled official controls still mean an outstanding request, never success.
+      return button.disabled ? !button.closest('[style*="display:none"], [style*="display: none"]') && (!document.defaultView || document.defaultView.getComputedStyle(button).display !== "none" && document.defaultView.getComputedStyle(button).visibility !== "hidden" && button.getBoundingClientRect().width > 0) : visible(button);
+    });
+    if (!controls.length) return {status: "unknown", control: null};
+    if (controls.filter(button => button.matches('.brand-button')).length > 1 || controls.filter(button => button.matches('.mhome-strip__btn')).length > 1) return {status: "ambiguous", control: null};
+    if (controls.some(button => button.disabled)) return {status: "pending", control: null};
+    // Mobile and desktop controls invoke the same current-day action; use one only.
+    return {status: "ready", control: controls[0]};
   }
 
   function calendarAttendance(document, url) {
@@ -179,6 +220,8 @@
       } catch { return false; }
     })) return {status, control: null, challengePending: true, message: "等待站点自动安全验证"};
     if (["blocked", "debugging", "login_required", "manual_required"].includes(status)) return {status, control: null};
+    const home = homeAttendance(document, url);
+    if (home) return home;
     const calendar = calendarAttendance(document, url);
     if (calendar) return calendar;
     if (status !== "unknown") return {status, control: null};
@@ -291,6 +334,15 @@
     for (const [field, pattern] of Object.entries(rule?.profilePatterns || {})) {
       const match = text.match(pattern)?.[1]?.trim();
       if (match && (!values[field] || rule?.profilePatternPriority)) values[field] = match;
+    }
+    if (rule?.profileLevelSelector) {
+      const levels = Array.from(document.querySelectorAll(rule.profileLevelSelector)).map(element => strictLevel(element.textContent)).filter(Boolean);
+      if (new Set(levels).size === 1) values.level = levels[0];
+    }
+    if (rule?.profileStatSelector) for (const element of document.querySelectorAll(rule.profileStatSelector)) {
+      const label = element.querySelector('span')?.textContent.trim();
+      const value = element.querySelector('strong')?.textContent.trim();
+      for (const [field, pattern] of Object.entries(aliases)) if (label && value && pattern.test(label)) values[field] = value;
     }
     if (!values.level && rule?.levelListSelector) {
       const ranks = Array.from(document.querySelectorAll(rule.levelListSelector)).map(entry => entry.textContent.match(/^\s*Class\s*:\s*([^\r\n:]{1,40})\s*$/i)?.[1]?.trim()).filter(Boolean);

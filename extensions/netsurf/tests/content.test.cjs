@@ -31,6 +31,10 @@ function harness(initial = "ready", builtInRefresh = false, {accountWait = false
     NetSurfSites: {resolve: () => null, refreshOnlyRequired: () => builtInRefresh},
     NetSurfPiggo: {
       ...piggo,
+      // These unit fixtures exercise the generic fetched-page flow; the rendered
+      // PigGo calendar and its persisted stage permits have browser coverage.
+      continueAttendanceForm: false,
+      nativeAttendanceNavigation: false,
       ...(headerProfile ? {profile: () => headerProfile, accountLink: () => "https://piggo.me/userdetails.php?id=42"} : {}),
       inspect: document => ({status: document === snapshot ? freshStatus : status}),
       action: () => ({click: () => { clicked += 1; }})

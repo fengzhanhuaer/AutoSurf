@@ -2,9 +2,71 @@ from pathlib import Path
 import json
 import shutil
 import asyncio
+import re
 
 import pytest
 from playwright.async_api import async_playwright, expect
+
+
+@pytest.mark.asyncio
+async def test_dashboard_daily_signin_and_refresh_summary(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    errors = []
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(channel="chromium", headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1440, "height": 900})
+            page.on("pageerror", lambda error: errors.append(str(error)))
+
+            async def serve_dashboard(route):
+                filename = route.request.url.rsplit("/", 1)[-1]
+                if filename not in {"dashboard.html", "dashboard.css", "catalog.js", "site-rules.js", "sites.js", "dashboard.js"}:
+                    await route.abort()
+                    return
+                await route.fulfill(path=str(source / filename))
+
+            await page.route("http://netsurf.test/**", serve_dashboard)
+            await page.add_init_script("""
+                window.chrome = {
+                    runtime: {getManifest: () => ({version: 'test'}), sendMessage: async () => ({results: {}})},
+                    storage: {
+                        onChanged: {addListener: callback => { window.storageChanged = callback; }},
+                        local: {get: async () => {
+                            const sites = window.NetSurfSites;
+                            const refreshIds = ['52pt.site','audiences.me','et8.org','haidan.cc','hdsky.me','jpopsuki.eu','kp.m-team.cc','monikadesign.uk','nanyangpt.com','open.cd','pt.0ff.cc','pt.eastgame.org','pt.keepfrds.com','ptchdbits.co','springsunday.net','tjupt.org','u2.dmhy.org','zhuque.in'];
+                            const signInIds = sites.catalog.filter(site => !refreshIds.includes(site.id)).slice(0, 41).map(site => site.id);
+                            const active = [...refreshIds, ...signInIds];
+                            const initial = {sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: active.includes(site.id), refreshOnly: refreshIds.includes(site.id)}]))};
+                            signInIds.forEach((siteId, index) => { initial[sites.key('lastResult', siteId)] = {status: index < 35 ? 'already_done' : 'error', verified: true, confirmedDay: sites.day()}; });
+                            refreshIds.forEach(siteId => { initial[sites.key('lastResult', siteId)] = {status: 'refreshed', verified: true, confirmedDay: sites.day(), profile: {bonus: '123'}}; });
+                            return initial;
+                        }}
+                    }
+                };
+            """)
+            await page.goto("http://netsurf.test/dashboard.html")
+            await expect(page.locator("#enabled-count")).to_have_text("59")
+            await expect(page.locator("#completed-count")).to_have_text("35 / 41")
+            await expect(page.locator("#refresh-count")).to_have_text("18 / 59")
+            assert await page.locator("#overview-body tr").count() == 59
+            assert await page.locator('#overview-body .status-badge', has_text="已完成").count() == 35
+            assert await page.locator('#overview-body .status-badge', has_text="已刷新").count() == 18
+            for width in [1440, 390]:
+                await page.set_viewport_size({"width": width, "height": 900})
+                bounds = await page.locator("#view-overview .panel-heading").evaluate("""heading => {
+                    const bounds = heading.getBoundingClientRect();
+                    const summary = heading.lastElementChild.getBoundingClientRect();
+                    return {left: summary.left, right: summary.right, panelRight: bounds.right, width: innerWidth, overflow: document.documentElement.scrollWidth > innerWidth};
+                }""")
+                assert bounds["left"] >= 0 and bounds["right"] <= bounds["panelRight"] <= bounds["width"]
+                assert not bounds["overflow"]
+                await page.screenshot(path=str(tmp_path / f"daily-summary-{width}.png"))
+            await page.evaluate("""() => storageChanged({'lastResult:audiences.me': {newValue: {status: 'error', verified: true, confirmedDay: NetSurfSites.day(), profile: {bonus: '123'}}}}, 'local')""")
+            await expect(page.locator("#refresh-count")).to_have_text("17 / 59")
+            await expect(page.locator("#completed-count")).to_have_text("35 / 41")
+            assert errors == []
+        finally:
+            await browser.close()
 
 
 @pytest.mark.asyncio
@@ -100,16 +162,31 @@ async def test_bulk_daily_filter_keepfrds_grade_and_failed_refresh_preserves_dat
 
 
 @pytest.mark.asyncio
-async def test_hdcity_recent_page_refresh_recognizes_completion_without_refetching_home(tmp_path):
+@pytest.mark.parametrize("empty_page,attendance_page", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("site_id", ["hdcity.city", "audiences.me"])
+async def test_recent_page_refresh_recognizes_status_without_refetching_home(tmp_path, empty_page, site_id, attendance_page):
     source = Path(__file__).resolve().parents[1]
     extension = tmp_path / "extension"
     shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
     manifest_path = extension / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["host_permissions"] = ["https://hdcity.city/*", "https://www.hdcity.city/*"]
+    manifest["host_permissions"] = [f"https://{site_id}/*", f"https://www.{site_id}/*"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     home_fetches = 0
+    attendance_requests = 0
     errors = []
+    attendance_path = "/attendance.php" if site_id == "audiences.me" else "/sign"
+    body = '''<div class="material-userbar">
+      用户等级: Power User 魔力值: 123.4 做种积分: 456.7
+      上传量: 2.00 TiB 下载量: 1.00 TiB 分享率: 2.000
+      <a href="/userdetails.php?id=42">fixture</a>
+    </div><a href="/sign"><i>assignment_turned_in</i>Checked in</a>'''
+    if site_id == "audiences.me":
+        body = '''<div class="site-userbar">
+          用户等级: Power User 上传量: 2.00 TiB 下载量: 1.00 TiB 分享率: 2.000
+          <span class="site-userbar__compact-metric--bonus">123.4</span>
+          <span class="site-userbar__compact-metric--seeding-bonus">456.7</span>
+        </div><a href="/attendance.php">签到</a>'''
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(
             str(tmp_path / "profile"), channel="chromium", headless=True,
@@ -117,49 +194,221 @@ async def test_hdcity_recent_page_refresh_recognizes_completion_without_refetchi
         )
         try:
             async def route_page(route):
-                nonlocal home_fetches
+                nonlocal home_fetches, attendance_requests
                 from urllib.parse import urlsplit
 
                 target = urlsplit(route.request.url)
+                if attendance_page and target.path == attendance_path:
+                    attendance_requests += 1
+                    await route.fulfill(status=200, content_type="text/html; charset=utf-8", body="人机验证：请在网页完成验证后签到")
+                    return
                 if target.path == "/index.php" and route.request.resource_type == "fetch":
                     home_fetches += 1
-                    await asyncio.sleep(6)
-                    await route.fulfill(status=504, content_type="text/plain", body="timeout")
+                    if empty_page:
+                        await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
+                    else:
+                        await asyncio.sleep(6)
+                        await route.fulfill(status=504, content_type="text/plain", body="timeout")
                     return
-                body = '''<div class="material-userbar">
-                  用户等级: Power User 魔力值: 123.4 做种积分: 456.7
-                  上传量: 2.00 TiB 下载量: 1.00 TiB 分享率: 2.000
-                  <a href="/userdetails.php?id=42">fixture</a>
-                </div><a href="/sign"><i>assignment_turned_in</i>Checked in</a>'''
                 await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f"<html><body>{body}</body></html>")
 
-            await context.route("https://hdcity.city/**", route_page)
+            await context.route(f"https://{site_id}/**", route_page)
             worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
-            await worker.evaluate("""async () => {
+            await worker.evaluate("""async ({siteId, refreshOnly}) => {
                 await chrome.storage.local.set({
                   autoEnabled: false,
-                  sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === 'hdcity.city'}])),
+                  sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === siteId, refreshOnly}])),
                   scheduleConfig: {timeout: 8}
                 });
                 await reschedule();
-            }""")
+            }""", {"siteId": site_id, "refreshOnly": attendance_page})
             site_page = await context.new_page()
-            await site_page.goto("https://hdcity.city/index.php")
+            site_url = f"https://{site_id}{attendance_path if attendance_page else '/index.php'}"
+            await site_page.goto(site_url)
+            if empty_page:
+                await site_page.evaluate("document.body.replaceChildren()")
             dashboard = await context.new_page()
             dashboard.on("pageerror", lambda error: errors.append(str(error)))
             await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html")
-            await expect(dashboard.locator('[id="row-hdcity.city"]')).to_be_visible()
-            await dashboard.locator('[id="refresh-hdcity.city"]').click()
-            await expect(dashboard.locator('[id="refresh-hdcity.city"]')).to_be_enabled(timeout=15000)
-            await expect(dashboard.locator('[id="site-status-hdcity.city"]')).to_have_text("已完成")
-            await expect(dashboard.locator('[id="profile-level-hdcity.city"]')).to_have_text("Power User")
-            await expect(dashboard.locator('[id="profile-bonus-hdcity.city"]')).to_have_text("123.4")
-            await expect(dashboard.locator('[id="profile-seedingPoints-hdcity.city"]')).to_have_text("456.7")
-            assert home_fetches == 0
+            await expect(dashboard.locator(f'[id="row-{site_id}"]')).to_be_visible()
+            initial_pages = len(context.pages)
+            refresh_button = dashboard.locator(f'[id="{"run" if attendance_page else "refresh"}-{site_id}"]')
+            await refresh_button.click()
+            await expect(refresh_button).to_be_enabled(timeout=15000)
+            expected_status = "已刷新" if attendance_page else "待签到" if site_id == "audiences.me" else "已完成"
+            await expect(dashboard.locator(f'[id="site-status-{site_id}"]')).to_have_text(expected_status)
+            await expect(dashboard.locator(f'[id="profile-level-{site_id}"]')).to_have_text("Power User")
+            await expect(dashboard.locator(f'[id="profile-bonus-{site_id}"]')).to_have_text("123.4")
+            await expect(dashboard.locator(f'[id="profile-seedingPoints-{site_id}"]')).to_have_text("456.7")
+            if not attendance_page:
+                assert home_fetches >= 1 if empty_page else home_fetches == 0
+            assert site_page.url == site_url
+            assert attendance_requests == int(attendance_page)
+            assert len(context.pages) == initial_pages
             assert errors == []
-            screenshot = tmp_path / "hdcity-recognized.png"
+            screenshot = tmp_path / f"{site_id}-recognized.png"
             await dashboard.screenshot(path=str(screenshot), full_page=False)
             print(f"QA screenshot: {screenshot}")
+        finally:
+            await context.close()
+
+
+@pytest.mark.asyncio
+# HXPT's rendered homepage and zero-legacy-PHP contract are covered in
+# test_hxpt_home_browser.py; this fixture covers the remaining PHP profile bars.
+@pytest.mark.parametrize("site_id", ["jpopsuki.eu", "hhanclub.net", "htpt.cc"])
+async def test_redesigned_profile_bars_refresh_without_signing_in(tmp_path, site_id):
+    source = Path(__file__).resolve().parents[1]
+    extension = tmp_path / "extension"
+    shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    manifest_path = extension / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["host_permissions"] = ["https://*/*"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    origin = {"hxpt.org": "https://www.hxpt.org", "jpopsuki.eu": "https://jpopsuki.eu", "hhanclub.net": "https://hhanclub.net", "htpt.cc": "https://www.htpt.cc"}[site_id]
+    account_path = "/user.php" if site_id == "jpopsuki.eu" else "/userdetails.php"
+    home = '<style>.cute-top-profile__dropdown {display:none}</style><div class="cute-top-profile"><div class="cute-top-profile__dropdown"><a href="/userdetails.php?id=42">fixture</a>火花 [火花商店] [我的火花]: 123.4 分享率: 2.000 上传量: 2.00 TB 下载量: 1.00 TB<a class="cute-top-profile__attendance-link" href="/attendance.php">签到得火花</a></div></div>'
+    details = '<table><tr><td>等级</td><td>Power User</td></tr></table>'
+    if site_id == "jpopsuki.eu":
+        home = '<div id="userinfo"><a href="/user.php?id=42">fixture</a><ul id="userinfo_stats"><li>Up: 2.00 TB</li>\n<li>Down: 1.00 TB</li>\n<li>Ratio: 2.000</li>\n<li>Bonus: 123.4</li></ul></div>'
+        details = '<ul class="stats"><li>Class: Member</li></ul>'
+    if site_id == "hhanclub.net":
+        home = '''<style>.hidden {display:none}</style><script>window.reveals=0</script>
+        <img id="user-avatar" alt="avatar" style="width:40px;height:40px" onclick="window.reveals++;document.getElementById('user-info-panel').classList.remove('hidden')">
+        <div id="user-info-panel" class="hidden"><a href="/userdetails.php?id=42">fixture</a>
+        <p><img alt="分享率">[分享率]: 2.000</p><p><img alt="憨豆">123.4</p>
+        <p><img alt="上传">2.00 TB</p><p><img alt="下载">1.00 TB</p>
+        <a href="/attendance.php">[签到得憨豆]</a></div>'''
+    if site_id == "htpt.cc":
+        home = '<div id="info_block"><a href="/userdetails.php?id=42">fixture</a>魔力值: 123.4 分享率: 2.000 上传量: 2.00 TB 下载量: 1.00 TB</div><a href="/attendance.php">签到</a>'
+    requests = []
+    stalled_home_requests = []
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(tmp_path / "profile"), channel="chromium", headless=True,
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        )
+        try:
+            async def route_page(route):
+                from urllib.parse import urlsplit
+
+                target = urlsplit(route.request.url)
+                requests.append((route.request.method, target.path))
+                if site_id != "jpopsuki.eu" and target.path == "/index.php" and not route.request.is_navigation_request():
+                    stalled_home_requests.append(target.path)
+                    await asyncio.sleep(6)
+                    try:
+                        await route.abort()
+                    except Exception:
+                        pass
+                    return
+                body = home + (details if target.path == account_path else "")
+                if target.path == "/attendance.php":
+                    body = "签到成功，本次签到获得 10 憨豆"
+                await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f"<html><body>{body}</body></html>")
+
+            await context.route(f"{origin}/**", route_page)
+            worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
+            await worker.evaluate("""async siteId => {
+                await chrome.storage.local.set({autoEnabled: false,
+                  sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === siteId}])),
+                  scheduleConfig: {timeout: 5}});
+                await reschedule();
+            }""", site_id)
+            page = await context.new_page()
+            await page.goto(f"{origin}/messages.php")
+            dashboard = await context.new_page()
+            await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html")
+            button = dashboard.locator(f'[id="{"run" if site_id == "jpopsuki.eu" else "refresh"}-{site_id}"]')
+            await expect(button).to_be_enabled(timeout=15000)
+            if site_id != "jpopsuki.eu":
+                failure = await worker.evaluate("async siteId => (await chrome.storage.local.get(`lastResult:${siteId}`))[`lastResult:${siteId}`]", site_id)
+                assert failure["status"] == "error"
+                assert failure["diagnostic"]["phase"] == "首页"
+                assert failure["diagnostic"]["path"] == "/index.php"
+            existing = set(context.pages)
+            stalled_before = len(stalled_home_requests)
+            await button.click()
+            await expect(button).to_be_enabled(timeout=15000)
+            refreshed = await worker.evaluate("async siteId => (await chrome.storage.local.get(`lastResult:${siteId}`))[`lastResult:${siteId}`]", site_id)
+            assert refreshed["profile"]["level"] == ("Member" if site_id == "jpopsuki.eu" else "Power User"), refreshed
+            await expect(dashboard.locator(f'[id="profile-level-{site_id}"]')).to_have_text("Member" if site_id == "jpopsuki.eu" else "Power User")
+            await expect(dashboard.locator(f'[id="profile-bonus-{site_id}"]')).to_have_text("123.4")
+            await expect(dashboard.locator(f'[id="profile-uploaded-{site_id}"]')).to_have_text("2.00 TB")
+            await expect(dashboard.locator(f'[id="profile-downloaded-{site_id}"]')).to_have_text("1.00 TB")
+            assert ("GET", account_path) in requests
+            assert all(method == "GET" and path != "/attendance.php" for method, path in requests)
+            assert len(stalled_home_requests) == stalled_before
+            assert set(context.pages) == existing
+            if site_id == "hhanclub.net":
+                assert await page.evaluate("window.reveals") == 0
+            if site_id != "jpopsuki.eu":
+                detail_requests_before = requests.count(("GET", account_path))
+                await dashboard.locator(f'[id="run-{site_id}"]').click()
+                await expect(dashboard.locator(f'[id="run-{site_id}"]')).to_be_enabled(timeout=15000)
+                result = await worker.evaluate("async siteId => (await chrome.storage.local.get(`lastResult:${siteId}`))[`lastResult:${siteId}`]", site_id)
+                assert result["status"] in ["success", "already_done"]
+                assert requests.count(("GET", "/attendance.php")) == 1
+                assert requests.count(("GET", account_path)) == detail_requests_before
+                assert len(stalled_home_requests) == stalled_before
+                assert page.url == f"{origin}/messages.php"
+                assert set(context.pages) == existing
+        finally:
+            await context.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site_id", ["htpt.cc", "agsvpt.com", "piggo"])
+async def test_four_site_root_home_reuse_without_duplicate_fetch(tmp_path, site_id):
+    source = Path(__file__).resolve().parents[1]
+    extension = tmp_path / "extension"
+    shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    manifest_path = extension / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["host_permissions"] = ["https://*/*"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    requests = []
+    errors = []
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(tmp_path / "profile"), channel="chromium", headless=True,
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        )
+        try:
+            worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
+            origin = await worker.evaluate("siteId => sites.get(siteId).origin", site_id)
+            profile = '<div id="info_block"><a href="/userdetails.php?id=42">fixture</a>用户等级: Power User 上传量: 2.00 TB 下载量: 1.00 TB 分享率: 2.000</div><div class="cute-top-profile"><a href="/userdetails.php?id=42">fixture</a>火花: 123.4 上传量: 2.00 TB 下载量: 1.00 TB 分享率: 2.000</div>'
+
+            async def route_page(route):
+                from urllib.parse import urlsplit
+
+                target = urlsplit(route.request.url)
+                requests.append((target.path, route.request.is_navigation_request()))
+                await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f"<html><body>{profile}<a href='/attendance.php'>签到</a></body></html>")
+
+            await context.route(f"{origin}/**", route_page)
+            await worker.evaluate("""async siteId => {
+                await chrome.storage.local.set({autoEnabled: false, sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === siteId}]))});
+                await reschedule();
+            }""", site_id)
+            page = await context.new_page()
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            for path in ["/", "/messages.php", "/?action=other", "/#other"]:
+                await page.goto(origin + path)
+                requests.clear()
+                result = await worker.evaluate("""async ({siteId, url}) => {
+                    const matching = await chrome.tabs.query({url: sites.origins(sites.get(siteId))});
+                    const tab = matching.find(current => current.url === url);
+                    if (!tab) throw new Error('Fixture tab not found: ' + url);
+                    await ensureContent(tab, siteId);
+                    return pageMessage(tab.id, {type: 'inspect', fresh: true, skipDetails: true, timeoutMs: 3000}, 4000);
+                }""", {"siteId": site_id, "url": origin + path})
+                assert result["status"] == "ready", result
+                assert result["profile"]["uploaded"] == "2.00 TB", result
+                assert requests.count(("/index.php", False)) == (0 if path == "/" else 1), requests
+                assert all(request_path != "/attendance.php" for request_path, navigation in requests)
+                assert page.url == origin + path
+            assert errors == []
         finally:
             await context.close()
 
@@ -301,7 +550,7 @@ async def test_weak_network_refresh_retries_and_keeps_old_data_while_waiting(tmp
             await expect(dashboard.locator('[id="row-audiences.me"]')).to_be_visible()
             await expect(dashboard.locator('[id="profile-level-audiences.me"]')).to_have_text("User")
             await dashboard.locator('[id="refresh-audiences.me"]').click()
-            await expect(dashboard.locator('[id="site-status-audiences.me"]')).to_have_text("刷新中")
+            await expect(dashboard.locator('[id="refresh-status-audiences.me"]')).to_have_text("刷新中")
             await expect(dashboard.locator('[id="profile-level-audiences.me"]')).to_have_text("User")
             screenshot = tmp_path / "weak-network-refreshing.png"
             await dashboard.screenshot(path=str(screenshot), full_page=True)
@@ -435,7 +684,7 @@ async def test_api_profile_background_refresh_keeps_stats_on_failure(tmp_path, s
             await expect(dashboard.locator("#inspect")).to_be_enabled(timeout=15000)
             existing = set(context.pages)
             await dashboard.locator(f'[id="run-{site_id}"]').click()
-            await expect(dashboard.locator(f'[id="site-status-{site_id}"]')).to_have_text("已刷新", timeout=15000)
+            await expect(dashboard.locator(f'[id="refresh-status-{site_id}"]')).to_have_text("已刷新", timeout=15000)
             await expect(dashboard.locator(f'[id="profile-level-{site_id}"]')).to_have_text("Lv. 6" if site_id == "rousi.pro" else "Power User")
             await expect(dashboard.locator(f'[id="profile-uploaded-{site_id}"]')).to_have_text("1.00 GiB")
             if site_id == "zhuque.in":
@@ -448,7 +697,7 @@ async def test_api_profile_background_refresh_keeps_stats_on_failure(tmp_path, s
                 assert zhuque_headers == ["fictional-csrf"]
             failed = True
             await dashboard.locator(f'[id="run-{site_id}"]').click()
-            await expect(dashboard.locator(f'[id="site-status-{site_id}"]')).to_have_text("检查失败", timeout=15000)
+            await expect(dashboard.locator(f'[id="refresh-status-{site_id}"]')).to_have_text("刷新失败", timeout=15000)
             await expect(dashboard.locator(f'[id="profile-level-{site_id}"]')).to_have_text("Lv. 6" if site_id == "rousi.pro" else "Power User")
             await expect(dashboard.locator(f'[id="profile-uploaded-{site_id}"]')).to_have_text("1.00 GiB")
             await worker.evaluate("async () => await actionQueue")
@@ -506,7 +755,7 @@ async def test_pttime_current_account_entry_during_background_inspection(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_52pt_builtin_refresh_profile_slider_and_old_content_upgrade(tmp_path):
+async def test_52pt_user_refresh_profile_slider_and_old_content_upgrade(tmp_path):
     source = Path(__file__).resolve().parents[1]
     extension = tmp_path / "extension"
     shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
@@ -540,13 +789,13 @@ async def test_52pt_builtin_refresh_profile_slider_and_old_content_upgrade(tmp_p
 
             await context.route("https://52pt.site/**", route_page)
             worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
-            await worker.evaluate("async () => await chrome.storage.local.set({autoEnabled: false, sites: {piggo: {enabled: false}, '52pt.site': {enabled: false, refreshOnly: false}}})")
+            await worker.evaluate("async () => await chrome.storage.local.set({autoEnabled: false, sites: {piggo: {enabled: false}, '52pt.site': {enabled: false, refreshOnly: true}}})")
             dashboard = await context.new_page()
             await dashboard.set_viewport_size({"width": 1648, "height": 1000})
             dashboard.on("pageerror", lambda error: errors.append(str(error)))
             await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html#sites")
             await expect(dashboard.locator('[id="refresh-only-52pt.site"]')).to_be_checked()
-            await expect(dashboard.locator('[id="refresh-only-52pt.site"]')).to_be_disabled()
+            await expect(dashboard.locator('[id="refresh-only-52pt.site"]')).to_be_enabled()
             existing = set(context.pages)
             await dashboard.locator('[id="enabled-52pt.site"]').check()
             await expect(dashboard.locator("#site-toggle-status")).to_have_text("52PT 已启用")
@@ -575,7 +824,7 @@ async def test_52pt_builtin_refresh_profile_slider_and_old_content_upgrade(tmp_p
             await expect(dashboard.locator('[id="site-status-52pt.site"]')).to_have_text("已刷新")
             assert page.url == "https://52pt.site/index.php"
             revision = await worker.evaluate("async () => { const [tab] = await chrome.tabs.query({url: 'https://52pt.site/*'}); return (await chrome.scripting.executeScript({target: {tabId: tab.id}, func: () => globalThis.NetSurfContentStarted}))[0].result; }")
-            assert revision == "2026-10-18-pterclub-v18"
+            assert revision == await worker.evaluate("() => contentRevision")
             await dashboard.locator('[id="open-52pt.site"]').click()
             await page.goto("https://52pt.site/bakatest.php")
             await expect(page.locator("#slider-container")).to_be_visible()
@@ -644,10 +893,13 @@ async def test_refresh_only_and_tjupt_current_rank_in_chromium(tmp_path, anchor_
             await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html#sites")
             await expect(dashboard.locator("#refresh-only")).to_have_count(0)
             await expect(dashboard.locator('[id^="refresh-only-"]')).to_have_count(64)
-            assert sorted(await dashboard.locator('[id^="refresh-only-"]:checked').evaluate_all("elements => elements.map(element => element.id)")) == ["refresh-only-52pt.site", "refresh-only-open.cd", "refresh-only-u2.dmhy.org"]
-            for site_id in ["52pt.site", "open.cd", "u2.dmhy.org"]:
+            assert sorted(await dashboard.locator('[id^="refresh-only-"]:checked').evaluate_all("elements => elements.map(element => element.id)")) == ["refresh-only-52pt.site", "refresh-only-ptchdbits.co", "refresh-only-u2.dmhy.org"]
+            for site_id in ["52pt.site", "u2.dmhy.org", "ptchdbits.co"]:
                 await expect(dashboard.locator(f'[id="refresh-only-{site_id}"]')).to_be_checked()
                 await expect(dashboard.locator(f'[id="refresh-only-{site_id}"]')).to_be_disabled()
+            await expect(dashboard.locator('[id="refresh-only-hdsky.me"]')).not_to_be_checked()
+            await expect(dashboard.locator('[id="refresh-only-hdsky.me"]')).to_be_enabled()
+            await expect(dashboard.locator('[id="refresh-only-pt.0ff.cc"]')).to_be_enabled()
             await dashboard.locator('[id="refresh-only-tjupt.org"]').check()
             await expect(dashboard.locator("#site-toggle-status")).to_have_text("TJUPT 仅刷新已开启")
             await dashboard.reload()
@@ -757,7 +1009,7 @@ async def test_dashboard_in_isolated_chromium(tmp_path, yesterday_signed):
             }""")
             assert columns_aligned
             assert attendance_requests == []
-            await expect(dashboard.locator(".nav-link")).to_have_count(2)
+            await expect(dashboard.locator(".nav-link")).to_have_count(3)
             await expect(dashboard.locator('[data-group="pt"]')).to_have_text("PT站点")
             await dashboard.locator('#secondary-nav a[href="#sites"]').click()
             await worker.evaluate("async () => { const [tab] = await chrome.tabs.query({url: 'https://piggo.me/*'}); await openDashboard(tab); await openDashboard(tab); }")
@@ -818,7 +1070,7 @@ async def test_dashboard_in_isolated_chromium(tmp_path, yesterday_signed):
             await expect(dashboard.locator("#backup-status")).to_have_text("未授权 Cookie 访问，操作已取消")
             await dashboard.screenshot(path=str(tmp_path / "settings.png"), full_page=True)
             await dashboard.locator('#secondary-nav a[href="#about"]').click()
-            await expect(dashboard.locator("#about-version")).to_have_text("0.4.41")
+            await expect(dashboard.locator("#about-version")).to_have_text(json.loads((extension / "manifest.json").read_text(encoding="utf-8"))["version"])
             await dashboard.locator('[data-group="pt"]').click()
             await expect(dashboard.locator("#completed-count")).to_have_text("1 / 1")
             await dashboard.screenshot(path=str(tmp_path / "dashboard-desktop.png"), full_page=True)
@@ -1084,10 +1336,10 @@ async def test_update_handler_refreshes_existing_dashboard_and_preserves_setting
             await worker.evaluate("async () => await chrome.storage.local.set({autoEnabled: false, sites: {piggo: {enabled: false}}, scheduleConfig: {startTime: '10:15', retryInterval: 90, retryCount: 2, timeout: 15}})")
             dashboard = await context.new_page()
             await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html#sites")
-            await expect(dashboard.locator("#version")).to_have_text("v0.4.41")
+            await expect(dashboard.locator("#version")).to_have_text("v" + json.loads((source / "manifest.json").read_text(encoding="utf-8"))["version"])
             await dashboard.evaluate("window.fixtureBeforeReload = true; document.getElementById('version').textContent = 'v0.2.0'")
             await worker.evaluate("async () => await installed({reason: 'update'})")
-            await expect(dashboard.locator("#version")).to_have_text("v0.4.41", timeout=15000)
+            await expect(dashboard.locator("#version")).to_have_text("v" + json.loads((source / "manifest.json").read_text(encoding="utf-8"))["version"], timeout=15000)
             assert await dashboard.evaluate("window.fixtureBeforeReload === undefined")
             assert dashboard.url.endswith("#sites")
             await expect(dashboard.locator("#start-time")).to_have_value("10:15")
@@ -1098,6 +1350,280 @@ async def test_update_handler_refreshes_existing_dashboard_and_preserves_setting
             await expect(dashboard.locator("#settings-status")).to_have_text("已保存：自动签到已开启")
             await dashboard.reload()
             await expect(dashboard.locator("#auto")).to_be_checked()
+        finally:
+            await context.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed,slow_home", [(True, False), (False, False), (True, True)])
+async def test_agsv_confirmation_terminal_and_readonly_recovery(tmp_path, confirmed, slow_home):
+    source = Path(__file__).resolve().parents[1]
+    extension = tmp_path / "extension"
+    shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    manifest_path = extension / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["host_permissions"] = ["https://*/*"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    submissions = []
+    recovered = False
+    errors = []
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(tmp_path / "profile"), channel="chromium", headless=True,
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        )
+        try:
+            async def route_page(route):
+                from urllib.parse import urlsplit
+
+                target = urlsplit(route.request.url)
+                if slow_home and submissions and target.path == "/index.php" and not route.request.is_navigation_request():
+                    await asyncio.sleep(6)
+                    try:
+                        await route.abort()
+                    except Exception:
+                        pass
+                    return
+                if target.path == "/attendance.php":
+                    submissions.append(target.path)
+                    body = '<p id="outcome">处理中</p>'
+                    if confirmed:
+                        body += '<script>setTimeout(() => document.getElementById("outcome").textContent = "签到成功", 1200)</script>'
+                else:
+                    label = "[签到已得100]" if recovered else "[签到得冰晶]"
+                    body = f'<div id="info_block"><a href="/userdetails.php?id=42">fixture</a> User 冰晶: 123 上传量: 1 TB 下载量: 1 GB</div><a href="/attendance.php">{label}</a>'
+                await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f'<html><meta charset="utf-8"><body>{body}</body></html>')
+
+            await context.route("https://**/*", route_page)
+            worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
+            await worker.evaluate("""async () => {
+                const configured = Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === 'agsvpt.com'}]));
+                await chrome.storage.local.set({autoEnabled: false, sites: configured, scheduleConfig: {timeout: 5}});
+                await syncScripts(await readState());
+            }""")
+            user_page = context.pages[0]
+            await user_page.goto("https://hdsky.me/")
+            await user_page.evaluate("window.userMarker = 'keep'")
+            site_page = await context.new_page()
+            await site_page.goto("https://www.agsvpt.com/")
+            dashboard = await context.new_page()
+            dashboard.on("pageerror", lambda error: errors.append(str(error)))
+            await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html#overview")
+            assert await dashboard.title() == "NetSurf · PT站点"
+            button = dashboard.locator('[id="run-agsvpt.com"]')
+            status = dashboard.locator('[id="site-status-agsvpt.com"]')
+            await expect(button).to_be_enabled(timeout=15000)
+            started = asyncio.get_running_loop().time()
+            await button.click()
+            await expect(button).to_be_enabled(timeout=15000)
+            await expect(status).to_have_text("已完成" if confirmed else "签到失败")
+            if slow_home:
+                assert asyncio.get_running_loop().time() - started < 4
+            stored = await worker.evaluate("async () => await readState('agsvpt.com')")
+            assert stored["lastResult"]["status"] in (["success", "already_done"] if confirmed else ["error"])
+            assert bool(stored.get("verifiedDay")) == confirmed
+            assert submissions == ["/attendance.php"]
+            assert await user_page.evaluate("window.userMarker") == "keep"
+            assert not site_page.is_closed()
+            evidence = source.parents[1] / "tmp" / "netsurf-qa"
+            evidence.mkdir(parents=True, exist_ok=True)
+            await dashboard.screenshot(path=str(evidence / f"agsv-confirmation-{confirmed}.png"), full_page=False)
+            if not confirmed:
+                assert stored["lastResult"]["confirmationFailed"] is True
+                assert stored["operation"]["awaitingConfirmation"] is True
+                await expect(status).to_have_attribute("title", re.compile("核验失败"))
+                await button.click()
+                await expect(button).to_be_enabled(timeout=15000)
+                await expect(status).to_have_text("签到失败")
+                assert submissions == ["/attendance.php"]
+                recovered = True
+                await dashboard.locator('[id="refresh-agsvpt.com"]').click()
+                await expect(button).to_be_enabled(timeout=15000)
+                await expect(status).to_have_text("已完成")
+                assert await worker.evaluate("async () => (await readState('agsvpt.com')).operation.awaitingConfirmation === false")
+                assert submissions == ["/attendance.php"]
+            assert errors == []
+        finally:
+            await context.unroute_all(behavior="wait")
+            await context.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("captcha,foreign_form", [(False, False), (True, False), (False, True)])
+async def test_haitang_two_stage_form_is_submitted_once(tmp_path, captcha, foreign_form):
+    source = Path(__file__).resolve().parents[1]
+    extension = tmp_path / "extension"
+    shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    manifest_path = extension / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["host_permissions"] = ["https://*/*"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    requests = []
+    errors = []
+    entered = asyncio.Event()
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(tmp_path / "profile"), channel="chromium", headless=True,
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        )
+        try:
+            async def route_page(route):
+                from urllib.parse import urlsplit
+
+                target = urlsplit(route.request.url)
+                requests.append((target.hostname, target.path, route.request.method))
+                if target.path == "/attendance.php" and route.request.method == "POST":
+                    body = '<p id="result">处理中</p><script>setTimeout(() => document.getElementById("result").textContent="签到成功，本次签到获得 10 魔力值", 800)</script>'
+                elif target.path == "/attendance.php":
+                    entered.set()
+                    action = "https://evil.test/attendance.php" if foreign_form else "/attendance.php"
+                    field = '<input name="imagestring" placeholder="验证码">' if captcha else ""
+                    body = f'<form method="post" action="{action}">{field}<input type="submit" value="立即签到（第 1 天，可获得 10 魔力值）"></form><button onclick="throw new Error(\'calendar must not click\')">补签</button>'
+                else:
+                    if target.path == "/index.php" and entered.is_set() and not route.request.is_navigation_request():
+                        await asyncio.sleep(6)
+                    body = '<div id="info_block"><a href="/userdetails.php?id=42">fixture</a>用户等级: User 魔力值: 123 上传量: 1 TB 下载量: 1 GB</div><a href="/attendance.php">签到</a>'
+                try:
+                    await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f'<html><meta charset="utf-8"><body>{body}</body></html>')
+                except Exception:
+                    pass
+
+            await context.route("https://**/*", route_page)
+            worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
+            await worker.evaluate("""async () => {
+                await chrome.storage.local.set({autoEnabled: false, sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === 'htpt.cc'}])), scheduleConfig: {timeout: 5}});
+                await reschedule();
+            }""")
+            original = await context.new_page()
+            await original.goto("https://www.htpt.cc/messages.php")
+            dashboard = await context.new_page()
+            dashboard.on("pageerror", lambda error: errors.append(str(error)))
+            await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html")
+            button = dashboard.locator('[id="run-htpt.cc"]')
+            await expect(button).to_be_enabled(timeout=15000)
+            requests.clear()
+            await button.click()
+            await expect(button).to_be_enabled(timeout=15000)
+            expected = "需处理" if captcha else "签到失败" if foreign_form else "已完成"
+            await expect(dashboard.locator('[id="site-status-htpt.cc"]')).to_have_text(expected)
+            assert requests.count(("www.htpt.cc", "/attendance.php", "GET")) == 1
+            assert requests.count(("www.htpt.cc", "/attendance.php", "POST")) == (0 if captcha or foreign_form else 1)
+            assert all(host != "evil.test" for host, path, method in requests)
+            stored = await worker.evaluate("async () => await readState('htpt.cc')")
+            if not captcha and not foreign_form:
+                assert stored["operation"]["phase"] == "submitted"
+                assert stored["operation"]["awaitingConfirmation"] is False
+            assert original.url == "https://www.htpt.cc/messages.php"
+            assert len(context.pages) == 3
+            assert errors == []
+        finally:
+            await context.unroute_all(behavior="wait")
+            await context.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verification_unavailable", [False, True])
+async def test_piggo_native_navigation_does_not_repeat_or_hide_verification(tmp_path, verification_unavailable):
+    extension = Path(__file__).resolve().parents[1]
+    requests = []
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(tmp_path / "profile"), channel="chromium", headless=True,
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        )
+        try:
+            async def route_page(route):
+                from urllib.parse import urlsplit
+
+                target = urlsplit(route.request.url)
+                requests.append((target.path, route.request.method))
+                if target.path == "/attendance.php":
+                    body = "无法连接人机验证服务" if verification_unavailable else "签到成功，本次签到获得 10 魔力"
+                else:
+                    body = '<div id="info_block"><a href="/userdetails.php?id=42">fixture</a>用户等级: User 魔力值: 123 上传量: 1 TB 下载量: 1 GB</div><a href="/attendance.php">[签到得魔力]</a><script>document.addEventListener("click", event => {if(event.target.closest("a[href*=attendance]")) {event.preventDefault(); throw new Error("must use native navigation");}})</script>'
+                await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=f'<html><meta charset="utf-8"><body>{body}</body></html>')
+
+            await context.route("https://piggo.me/**", route_page)
+            worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
+            await worker.evaluate("async () => { await chrome.storage.local.set({autoEnabled:false,scheduleConfig:{timeout:5}}); await reschedule(); }")
+            original = await context.new_page()
+            errors = []
+            original.on("pageerror", lambda error: errors.append(str(error)))
+            await original.goto("https://piggo.me/index.php")
+            dashboard = await context.new_page()
+            await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html")
+            button = dashboard.locator("#run")
+            await expect(button).to_be_enabled(timeout=15000)
+            await button.click()
+            await expect(button).to_be_enabled(timeout=15000)
+            await expect(dashboard.locator("#site-status")).to_have_text("需验证" if verification_unavailable else "已完成")
+            assert requests.count(("/attendance.php", "GET")) == 1
+            state = await worker.evaluate("async () => await readState()")
+            assert state["operation"]["phase"] == "submitted"
+            assert bool(state.get("verifiedDay")) is not verification_unavailable
+            if verification_unavailable:
+                await expect(dashboard.locator("#site-status")).to_have_attribute("title", re.compile("无法连接人机验证服务"))
+            await button.click()
+            await expect(button).to_be_enabled(timeout=15000)
+            assert requests.count(("/attendance.php", "GET")) == 1
+            assert original.url == "https://piggo.me/attendance.php"
+            assert errors == []
+        finally:
+            await context.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site_id", ["htpt.cc", "hxpt.org"])
+async def test_confirmed_completion_survives_closed_result_page_and_restart(tmp_path, site_id):
+    source = Path(__file__).resolve().parents[1]
+    extension = tmp_path / "extension"
+    shutil.copytree(source, extension, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    requests = []
+    errors = []
+    async with async_playwright() as playwright:
+        context = await playwright.chromium.launch_persistent_context(
+            str(tmp_path / "profile"), channel="chromium", headless=True,
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        )
+        try:
+            async def reject_request(route):
+                requests.append(route.request.url)
+                await route.abort()
+
+            await context.route("https://**/*", reject_request)
+            worker = context.service_workers[0] if context.service_workers else await context.wait_for_event("serviceworker", timeout=10000)
+            await worker.evaluate("""async siteId => {
+                const configured = Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: site.id === siteId}]));
+                await chrome.storage.local.set({autoEnabled: false, sites: configured});
+                await save({status: 'already_done', time: new Date().toISOString(), profile: {bonus: '123'}}, 999, true, siteId);
+            }""", site_id)
+            dashboard = await context.new_page()
+            dashboard.on("pageerror", lambda error: errors.append(str(error)))
+            await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html#overview")
+            status = dashboard.locator(f'[id="site-status-{site_id}"]')
+            await expect(status).to_have_text("已完成")
+            await expect(dashboard.locator("#completed-count")).to_have_text("1 / 1")
+            await worker.evaluate("""async siteId => {
+                await save({status: 'error', message: '页面通信失败', time: new Date().toISOString(), profile: {bonus: '999'}}, 999, false, siteId);
+            }""", site_id)
+            await expect(status).to_have_text("已完成")
+            await expect(status).to_have_attribute("title", re.compile("今日已签到.*页面通信失败"))
+            await expect(dashboard.locator("#completed-count")).to_have_text("1 / 1")
+            stored = await worker.evaluate("async siteId => await readState(siteId)", site_id)
+            assert stored["lastResult"]["profile"]["bonus"] == "123"
+            assert stored["lastResult"]["refreshError"] == "页面通信失败"
+            await worker.evaluate("""async siteId => {
+                const state = await readState(siteId);
+                await chrome.storage.local.set({[sites.key('lastResult', siteId)]: {...state.lastResult, status: 'error', verified: false}});
+                await installed({reason: 'update'});
+            }""", site_id)
+            await expect(status).to_have_text("已完成")
+            await expect(dashboard.locator("#completed-count")).to_have_text("1 / 1")
+            restored = await worker.evaluate("async siteId => await readState(siteId)", site_id)
+            assert restored["lastResult"]["verified"] is True
+            assert restored["lastResult"]["profileTime"] == stored["lastResult"]["profileTime"]
+            assert requests == []
+            assert errors == []
         finally:
             await context.close()
 
@@ -1173,10 +1699,12 @@ async def test_automatic_sites_finish_and_close_before_next_site(tmp_path, confi
                 }
                 await actionQueue;
             }""")
-            await expect(dashboard.locator("#version")).to_have_text("v0.4.41")
+            await expect(dashboard.locator("#version")).to_have_text(f'v{manifest["version"]}')
             stored = await worker.evaluate("async () => await chrome.storage.local.get(['lastResult', 'lastResult:audiences.me', 'verifiedDay'])")
             assert submissions == ["piggo.me"], stored
-            assert stored["lastResult"]["status"] in (["already_done", "success"] if confirmed else ["pending"])
+            assert stored["lastResult"]["status"] in (["already_done", "success"] if confirmed else ["error"])
+            if not confirmed:
+                assert stored["lastResult"]["confirmationFailed"] is True
             assert bool(stored.get("verifiedDay")) == confirmed
             assert stored["lastResult:audiences.me"]["status"] in ["blocked", "manual_required"]
             assert await worker.evaluate("async () => (await chrome.storage.session.get('taskTab')).taskTab === undefined")
@@ -1192,7 +1720,7 @@ async def test_automatic_sites_finish_and_close_before_next_site(tmp_path, confi
             assert not dashboard.is_closed()
             previous_time = stored["lastResult"]["time"]
             await dashboard.goto(f"chrome-extension://{worker.url.split('/')[2]}/dashboard.html#overview")
-            await expect(dashboard.locator("#site-status")).to_have_text("已完成" if confirmed else "待确认")
+            await expect(dashboard.locator("#site-status")).to_have_text("已完成" if confirmed else "签到失败")
             await dashboard.locator("#inspect").click()
             await expect(dashboard.locator("#inspect")).to_be_enabled(timeout=15000)
             refreshed = await worker.evaluate("async () => (await chrome.storage.local.get('lastResult')).lastResult")
@@ -1201,7 +1729,7 @@ async def test_automatic_sites_finish_and_close_before_next_site(tmp_path, confi
             assert submissions == ["piggo.me"]
             assert maximum_tasks == 1
             await worker.evaluate("async () => await installed({reason: 'update'})")
-            await expect(dashboard.locator("#site-status")).to_have_text("已完成" if confirmed else "待确认")
+            await expect(dashboard.locator("#site-status")).to_have_text("已完成" if confirmed else "签到失败")
             assert set(context.pages) == existing
         finally:
             await context.close()

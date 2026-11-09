@@ -7,9 +7,11 @@ let requested = false;
 let state = sites.settings();
 let latestResult = null;
 let results = {};
+let retryStats = {};
 let configDirty = false;
 let activeSiteId = null;
 let activeOperation = null;
+const overviewSort = {key: null, direction: 1};
 
 const routes = {
   overview: {group: "pt", label: "概览", description: "已启用站点的签到状态与账号数据。"},
@@ -72,8 +74,82 @@ function dailyCount(selected, matches, isToday = checkedToday) {
   return (selected.length === 0 || selected.some(site => isToday(results[site.id])) ? String(selected.filter(site => isToday(results[site.id]) && matches(results[site.id])).length) : "—") + " / " + selected.length;
 }
 
+function failureCount(siteId, field) {
+  const record = retryStats[siteId]?.[field];
+  return record?.day === sites.day() ? Math.max(0, Number(record.failures) || 0) : 0;
+}
+
+const overviewStatusLabels = {ready: "待签到", success: "已完成", already_done: "已完成", profile_only: "无需签到", blocked: "需验证", debugging: "需验证", login_required: "需登录", manual_required: "需处理", pending: "核验中", no_tab: "未打开", disabled: "已停用", error: "检查失败", unknown: "未识别", ambiguous: "需处理"};
+
+function overviewSigninText(site, result) {
+  const signin = result?.signinState || result;
+  if (refreshOnly(site)) return "无需签到";
+  if (completed(result)) return "已完成";
+  if (["success", "already_done"].includes(signin?.status)) return "待核验";
+  if (signin?.confirmationFailed) return "签到失败";
+  if (signin?.status === "refreshed") return "待检查";
+  return overviewStatusLabels[signin?.status] || "待检查";
+}
+
+function overviewRefreshText(site, result) {
+  const refresh = result?.refreshState || (result?.refreshError ? {status: "error", message: result.refreshError} : refreshed(result) && result?.verified ? {status: "success", time: result.profileTime || result.time, confirmedDay: result.confirmedDay} : result?.status === "error" && !result.confirmationFailed ? {status: "error", message: result.message} : null);
+  if (refresh?.status === "error") return "刷新失败";
+  if (refresh?.status === "success" && checkedToday({...refresh, verified: true})) return "已刷新";
+  return "待刷新";
+}
+
+function numericOverviewValue(value) {
+  const text = String(value ?? "").trim().replace(/,/g, "");
+  if (!text || text === "—") return null;
+  if (/^inf(?:inity)?$/i.test(text)) return Infinity;
+  const match = text.match(/^(-?[\d.]+)\s*(B|KB|MB|GB|TB|PB)?$/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number)) return null;
+  const unit = (match[2] || "").toUpperCase();
+  const powers = {B: 0, KB: 1, MB: 2, GB: 3, TB: 4, PB: 5};
+  return number * 1024 ** (powers[unit] || 0);
+}
+
+function overviewSortValue(site, result, key) {
+  const profile = sites.profile(result?.profile);
+  if (key === "name") return site.name;
+  if (key === "signin") return overviewSigninText(site, result);
+  if (key === "refresh") return overviewRefreshText(site, result);
+  if (key === "level") return profile.level || "";
+  if (["bonus", "seedingPoints", "uploaded", "downloaded", "ratio"].includes(key)) return numericOverviewValue(profile[key]);
+  if (key === "updated") {
+    const timestamp = Date.parse(result?.profileTime || result?.time || "");
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  return "";
+}
+
+function sortOverviewSites(selected) {
+  if (!overviewSort.key) return [...selected];
+  return [...selected].sort((left, right) => {
+    const a = overviewSortValue(left, results[left.id], overviewSort.key);
+    const b = overviewSortValue(right, results[right.id], overviewSort.key);
+    const aMissing = a === null || a === "";
+    const bMissing = b === null || b === "";
+    if (aMissing !== bMissing) return aMissing ? 1 : -1;
+    if (aMissing) return left.name.localeCompare(right.name, "zh-CN");
+    const comparison = typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b), "zh-CN", {numeric: true, sensitivity: "base"});
+    return (comparison || left.name.localeCompare(right.name, "zh-CN")) * overviewSort.direction;
+  });
+}
+
+function renderOverviewSortHeaders() {
+  for (const header of document.querySelectorAll(".overview-table th[data-sort-key]")) {
+    const button = header.querySelector(".table-sort");
+    const active = header.dataset.sortKey === overviewSort.key;
+    button.setAttribute("aria-sort", active ? overviewSort.direction === 1 ? "ascending" : "descending" : "none");
+    button.setAttribute("aria-label", `${button.firstChild?.textContent || "列"}，${active ? overviewSort.direction === 1 ? "升序" : "降序" : "点击排序"}`);
+  }
+}
+
 function renderOverview() {
-  const enabled = enabledSites();
+  const enabled = sortOverviewSites(enabledSites());
   element("overview-body").replaceChildren();
   element("overview-empty").hidden = enabled.length > 0;
   element("enabled-count").textContent = String(enabled.length);
@@ -82,7 +158,9 @@ function renderOverview() {
   element("completed-count").textContent = dailyCount(signInSites, completed);
   element("refresh-count").textContent = dailyCount(refreshSites, refreshed, result => result?.refreshState ? checkedToday({...result.refreshState, verified: true}) : checkedToday(result));
   element("refresh-summary").hidden = false;
-  const labels = {ready: "待签到", success: "已完成", already_done: "已完成", profile_only: "无需签到", blocked: "需验证", debugging: "需验证", login_required: "需登录", manual_required: "需处理", pending: "核验中", no_tab: "未打开", disabled: "已停用", error: "检查失败", unknown: "未识别", ambiguous: "需处理"};
+  element("signin-failure-count").textContent = String(signInSites.reduce((total, site) => total + failureCount(site.id, "signin"), 0));
+  element("refresh-failure-count").textContent = String(refreshSites.reduce((total, site) => total + failureCount(site.id, "refresh"), 0));
+  const labels = overviewStatusLabels;
   for (const site of enabled) {
     const result = results[site.id];
     const working = busy && activeSiteId === site.id;
@@ -129,6 +207,7 @@ function renderOverview() {
     row.append(actions);
     element("overview-body").append(row);
   }
+  renderOverviewSortHeaders();
   renderInspection();
 }
 
@@ -376,6 +455,12 @@ window.addEventListener("hashchange", navigate);
 navigate();
 showConfig();
 element("inspect").addEventListener("click", () => refresh(true));
+for (const header of document.querySelectorAll(".overview-table th[data-sort-key]")) header.querySelector(".table-sort").addEventListener("click", () => {
+  const key = header.dataset.sortKey;
+  overviewSort.direction = overviewSort.key === key ? overviewSort.direction * -1 : 1;
+  overviewSort.key = key;
+  renderOverview();
+});
 element("site-search").addEventListener("input", renderSites);
 element("auto").addEventListener("change", () => request("settings", {enabled: element("auto").checked}));
 element("site-form").addEventListener("input", () => { configDirty = true; });
@@ -389,12 +474,13 @@ element("site-form").addEventListener("submit", event => {
 element("backup").addEventListener("click", exportBackup);
 element("restore").addEventListener("click", chooseRestore);
 element("restore-file").addEventListener("change", importBackup);
-chrome.storage.local.get(["autoEnabled", "sites", "scheduleConfig", ...sites.catalog.map(site => sites.key("lastResult", site.id))]).then(initial => {
+chrome.storage.local.get(["autoEnabled", "sites", "scheduleConfig", ...sites.catalog.flatMap(site => [sites.key("lastResult", site.id), sites.key("schedule", site.id), sites.key("refreshSchedule", site.id)])]).then(initial => {
   if (requested) return;
   state = sites.settings(initial);
   for (const site of sites.catalog) {
     const saved = initial[sites.key("lastResult", site.id)];
     if (saved && !Object.hasOwn(results, site.id)) results[site.id] = saved;
+    retryStats[site.id] = {signin: initial[sites.key("schedule", site.id)], refresh: initial[sites.key("refreshSchedule", site.id)]};
   }
   showConfig();
   if (enabledSites().length) refresh(false, false);
@@ -417,6 +503,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
       results[site.id] = changed.newValue || null;
       if (changed.newValue) latestResult = changed.newValue;
     }
+    const schedule = changes[sites.key("schedule", site.id)];
+    const refreshSchedule = changes[sites.key("refreshSchedule", site.id)];
+    if (schedule || refreshSchedule) retryStats[site.id] = {...(retryStats[site.id] || {}), ...(schedule ? {signin: schedule.newValue} : {}), ...(refreshSchedule ? {refresh: refreshSchedule.newValue} : {})};
   }
   if (!busy) {
     showConfig();

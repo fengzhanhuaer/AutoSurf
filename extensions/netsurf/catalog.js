@@ -334,10 +334,10 @@
       "www.hxpt.org",
       "hxpt.org"
     ],
-    "signinPath": "/attendance.php",
+    "signinPath": "/",
     "profilePath": null,
     "mode": "signin",
-    "homePath": "/index.php"
+    "homePath": "/"
   },
   {
     "id": "jpopsuki.eu",

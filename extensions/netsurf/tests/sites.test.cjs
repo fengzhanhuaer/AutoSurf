@@ -5,6 +5,18 @@ const backup = require("../backup.js");
 
 globalThis.NetSurfSites = sites;
 
+test("Dolby moves to the new host without changing configuration and history keys", () => {
+  const site = sites.get("hddolby.com");
+  assert.equal(site.origin, "https://www.uhddolby.com");
+  assert.equal(site.domain, "uhddolby.com");
+  assert.deepEqual(sites.origins(site), ["https://www.uhddolby.com/*", "https://uhddolby.com/*"]);
+  for (const host of site.hosts) assert.equal(sites.resolve(`https://${host}/index.php`).id, "hddolby.com");
+  assert.equal(sites.resolve("https://www.hddolby.com/index.php"), undefined);
+  assert.equal(sites.resolve("https://www.uhddolby.com.attacker.test/"), undefined);
+  assert.equal(sites.key("operation", site.id), "operation:hddolby.com");
+  assert.equal(sites.settings({sites:{"hddolby.com":{enabled:true,refreshOnly:true}}}).sites[site.id].refreshOnly, true);
+});
+
 test("next-class requirements never become the current rank, including cached data", () => {
   const progress = "Next class: Veteran UserAccount age (days): 822.10 / 224 (Met) D";
   assert.equal(sites.level(progress), null);
@@ -71,8 +83,12 @@ test("numeric account fields drop detail links without rounding or mixing seedin
 });
 
 test("refresh-only defaults off, round-trips in backups and rejects malformed settings", () => {
-  assert.ok(Object.entries(sites.settings().sites).every(([siteId, site]) => site.refreshOnly === ["52pt.site", "open.cd", "u2.dmhy.org"].includes(siteId)));
-  assert.equal(sites.settings({sites: {"52pt.site": {refreshOnly: false}}}).sites["52pt.site"].refreshOnly, true);
+  assert.ok(Object.entries(sites.settings().sites).every(([siteId, site]) => site.refreshOnly === ["u2.dmhy.org", "ptchdbits.co"].includes(siteId)));
+  assert.equal(sites.settings({sites: {"hdsky.me": {refreshOnly: false}}}).sites["hdsky.me"].refreshOnly, false);
+  assert.equal(sites.settings({sites: {"pt.0ff.cc": {refreshOnly: false}}}).sites["pt.0ff.cc"].refreshOnly, false);
+  assert.equal(sites.settings({sites: {"pt.0ff.cc": {refreshOnly: true}}}).sites["pt.0ff.cc"].refreshOnly, true);
+  assert.equal(sites.settings({sites: {"52pt.site": {refreshOnly: false}}}).sites["52pt.site"].refreshOnly, false);
+  assert.equal(sites.settings({sites: {"52pt.site": {refreshOnly: true}}}).sites["52pt.site"].refreshOnly, true);
   const document = backup.create({sites: {piggo: {refreshOnly: true}}}, []);
   assert.equal(backup.validate(document).settings.sites.piggo.refreshOnly, true);
   assert.equal(backup.validate(document).settings.sites["audiences.me"].refreshOnly, false);

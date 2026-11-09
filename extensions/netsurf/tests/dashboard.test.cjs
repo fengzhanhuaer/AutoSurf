@@ -37,12 +37,67 @@ function harness(reply = async () => ({status: "ready", message: "可以尝试�
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "dashboard.js"), "utf8"), context);
   return {
     elements, requests,
+    evaluate: source => vm.runInContext(source, context),
     click: id => elements.get(id).handlers.click(),
     timeout: () => [...timers.values()].forEach(callback => callback()),
     closed: () => closed,
+    changes: updates => changed(Object.fromEntries(Object.entries(updates).map(([key, newValue]) => [key, {newValue}])), "local"),
     changed: result => changed({lastResult: {newValue: result}}, "local")
   };
 }
+
+test("overview sorting compares numeric values, puts missing values last and toggles direction", () => {
+  const runtime = harness();
+  const order = runtime.evaluate(`(() => {
+    results = {
+      piggo: {profile: {bonus: "2 GB"}},
+      "audiences.me": {profile: {bonus: "12 MB"}},
+      "52pt.site": {profile: {bonus: "—"}}
+    };
+    const selected = [sites.get("piggo"), sites.get("audiences.me"), sites.get("52pt.site")];
+    overviewSort.key = "bonus"; overviewSort.direction = 1;
+    const ascending = sortOverviewSites(selected).map(site => site.id);
+    overviewSort.direction = -1;
+    const descending = sortOverviewSites(selected).map(site => site.id);
+    return {ascending: ascending.join(","), descending: descending.join(",")};
+  })()`);
+  assert.equal(order.ascending, "piggo,audiences.me,52pt.site");
+  assert.equal(order.descending, "audiences.me,piggo,52pt.site");
+});
+
+test("overview sorting supports status and update time columns", () => {
+  const runtime = harness();
+  const order = runtime.evaluate(`(() => {
+    results = {
+      piggo: {status: "error", time: "2026-11-08T01:00:00Z"},
+      "audiences.me": {status: "already_done", verified: true, time: "2026-11-08T02:00:00Z"},
+      "52pt.site": {status: "ready", time: "2026-11-07T01:00:00Z"}
+    };
+    const selected = [sites.get("piggo"), sites.get("audiences.me"), sites.get("52pt.site")];
+    overviewSort.key = "signin"; overviewSort.direction = 1;
+    const status = sortOverviewSites(selected).map(site => site.id);
+    overviewSort.key = "updated"; overviewSort.direction = -1;
+    const updated = sortOverviewSites(selected).map(site => site.id);
+    return {status: status.join(","), updated: updated.join(",")};
+  })()`);
+  assert.equal(order.status, "52pt.site,piggo,audiences.me");
+  assert.equal(order.updated, "audiences.me,piggo,52pt.site");
+});
+
+test("sign-in and refresh retry failures are displayed independently", async () => {
+  const sites = require("../sites.js");
+  const day = sites.day();
+  const runtime = harness(() => new Promise(() => {}), {
+    schedule: {day, attempts: 4, failures: 3},
+    refreshSchedule: {day, attempts: 2, failures: 1}
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.elements.get("signin-failure-count").textContent, "3");
+  assert.equal(runtime.elements.get("refresh-failure-count").textContent, "1");
+  runtime.changes({schedule: {day, attempts: 4, failures: 4}, refreshSchedule: {day, attempts: 3, failures: 2}});
+  assert.equal(runtime.elements.get("signin-failure-count").textContent, "4");
+  assert.equal(runtime.elements.get("refresh-failure-count").textContent, "2");
+});
 
 test("clicking shows progress immediately and cannot be overwritten by initial storage", async () => {
   const runtime = harness(() => new Promise(() => {}));
@@ -60,13 +115,14 @@ test("refresh-only defaults off, persists through settings and renames the row a
   const runtime = harness(async message => message.type === "site-settings" ? {saved: true, config: {enabled: true, refreshOnly: message.config.refreshOnly}} : {status: "ready", message: "可以尝试签到"});
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runtime.elements.has("refresh-only"), false);
-  for (const row of runtime.elements.get("site-list").children) assert.equal(runtime.elements.get("refresh-only-" + row.dataset.siteId).checked, ["52pt.site", "open.cd", "u2.dmhy.org"].includes(row.dataset.siteId));
-  assert.equal(runtime.elements.get("refresh-only-52pt.site").disabled, true);
+  for (const row of runtime.elements.get("site-list").children) assert.equal(runtime.elements.get("refresh-only-" + row.dataset.siteId).checked, ["u2.dmhy.org", "ptchdbits.co"].includes(row.dataset.siteId));
+  assert.equal(runtime.elements.get("refresh-only-hdsky.me").disabled, false);
+  assert.equal(runtime.elements.get("refresh-only-52pt.site").disabled, false);
   runtime.elements.get("refresh-only-piggo").checked = true;
   await runtime.elements.get("refresh-only-piggo").handlers.change();
   assert.equal(runtime.elements.get("refresh-only-piggo").checked, true);
   assert.equal(runtime.elements.get("refresh-only-audiences.me").checked, false);
-  assert.equal(runtime.elements.get("refresh-only-52pt.site").disabled, true);
+  assert.equal(runtime.elements.get("refresh-only-52pt.site").disabled, false);
   assert.equal(runtime.elements.get("run").textContent, "刷新");
   assert.match(runtime.elements.get("site-toggle-status").textContent, /PigGo 仅刷新已开启/);
   assert.deepEqual(JSON.parse(JSON.stringify(runtime.requests.at(-1))), {type: "site-settings", siteId: "piggo", config: {refreshOnly: true}});
@@ -98,14 +154,85 @@ test("failed refresh keeps the last successful profile update time visible", () 
   assert.equal(runtime.elements.get("checked").textContent, new Date(profileTime).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}));
 });
 
+test("only running confirmation is pending and a terminal confirmation failure is explicit", () => {
+  const runtime = harness(() => new Promise(() => {}));
+  runtime.changed({status: "pending", message: "正在核验"});
+  assert.equal(runtime.elements.get("site-status").textContent, "核验中");
+  runtime.changed({status: "error", confirmationFailed: true, message: "签到核验失败：核验超时"});
+  assert.equal(runtime.elements.get("site-status").textContent, "签到失败");
+  assert.equal(runtime.elements.get("site-status").attributes.title, "签到核验失败：核验超时");
+  assert.equal(runtime.elements.get("site-status").dataset.tone, "warning");
+  assert.doesNotMatch(runtime.elements.get("completed-count").textContent, /^1 /);
+});
+
 test("refresh-only shows today's refresh without claiming a sign-in and keeps old fields on failure", async () => {
   const runtime = harness(() => new Promise(() => {}), {sites: {piggo: {enabled: true, refreshOnly: true}}});
   await new Promise(resolve => setImmediate(resolve));
   runtime.changed({status: "refreshed", verified: true, time: new Date().toISOString(), profile: {level: "User", bonus: "123"}});
-  assert.equal(runtime.elements.get("site-status").textContent, "已刷新");
-  assert.equal(runtime.elements.get("completed-count").textContent, "0 / 1");
+  assert.equal(runtime.elements.get("refresh-status").textContent, "已刷新");
+  assert.equal(runtime.elements.get("completed-count").textContent, "0 / 0");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "1 / 1");
   runtime.changed({status: "ready", verified: true, time: "2000-01-01T00:00:00.000Z", profile: {level: "User", bonus: "123"}});
-  assert.equal(runtime.elements.get("site-status").textContent, "待刷新");
+  assert.equal(runtime.elements.get("refresh-status").textContent, "待刷新");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "— / 1");
+});
+
+test("59 enabled sites split 35 confirmed sign-ins from 18 refresh-only results", async () => {
+  const sites = require("../sites.js");
+  const refreshIds = ["52pt.site", "audiences.me", "et8.org", "haidan.cc", "hdsky.me", "jpopsuki.eu", "kp.m-team.cc", "monikadesign.uk", "nanyangpt.com", "open.cd", "pt.0ff.cc", "pt.eastgame.org", "pt.keepfrds.com", "ptchdbits.co", "springsunday.net", "tjupt.org", "u2.dmhy.org", "zhuque.in"];
+  const signInIds = sites.catalog.filter(site => !refreshIds.includes(site.id)).slice(0, 41).map(site => site.id);
+  const active = [...refreshIds, ...signInIds];
+  const initial = {sites: Object.fromEntries(sites.catalog.map(site => [site.id, {enabled: active.includes(site.id), refreshOnly: refreshIds.includes(site.id)}]))};
+  for (const [index, siteId] of signInIds.entries()) initial[sites.key("lastResult", siteId)] = {status: index < 35 ? "already_done" : "error", verified: true, confirmedDay: sites.day()};
+  for (const siteId of refreshIds) initial[sites.key("lastResult", siteId)] = {status: "refreshed", verified: true, confirmedDay: sites.day(), profile: {bonus: "123"}};
+  const runtime = harness(() => new Promise(() => {}), initial);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.elements.get("enabled-count").textContent, "59");
+  assert.equal(runtime.elements.get("completed-count").textContent, "35 / 41");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "18 / 59");
+  assert.equal(runtime.elements.get("refresh-summary").hidden, false);
+  runtime.changes({[sites.key("lastResult", signInIds[0])]: {status: "refreshed", verified: true, confirmedDay: sites.day(), profile: {bonus: "123"}}});
+  assert.equal(runtime.elements.get("completed-count").textContent, "34 / 41");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "19 / 59");
+});
+
+test("profile-mode sites use refresh totals even without the refresh-only setting", async () => {
+  const runtime = harness(() => new Promise(() => {}), {sites: {piggo: {enabled: false}, "jpopsuki.eu": {enabled: true}}, "lastResult:jpopsuki.eu": {status: "profile_only", verified: true, time: new Date().toISOString(), profile: {ratio: "221.51"}}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.elements.get("completed-count").textContent, "0 / 0");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "1 / 1");
+  assert.equal(runtime.elements.get("refresh-status-jpopsuki.eu").textContent, "已刷新");
+});
+
+test("refresh totals reject failed, stale, unverified and missing account data", async () => {
+  const runtime = harness(() => new Promise(() => {}), {sites: {piggo: {enabled: true, refreshOnly: true}}});
+  await new Promise(resolve => setImmediate(resolve));
+  const current = {status: "refreshed", verified: true, time: new Date().toISOString(), profile: {bonus: "123"}};
+  for (const invalid of [{status: "error"}, {status: "blocked"}, {status: "pending"}, {verified: false}, {time: "2000-01-01T00:00:00.000Z"}, {profile: {}}, {profile: {level: "Next class: Veteran User"}}]) {
+    runtime.changed({...current, ...invalid});
+    assert.doesNotMatch(runtime.elements.get("refresh-count").textContent, /^1 /);
+    assert.notEqual(runtime.elements.get("refresh-status").textContent, "已刷新");
+  }
+  runtime.changed({...current, status: "ready"});
+  assert.equal(runtime.elements.get("refresh-count").textContent, "1 / 1");
+  assert.equal(runtime.elements.get("refresh-status").textContent, "已刷新");
+});
+
+test("summary denominators follow refresh-only and enabled switches", async () => {
+  const runtime = harness(() => new Promise(() => {}));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.changed({status: "already_done", verified: true, time: new Date().toISOString(), profile: {bonus: "123"}});
+  assert.equal(runtime.elements.get("completed-count").textContent, "1 / 1");
+  assert.equal(runtime.elements.get("refresh-summary").hidden, false);
+  runtime.changes({sites: {piggo: {enabled: true, refreshOnly: true}}});
+  assert.equal(runtime.elements.get("completed-count").textContent, "0 / 0");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "1 / 1");
+  assert.equal(runtime.elements.get("refresh-status").textContent, "已刷新");
+  runtime.changes({sites: {piggo: {enabled: false}}});
+  assert.equal(runtime.elements.get("enabled-count").textContent, "0");
+  assert.equal(runtime.elements.get("completed-count").textContent, "0 / 0");
+  assert.equal(runtime.elements.get("refresh-count").textContent, "0 / 0");
+  assert.equal(runtime.elements.get("refresh-summary").hidden, false);
 });
 
 test("a recovered verified day displays completion without inventing a check time", async () => {
@@ -301,7 +428,7 @@ test("automatic and site switches remain usable while an inspection is waiting",
     if (message.type === "settings") return {enabled: message.enabled};
     if (message.type === "site-settings") return {saved: true, config: {enabled: message.config.enabled}};
   });
-  const pending = runtime.click("inspect");
+  const pending = runtime.click("refresh");
   const interactive = runtime.elements.get("auto").disabled;
   runtime.elements.get("auto").checked = true;
   await runtime.elements.get("auto").handlers.change();
@@ -330,4 +457,38 @@ test("an incompatible worker response explains that the extension needs reloadin
   runtime.elements.get("auto").checked = true;
   await runtime.elements.get("auto").handlers.change();
   assert.match(runtime.elements.get("settings-status").textContent, /后台设置响应不兼容.*扩展管理页重新加载/);
+});
+
+
+test("sign-in and refresh outcomes and progress are independent", async () => {
+  const runtime = harness(() => new Promise(() => {}));
+  const time = new Date().toISOString();
+  runtime.changed({status:"already_done",verified:true,time,refreshError:"首页超时",profile:{bonus:"123"}});
+  assert.equal(runtime.elements.get("site-status").textContent,"已完成");
+  assert.equal(runtime.elements.get("refresh-status").textContent,"刷新失败");
+  runtime.changed({status:"error",confirmationFailed:true,time,refreshState:{status:"success",time}});
+  assert.equal(runtime.elements.get("site-status").textContent,"签到失败");
+  assert.equal(runtime.elements.get("refresh-status").textContent,"已刷新");
+  const pending = runtime.click("refresh");
+  assert.equal(runtime.elements.get("site-status").textContent,"签到失败");
+  assert.equal(runtime.elements.get("refresh-status").textContent,"刷新中");
+  runtime.timeout();
+  await pending;
+  runtime.changed({status:"refreshed",verified:true,time,signinState:{status:"success",verified:true,time:"2000-01-01"},refreshState:{status:"success",time:"2000-01-01"}});
+  assert.equal(runtime.elements.get("site-status").textContent,"待核验");
+  assert.equal(runtime.elements.get("refresh-status").textContent,"待刷新");
+});
+
+test("explicit profile refresh reports its new outcome instead of a stale sign-in or timeout message", async () => {
+  for (const refreshStatus of ["success", "error"]) {
+    const time = new Date().toISOString();
+    const message = refreshStatus === "success" ? "账号数据已刷新" : "资料刷新失败：站点返回 HTTP 502";
+    const runtime = harness(async () => ({status:"already_done",message:"今日已签到；旧首页请求超时",time,
+      signinState:{status:"success",verified:true,time},refreshState:{status:refreshStatus,message,time}}));
+    await new Promise(resolve => setImmediate(resolve));
+    await runtime.click("refresh");
+    assert.equal(runtime.elements.get("status").textContent,message);
+    assert.equal(runtime.elements.get("site-status").textContent,"已完成");
+    assert.equal(runtime.elements.get("refresh-status").textContent,refreshStatus === "success" ? "已刷新" : "刷新失败");
+  }
 });
