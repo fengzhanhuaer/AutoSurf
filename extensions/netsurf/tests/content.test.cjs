@@ -92,6 +92,15 @@ test("built-in refresh mode still reads account fields when the homepage has a m
   assert.equal(runtime.clicks(), 0);
 });
 
+test("profile refresh ignores ambiguous attendance controls but sign-in inspection still stops", async () => {
+  const runtime = harness("ambiguous", false, {headerProfile: {uploaded: "1 TiB", bonus: "42"}});
+  const result = await runtime.send("inspect", "netsurf-test", {fresh: true, dataOnly: true});
+  assert.equal(result.status, "refreshed");
+  assert.equal(result.profile.bonus, "42");
+  assert.equal((await runtime.send("inspect", "netsurf-test", {fresh: true})).status, "ambiguous");
+  assert.equal(runtime.clicks(), 0);
+});
+
 test("refresh-only prevents clicks even when switched on just before submission", async () => {
   for (const late of [false, true]) {
     const runtime = harness();

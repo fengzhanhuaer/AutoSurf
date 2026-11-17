@@ -5,7 +5,7 @@ const sites = globalThis.NetSurfSites;
 const backup = globalThis.NetSurfBackup;
 const periodic = globalThis.NetSurfPeriodicBackground.create(chrome);
 const captchaOcr = globalThis.NetSurfCaptchaBackground.create(chrome, sites, readState);
-const contentRevision = "2026-11-07-hxpt-home-v82";
+const contentRevision = "2026-11-13-piggo-unlock-v107";
 let actionQueue = Promise.resolve();
 let settingsQueue = Promise.resolve();
 let scheduleQueue = Promise.resolve();
@@ -176,9 +176,76 @@ async function injectContent(tab, siteId) {
   await chrome.scripting.executeScript({target: {tabId: tab.id}, injectImmediately: true, files: ["catalog.js", "site-rules.js", "sites.js", "profile-api.js", "hdsky.js", "opencd.js", "ptsbao.js", "freefarm.js", "pt52.js", "piggo.js", "content.js"]});
 }
 
-async function freshPage(tab, timeoutSeconds = 30, reuseCurrentPage = false, skipDetails = false, preflight = false, profileOnly = false) {
+async function recoverBrowserLogin(tab, deadline, current, automatic) {
+  const site = sites.resolve(tab.url);
+  if (!site || !NetSurfRules.get(site.origin)?.browserLogin) return current;
+  const key = sites.key("browserLoginAttempt", site.id);
+  const previous = (await chrome.storage.local.get(key))[key];
+  if (previous?.phase === "submitted") return {...current, message: "PigGo 已尝试登录一次但未确认成功，请在网页中完成登录后刷新"};
+  const state = await readState(site.id);
+  if (!state.sites[site.id].enabled || automatic && !state.autoEnabled || Date.now() >= deadline) return current;
+  const attemptId = `${Date.now()}:${tab.id}`;
+  await chrome.storage.local.set({[key]: {attemptId, tabId: tab.id, phase: "waiting", deadline, automatic}});
+  try {
+    const path = ["/login", "/login.php", "/locked"].includes(current.browserLoginPath || current.path) ? current.browserLoginPath || current.path : "/login";
+    const url = new URL(path, new URL(tab.url).origin).href;
+    const live = (await chrome.tabs.query({url: sites.origins(site)})).find(candidate => candidate.id === tab.id);
+    if (live) tab.url = live.url;
+    if (new URL(tab.url).href !== url || current.path !== path) {
+      await chrome.tabs.update(tab.id, {url});
+      tab.url = url;
+      while (Date.now() < deadline) {
+        try {
+          const navigating = (await chrome.tabs.query({url: sites.origins(site)})).find(candidate => candidate.id === tab.id);
+          if (navigating?.url === url && navigating.status !== "loading") {
+            await ensureContent(tab, site.id, Math.max(1, Math.min(1000, deadline - Date.now())));
+            const loaded = await pageMessage(tab.id, {type: "inspect"}, Math.max(1, Math.min(1000, deadline - Date.now())));
+            if (loaded.path === path && loaded.pageReady !== false && !loaded.challengePending) break;
+          }
+        } catch {}
+        await new Promise(resolve => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+      }
+    }
+    const remaining = Math.max(1, deadline - Date.now());
+    let response;
+    try {
+      response = await pageMessage(tab.id, {type: "browser-login", attemptId, timeoutMs: Math.min(8000, remaining)}, remaining);
+    } catch {
+      // A successful native login may unload the message port. Verify the page;
+      // never infer failure means it is safe to submit again.
+      const attempt = (await chrome.storage.local.get(key))[key];
+      if (attempt?.phase !== "submitted") return {...current, message: "PigGo 登录页面通信失败，请在网页中处理"};
+    }
+    if (response && response.status !== "login_submitted") return {...current, ...response};
+    while (Date.now() < deadline) {
+      try {
+        const [liveTab] = (await chrome.tabs.query({url: sites.origins(site)})).filter(candidate => candidate.id === tab.id);
+        if (liveTab) {
+          await ensureContent(liveTab, site.id, Math.max(1, Math.min(1000, deadline - Date.now())));
+          const snapshot = await pageMessage(tab.id, {type: "inspect"}, Math.max(1, Math.min(1000, deadline - Date.now())));
+          if (snapshot.hasProfile && !["blocked", "debugging", "login_required", "manual_required"].includes(snapshot.status) && !["/login", "/login.php", "/takelogin.php", "/locked"].includes(snapshot.path)) {
+            await chrome.storage.local.set({[key]: null});
+            tab.url = liveTab.url;
+            return {...snapshot, loginRestored: true};
+          }
+          if (["blocked", "debugging", "manual_required"].includes(snapshot.status)) return snapshot;
+        }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, Math.min(200, Math.max(1, deadline - Date.now()))));
+    }
+    return {...current, message: "PigGo 登录已提交但未确认成功，已停止自动重试，请在网页中检查"};
+  } finally {
+    const attempt = (await chrome.storage.local.get(key))[key];
+    if (attempt?.attemptId === attemptId && attempt.phase !== "submitted") await chrome.storage.local.set({[key]: null});
+  }
+}
+
+async function freshPage(tab, timeoutSeconds = 30, reuseCurrentPage = false, skipDetails = false, preflight = false, profileOnly = false, automatic = false, allowBrowserLogin = true) {
   const siteId = sites.resolve(tab.url)?.id || "piggo";
-  const dataOnly = profileOnly || (await readState(siteId)).sites[siteId].refreshOnly;
+  const state = await readState(siteId);
+  const dataOnly = profileOnly || state.sites[siteId].refreshOnly;
+  // Do not replace an unconfirmed attendance result page with a login page.
+  allowBrowserLogin = allowBrowserLogin && (profileOnly || !unresolvedSubmission(state));
   const deadline = Date.now() + timeoutSeconds * 1000;
   await ensureContent(tab, siteId, Math.max(1, Math.min(3000, deadline - Date.now())));
   let current = await pageMessage(tab.id, {type: "inspect"}, Math.max(1, Math.min(3000, deadline - Date.now())));
@@ -188,10 +255,22 @@ async function freshPage(tab, timeoutSeconds = 30, reuseCurrentPage = false, ski
     if (Date.now() >= deadline) return {...current, challengePending: false, message: "站点自动安全验证超时，请打开站点完成后刷新"};
     try { current = await pageMessage(tab.id, {type: "inspect"}, Math.max(1, Math.min(1000, deadline - Date.now()))); } catch {}
   }
-  if (["blocked", "debugging", "login_required"].includes(current.status) || current.status === "manual_required" && !dataOnly && !adapter(siteId, tab.url).statusPath) return current;
+  if (allowBrowserLogin && current.status === "login_required" && NetSurfRules.get(sites.get(siteId).origin)?.browserLogin) {
+    const recovered = await recoverBrowserLogin(tab, deadline, current, automatic);
+    if (!recovered.loginRestored) return recovered;
+    current = recovered;
+    reuseCurrentPage = true;
+  }
+  if (current.pageUnavailable || ["blocked", "debugging", "login_required"].includes(current.status) || current.status === "manual_required" && !dataOnly && !adapter(siteId, tab.url).statusPath) return current;
   const remaining = Math.max(1, deadline - Date.now());
-  const reusable = reuseCurrentPage && ["ready", "success", "already_done", "profile_only", "manual_required"].includes(current.status);
+  const reusable = reuseCurrentPage && (["ready", "success", "already_done", "profile_only", "manual_required"].includes(current.status) || dataOnly && current.hasProfile);
   const refreshed = await pageMessage(tab.id, {type: "inspect", fresh: true, dataOnly, reuseCurrentPage: reusable, skipDetails, preflight, timeoutMs: Math.max(1, remaining - 250)}, remaining + 1000);
+  if (allowBrowserLogin && refreshed.status === "login_required" && NetSurfRules.get(sites.get(siteId).origin)?.browserLogin) {
+    const recovered = await recoverBrowserLogin(tab, deadline, refreshed, automatic);
+    if (recovered.loginRestored) return freshPage(tab, Math.max(1, deadline - Date.now()) / 1000, true, skipDetails, preflight, profileOnly, automatic, false);
+    return recovered;
+  }
+  if (NetSurfRules.get(sites.get(siteId).origin)?.browserLogin && Object.values(refreshed.profile || {}).some(Boolean) && ["refreshed", "ready", "profile_only", "success", "already_done"].includes(refreshed.status)) await chrome.storage.local.set({[sites.key("browserLoginAttempt", siteId)]: null});
   if (refreshed.status === "error" && ["success", "already_done"].includes(current.status)) return {...current, message: `${current.message}；账号数据刷新失败，已保留旧数据`};
   if (!dataOnly && ["success", "already_done"].includes(current.status) && ["ready", "unknown"].includes(refreshed.status)) return {...refreshed, status: current.status, message: current.message};
   if (refreshed.status === "ready" && confirmedPersistentForm(await readState(siteId), siteId)) return {...refreshed, status: "already_done", confirmedDay: today(), message: "今日已有已确认签到记录，不重复提交"};
@@ -206,7 +285,7 @@ async function run(tab, automatic = false, attemptDeadline = null, siteId = site
   if (automatic && (!state.autoEnabled || (!configured.refreshOnly && state.verifiedDay === today()))) return null;
   const deadline = attemptDeadline || Date.now() + configured.timeout * 1000;
   if (Date.now() >= deadline) return save(page.result("error", tab.url), tab.id, false, siteId);
-  const snapshot = await freshPage(tab, (deadline - Date.now()) / 1000, reuseCurrentPage, true, true);
+  const snapshot = await freshPage(tab, (deadline - Date.now()) / 1000, reuseCurrentPage, true, true, false, automatic);
   if (snapshot.status !== "ready") return save(snapshot, tab.id, true, siteId);
   const current = await readState(siteId);
   if (!current.sites[siteId].enabled) return {siteId, status: "disabled", message: `${sites.get(siteId).name} 已停用`};
@@ -254,6 +333,20 @@ async function inspectSite(siteId, background = false, passive = false) {
 }
 
 async function handle(message, sender) {
+  if (message.type === "browser-login-permit") {
+    const site = sites.resolve(sender.url);
+    if (!site || !sender.tab || !NetSurfRules.get(site.origin)?.browserLogin || !["/login", "/login.php", "/locked"].includes(new URL(sender.url).pathname)) return {accepted: false};
+    const next = (resultQueues.get(site.id) || Promise.resolve()).catch(() => {}).then(async () => {
+      const key = sites.key("browserLoginAttempt", site.id);
+      const attempt = (await chrome.storage.local.get(key))[key];
+      const state = await readState(site.id);
+      if (!state.sites[site.id].enabled || attempt?.automatic && !state.autoEnabled || attempt?.phase !== "waiting" || attempt.tabId !== sender.tab.id || attempt.attemptId !== message.attemptId || !(Date.now() < attempt.deadline) || !await chrome.permissions.contains({origins: sites.origins(site)})) return {accepted: false};
+      await chrome.storage.local.set({[key]: {...attempt, phase: "submitted"}});
+      return {accepted: true};
+    });
+    resultQueues.set(site.id, next);
+    return next;
+  }
   if (["captcha-open", "captcha-recognize", "captcha-submit"].includes(message.type)) return captchaOcr.handle(message, sender);
   if (message.type === "periodic-permit") return periodic.permit(message, sender);
   if (message.type?.startsWith("periodic-")) {
@@ -294,6 +387,10 @@ async function handle(message, sender) {
   if (message.type === "observed" || message.type === "auto") {
     const site = sites.resolve(sender.url);
     if (!sender.tab || !site) return null;
+    const {taskTab} = await chrome.storage.session.get("taskTab");
+    if (message.type === "observed" && taskTab?.tabId === sender.tab.id && taskTab.purpose === "refresh") return null;
+    const login = (await chrome.storage.local.get(sites.key("browserLoginAttempt", site.id)))[sites.key("browserLoginAttempt", site.id)];
+    if (login?.tabId === sender.tab.id && Date.now() < login.deadline) return null;
     if (message.type === "auto") {
       if (!(await chrome.tabs.query({url: sites.origins(site)})).some(tab => tab.id === sender.tab.id)) return null;
       await scheduledRun(sender.tab, false, site.id);
@@ -551,7 +648,7 @@ async function navigateTaskPage(tab, deadline, siteId, requireReady = true) {
   throw failure || new Error("站点加载超时");
 }
 
-async function refreshSite(siteId, profileOnly = false) {
+async function refreshSite(siteId, profileOnly = false, automatic = false) {
   const state = await readState(siteId);
   if (!state.sites[siteId].enabled) return {siteId, status: "disabled", message: `${sites.get(siteId).name} 已停用`};
   const site = sites.get(siteId);
@@ -574,7 +671,7 @@ async function refreshSite(siteId, profileOnly = false) {
     const current = await readState(siteId);
     if (!current.sites[siteId].enabled) return {siteId, status: "disabled", message: `${sites.get(siteId).name} 已停用`};
     if (Date.now() >= deadline) throw new Error("页面加载超时");
-    const snapshot = {...await freshPage(tab, (deadline - Date.now()) / 1000, created, false, false, profileOnly), refreshCheck: true};
+    const snapshot = {...await freshPage(tab, (deadline - Date.now()) / 1000, created, false, false, profileOnly, automatic), refreshCheck: true};
     if (profileOnly) return await save({...snapshot,profileRefresh:true},tab.id,true,siteId);
     if (unresolvedSubmission(state) && ["ready", "unknown", "pending", "error"].includes(snapshot.status)) {
       if (snapshot.status !== "error") await save(snapshot, tab.id, true, siteId);
@@ -679,7 +776,7 @@ async function scheduledRefresh(siteId, retry = false, allowWhenDisabled = false
   await chrome.storage.local.set({[sites.key("refreshSchedule", siteId)]: {...previous, day: today(), attempts, retryAt: null}});
   let result;
   try {
-    result = await refreshSite(siteId, true);
+    result = await refreshSite(siteId, true, !allowWhenDisabled);
   } catch (error) {
     result = {status: "error", message: error.message || "资料刷新失败"};
   }
@@ -812,9 +909,15 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     settingsQueue.then(respond).catch(() => respond({error: "设置保存失败，请检查扩展权限并重新加载 NetSurf"}));
   } else if (["inspect", "inspect-all", "run", "run-all", "auto", "backup", "restore", "periodic-inspect", "periodic-run"].includes(message.type)) {
     if (message.type === "auto") {
-      chrome.storage.session.get("taskTab").then(({taskTab}) => {
+      chrome.storage.session.get("taskTab").then(async ({taskTab}) => {
         if (taskTab?.tabId === sender.tab?.id) respond(null);
-        else enqueueAction(message, sender, respond);
+        else {
+          const site = sites.resolve(sender.url);
+          const key = site && sites.key("browserLoginAttempt", site.id);
+          const login = key && (await chrome.storage.local.get(key))[key];
+          if (login?.tabId === sender.tab?.id && Date.now() < login.deadline) respond(null);
+          else enqueueAction(message, sender, respond);
+        }
       }).catch(() => respond(null));
     } else enqueueAction(message, sender, respond);
   } else handle(message, sender).then(respond).catch(() => respond({error: "操作失败，请重试"}));

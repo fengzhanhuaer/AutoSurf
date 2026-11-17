@@ -21,6 +21,18 @@ function documentFixture(text, controls = [], {password = false, captcha = false
   };
 }
 
+test("XingYunGePT's short maintenance page is explicit without matching a forum mention", () => {
+  const adapter = piggo.create("https://pt.xingyungept.org");
+  const page = documentFixture("\n\n停机维护中\n");
+  page.title = "停机维护中";
+  assert.match(adapter.inspect(page, "https://pt.xingyungept.org/index.php").message, /维护/);
+  page.body.innerText = "\n停机维护中\nnginx\n";
+  page.querySelector = selector => selector === "h1" ? {textContent: "停机维护中"} : null;
+  assert.equal(adapter.inspect(page, "https://pt.xingyungept.org/index.php").pageUnavailable, true);
+  page.title = "论坛";
+  assert.notEqual(adapter.inspect(page, "https://pt.xingyungept.org/index.php").status, "error");
+});
+
 test("a Cloudflare origin gateway error is not a human verification request", () => {
   const adapter = piggo.create("https://pt.btschool.club", "/index.php");
   const page = documentFixture("Bad gateway Error code 502 You Browser Working Cloudflare Working pt.btschool.club Host Error Cloudflare Ray ID: fixture");

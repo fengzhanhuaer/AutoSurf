@@ -36,7 +36,7 @@
     if (!isPiggo(url)) return "unknown";
     if (/当前环境正在被调试|當前環境正在被調試/.test(text)) return "debugging";
     if (/雷池\s*WAF|sl-challenge|客户端异常|验证您是真人|人机验证|人機驗證|安全验证中|just a moment|cloudflare ray id/i.test(text)) return "blocked";
-    if (password || /\/(?:login|takelogin)\.php$/i.test(new URL(url).pathname) || /请(?:先|重新)?登录|登录状态已失效|not logged in/i.test(text)) return "login_required";
+    if (password || rule?.browserLogin && new URL(url).pathname === "/locked" || /\/(?:login|takelogin)\.php$/i.test(new URL(url).pathname) || /请(?:先|重新)?登录|登录状态已失效|not logged in/i.test(text)) return "login_required";
     if (/已断签\s*\d+\s*天|请选择补签|放弃补签重新开始签到/.test(text)) return "manual_required";
     if (rule?.attendanceUrl && new URL(url).href === new URL(rule.attendanceUrl, origin).href || new URL(url).pathname === new URL(signinPath, origin).pathname && new URL(url).pathname !== "/") {
       if (/今日已[签簽]到|今天已[签簽]到|今天已经签过到了|\[已[签簽]到\]|已签到.{0,20}无需再签|checked in today|already (?:checked|signed) in/i.test(text)) return "already_done";
@@ -64,6 +64,44 @@
     } catch {
       return false;
     }
+  }
+
+  // Keep credentials in the page; only return controls and readiness flags.
+  function browserLoginForm(document, url) {
+    const target = new URL(url);
+    if (!rule?.browserLogin || !isPiggo(url) || !["/login", "/login.php", "/locked"].includes(target.pathname)) return null;
+    const locked = target.pathname === "/locked";
+    const passwords = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
+    if (passwords.length !== 1 || passwords[0].autocomplete === "new-password") return null;
+    const password = passwords[0];
+    const form = password.form;
+    if (!form || !["", "_self"].includes(form.getAttribute("target") || "")) return null;
+    if (locked ? target.search || target.hash || document.querySelector('#idle-lock-title')?.textContent.trim() !== "页面已锁定" || !form.matches('form.step-up') || form.hasAttribute('action') : form.method.toLowerCase() !== "post") return null;
+    const allowedAction = action => {
+      try {
+        const destination = new URL(action || url, url);
+        return destination.origin === origin && !destination.search && !destination.hash && [target.pathname, "/takelogin.php"].includes(destination.pathname);
+      } catch { return false; }
+    };
+    if (!allowedAction(form.getAttribute("action"))) return null;
+    const usernames = Array.from(form.querySelectorAll('input')).filter(element => (locked ? element.matches('input.username-a11y[name="username"][autocomplete="username"][readonly]') : visible(element)) && ["text", "email"].includes(element.type) && /^(?:username|user|email|login)$/i.test(element.name || element.autocomplete || element.id));
+    const controls = Array.from(form.querySelectorAll('button, input[type="submit"]')).filter(element => visible(element) && element.type === "submit" && (locked ? /^解锁$/ : /^(?:登\s*录|登入|log\s*in|sign\s*in)$/i).test((element.textContent || element.value || "").trim()));
+    if (usernames.length !== 1 || controls.length !== 1 || controls[0].form !== form || controls[0].hasAttribute("formtarget") && !["", "_self"].includes(controls[0].getAttribute("formtarget")) || controls[0].hasAttribute("formaction") && !allowedAction(controls[0].getAttribute("formaction"))) return null;
+    const extraInput = Array.from(form.querySelectorAll('input')).some(element => visible(element) && ![usernames[0], password, controls[0]].includes(element) && !["hidden", "checkbox", "submit", "button"].includes(element.type));
+    const challenge = extraInput || document.querySelector('iframe[src*="captcha" i], iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile, input[name*="captcha" i], input[name="imagestring"]') || /验证码|驗證碼|二步验证|两步验证|动态口令|one.time.password|verification.code/i.test(form.textContent || "");
+    return {form, password, locked, control: controls[0], manual: Boolean(challenge), filled: Boolean(usernames[0].value.trim() && password.value), valid: form.checkValidity()};
+  }
+
+  function browserLoginPath(document, url) {
+    if (!rule?.browserLogin || !isPiggo(url)) return null;
+    if (["/login", "/login.php", "/locked"].includes(new URL(url).pathname)) return new URL(url).pathname;
+    for (const link of document.querySelectorAll('a[href]')) {
+      try {
+        const target = new URL(link.getAttribute("href"), url);
+        if (target.origin === origin && ["/login", "/login.php"].includes(target.pathname)) return target.pathname;
+      } catch {}
+    }
+    return null;
   }
 
   function inlineAttendance(element, requireHandler = true) {
@@ -198,7 +236,8 @@
     const text = (document.body?.innerText || document.body?.textContent || "").slice(0, 120000);
     const gatewayCode = document.title?.match(/\b(502|503|504):?\s*(?:Bad gateway|Service (?:unavailable|temporarily unavailable)|Gateway time-?out)\b/i)?.[1];
     if (isPiggo(url) && gatewayCode && /Cloudflare Ray ID:/i.test(text) && /\bHost\s+Error\b/i.test(text)) return {status: "error", control: null, message: `站点服务器返回 HTTP ${gatewayCode}，请稍后重试`};
-    if (isPiggo(url) && /^站点关闭维护中[，,]\s*请稍后再访问\s*(?:\.{3}|…{1,2})\s*谢谢[。.!！]?$/.test(text.trim())) return {status: "error", control: null, message: "站点正在维护，请稍后重试"};
+    if (isPiggo(url) && /^站点关闭维护中[，,]\s*请稍后再访问\s*(?:\.{3}|…{1,2})\s*谢谢[。.!！]?$/.test(text.trim())) return {status: "error", control: null, pageUnavailable: true, message: "站点正在维护，请稍后重试"};
+    if (isPiggo(url) && document.title?.trim() === "停机维护中" && (text.trim() === "停机维护中" || text.trim().length < 200 && document.querySelector?.('h1')?.textContent.trim() === "停机维护中")) return {status: "error", control: null, pageUnavailable: true, message: "站点正在维护，请稍后重试"};
     if (isPiggo(url) && rule?.pausedAttendanceSelector && Array.from(document.querySelectorAll(rule.pausedAttendanceSelector)).some(element => (element.innerText || element.textContent || "").trim() === "做种会员签到处")) return {status: "manual_required", control: null, message: "52PT 已限制脚本签到，请在网站手动完成后刷新"};
     const password = Array.from(document.querySelectorAll('input[type="password"]')).some(visible);
     const imageInspection = {hdsky, opencd, ptsbao}[rule?.imageCaptcha]?.inspect(document, url, visible);
@@ -339,10 +378,17 @@
       const levels = Array.from(document.querySelectorAll(rule.profileLevelSelector)).map(element => strictLevel(element.textContent)).filter(Boolean);
       if (new Set(levels).size === 1) values.level = levels[0];
     }
+    if (rule?.profileDefinitionSelector) for (const block of document.querySelectorAll(rule.profileDefinitionSelector)) {
+      for (const entry of block.querySelectorAll(':scope > div')) {
+        const label = entry.querySelector('dt')?.textContent.trim();
+        const value = entry.querySelector('dd')?.textContent.trim().replace(/^[★↑↓∑]\s*/, '');
+        for (const [field, pattern] of Object.entries(aliases)) if (label && value && pattern.test(label)) values[field] = value;
+      }
+    }
     if (rule?.profileStatSelector) for (const element of document.querySelectorAll(rule.profileStatSelector)) {
       const label = element.querySelector('span')?.textContent.trim();
-      const value = element.querySelector('strong')?.textContent.trim();
-      for (const [field, pattern] of Object.entries(aliases)) if (label && value && pattern.test(label)) values[field] = value;
+      const value = element.querySelector(rule.profileStatValueSelector || 'strong')?.textContent.trim();
+      for (const [field, pattern] of Object.entries(aliases)) if (label && value && pattern.test(label)) values[field] = /[万萬亿億]/.test(value) ? null : value;
     }
     if (!values.level && rule?.levelListSelector) {
       const ranks = Array.from(document.querySelectorAll(rule.levelListSelector)).map(entry => entry.textContent.match(/^\s*Class\s*:\s*([^\r\n:]{1,40})\s*$/i)?.[1]?.trim()).filter(Boolean);
@@ -438,7 +484,7 @@
   }
 
   const api = {origin, statusPath: rule?.statusPath, profileApi: rule?.profileApi, revealAttendanceSelector: rule?.revealAttendanceSelector, continueAttendanceForm: rule?.continueAttendanceForm === true, nativeAttendanceNavigation: rule?.nativeAttendanceNavigation === true, homePaths: rule?.homePaths || [], detailFillOnly: rule?.detailFillOnly === true, reuseRecentPage: rule?.reuseRecentPage === true, navigationRetries: rule?.navigationRetries || 0, labels, isPiggo, classify, visible, safeAttendanceLink, action, inspect, result, profile, profileHints, accountLink, classLink, classLevel};
-  return api;
+  return {...api, browserLoginForm, browserLoginPath};
   }
   const api = {...create(), create};
   root.NetSurfPiggo = api;

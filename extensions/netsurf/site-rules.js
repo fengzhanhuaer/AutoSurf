@@ -1,5 +1,11 @@
 (function (root) {
   const rules = {
+    "carpt.net": {
+      refreshInNewPage: true,
+      homePaths: ["/"],
+      reuseRecentPage: true,
+      profilePatterns: {bonus: /魔力值\s*(?:\[使用\]\s*)?[:：]\s*([\d,.]+)/}
+    },
     "discfan.net": {refreshInNewPage: true},
     "haidan.cc": {modalAttendance: true, homePaths: ["/"], detailFillOnly: true, profileMetrics: {bonus: "#magic_num"}},
     "haidan.video": {modalAttendance: true, homePaths: ["/"], detailFillOnly: true, profileMetrics: {bonus: "#magic_num"}},
@@ -62,6 +68,7 @@
       profileMetrics: {bonus: 'a[href="mybonus.php"], a[href="/mybonus.php"]'}
     },
     "piggo.me": {
+      browserLogin: true,
       homePaths: ["/"],
       renderedCalendar: true,
       continueAttendanceForm: true,
@@ -76,6 +83,10 @@
     },
     "pt.0ff.cc": {
       homePaths: ["/"],
+      profileSelector: ".n8-hero",
+      profileLevelSelector: ".n8-hero .n8-rank",
+      profileStatSelector: ".n8-deck-grid > .n8-cell",
+      profileStatValueSelector: "b",
       reuseRecentPage: true,
       navigationRetries: 2,
       continueAttendanceForm: true,
@@ -227,7 +238,8 @@
     "hxpt.org": {
       renderedHome: true,
       continueAttendanceForm: true,
-      profileSelector: ".cute-top-profile, .usermenu__drop",
+      profileSelector: ".cute-top-profile, .usermenu__drop, .mhome-hero",
+      profileDefinitionSelector: ".mhome-hero__spark, .mhome-hero__stats",
       profileLevelSelector: ".usermenu__name-row > .sticker",
       profileStatSelector: ".usermenu__stats > .userstat",
       ownAccountPath: "/my",

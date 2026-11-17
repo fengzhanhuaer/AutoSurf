@@ -50,6 +50,7 @@ function harness({tabs = [], initial = {}, sessionInitial = {}, registeredScript
         const site = context.NetSurfSites.resolve(pageUrl);
         const page = site ? context.NetSurfPiggo.create(new URL(pageUrl).origin, site.signinPath, site.mode === "profile", site.name) : context.NetSurfPiggo;
         if (message.type === "inspect") { if (inspectWait) await inspectWait; const status = typeof inspect === "function" ? inspect(tabId, message, actions) : inspect; if (status instanceof Error) throw status; return status && typeof status === "object" ? status : page.result(status, pageUrl); }
+        if (message.type === "browser-login") return page.result("login_required", pageUrl);
         if (navigate) await send({type: "observed", result: {status: "already_done"}}, tabs[0]);
         if (navigate || signinError) throw new Error("Receiving page unloaded");
         if (signinResult) return signinResult;
@@ -65,6 +66,66 @@ function harness({tabs = [], initial = {}, sessionInitial = {}, registeredScript
 const tab = {id: 12, windowId: 5, active: true, url: "https://piggo.me/"};
 
 const automaticSettings = {refreshSchedule:{day:require("../sites.js").day()}, "refreshSchedule:audiences.me":{day:require("../sites.js").day()}, autoEnabled: true, scheduleConfig: {startTime: "00:00", retryInterval: 30, retryCount: 1, timeout: 5}, sites: {piggo: {enabled: true}, "audiences.me": {enabled: true}}};
+
+test("browser login permits bind site, tab, attempt, deadline and settings and persist before acceptance", async () => {
+  const loginTab = {...tab, url: "https://piggo.me/login"};
+  const waiting = {attemptId: "attempt", tabId: tab.id, phase: "waiting", deadline: Date.now()+5000, automatic: false};
+  const runtime = harness({initial: {browserLoginAttempt: waiting}});
+  const permit = {type:"browser-login-permit",attemptId:"attempt"};
+  const granted = await Promise.all([runtime.send(permit,loginTab),runtime.send(permit,loginTab)]);
+  assert.equal(granted.filter(result => result.accepted).length,1);
+  assert.equal(runtime.state.browserLoginAttempt.phase,"submitted");
+  for (const override of [{tabId:99},{attemptId:"other"},{deadline:Date.now()-1},{phase:"submitted"},{automatic:true}]) {
+    const denied = harness({initial:{autoEnabled:false,browserLoginAttempt:{...waiting,...override}}});
+    assert.equal((await denied.send(permit,loginTab)).accepted,false);
+  }
+  const disabled = harness({initial:{sites:{piggo:{enabled:false}},browserLoginAttempt:waiting}});
+  assert.equal((await disabled.send(permit,loginTab)).accepted,false);
+  assert.equal((await runtime.send(permit,{...loginTab,url:"https://piggo.me/attendance.php"})).accepted,false);
+  assert.equal((await runtime.send(permit,{...loginTab,url:"https://pt.0ff.cc/login.php"})).accepted,false);
+});
+
+test("an unconfirmed browser login persists across workers and stale pages cannot clear its guard", async () => {
+  const record = {attemptId:"prior",tabId:99,phase:"submitted",deadline:Date.now()-10000};
+  const runtime = harness({tabs:[{...tab}],initial:{browserLoginAttempt:record},inspect:{status:"login_required",path:"/login"}});
+  const result = await runtime.evaluate("freshPage({id:12,url:'https://piggo.me/login'},1)");
+  assert.equal(result.status,"login_required");
+  assert.match(result.message,/已尝试登录一次/);
+  assert.equal(runtime.actions.some(action=>action[0]==="browser-login"),false);
+  assert.deepEqual(runtime.state.browserLoginAttempt,record);
+  const stale = harness({tabs:[{...tab}],initial:{browserLoginAttempt:record},inspect:(id,message)=>message.fresh ? {status:"login_required",path:"/login"} : {status:"ready",hasProfile:true,path:"/"}});
+  assert.equal((await stale.evaluate("freshPage({id:12,url:'https://piggo.me/'},1)")).status,"login_required");
+  assert.deepEqual(stale.state.browserLoginAttempt,record);
+  const restored = harness({tabs:[{...tab}],initial:{browserLoginAttempt:record},inspect:{status:"refreshed",path:"/",profile:{bonus:"123"}}});
+  await restored.evaluate("freshPage({id:12,url:'https://piggo.me/'},1,false,false,false,true)");
+  assert.equal(restored.state.browserLoginAttempt,null);
+});
+
+test("attendance confirmation never navigates an unresolved result page to log in", async () => {
+  const runtime = harness({tabs:[{...tab}],initial:{operation:{day:require('../sites.js').day(),awaitingConfirmation:true}},inspect:{status:"login_required",path:"/calendar"}});
+  assert.equal((await runtime.evaluate("freshPage({id:12,url:'https://piggo.me/calendar'},1)")).status,"login_required");
+  assert.equal(runtime.actions.some(action=>["browser-login","update","signin"].includes(action[0])),false);
+});
+
+test("browser login can start after the site's own temporary security check finishes", async () => {
+  const loginTab={...tab,url:"https://piggo.me/login"};
+  const runtime=harness({tabs:[loginTab],inspect:(id,message,actions)=>actions.filter(action=>action[0]==="inspect").length<3 ? {status:"blocked",path:"/login",challengePending:true} : {status:"login_required",path:"/login"}});
+  assert.equal((await runtime.evaluate("freshPage({id:12,url:'https://piggo.me/login'},1)")).status,"login_required");
+  assert.equal(runtime.actions.some(action=>action[0]==="browser-login"),true);
+});
+
+test("idle unlock stays on the existing lock page and its permit is single use", async () => {
+  const lockedTab={...tab,url:'https://piggo.me/locked'};
+  const runtime=harness({tabs:[lockedTab],inspect:{status:'login_required',path:'/locked',browserLoginPath:'/locked'}});
+  assert.equal((await runtime.evaluate("freshPage({id:12,url:'https://piggo.me/locked'},1)")).status,'login_required');
+  assert.equal(runtime.actions.some(action=>action[0]==='update'),false);
+  assert.equal(runtime.actions.filter(action=>action[0]==='browser-login').length,1);
+  const attempt={attemptId:'unlock',tabId:12,phase:'waiting',deadline:Date.now()+5000};
+  const permit=harness({initial:{browserLoginAttempt:attempt}});
+  assert.equal((await permit.send({type:'browser-login-permit',attemptId:'unlock'},lockedTab)).accepted,true);
+  assert.equal((await permit.send({type:'browser-login-permit',attemptId:'unlock'},lockedTab)).accepted,false);
+  assert.equal(permit.state.browserLoginAttempt.phase,'submitted');
+});
 
 test("periodic jobs survive PT rescheduling and reject site-origin management messages", async () => {
   const runtime = harness();

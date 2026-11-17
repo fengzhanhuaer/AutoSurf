@@ -70,7 +70,7 @@ test("overview sorting supports status and update time columns", () => {
   const order = runtime.evaluate(`(() => {
     results = {
       piggo: {status: "error", time: "2026-11-08T01:00:00Z"},
-      "audiences.me": {status: "already_done", verified: true, time: "2026-11-08T02:00:00Z"},
+      "audiences.me": {status: "already_done", verified: true, confirmedDay: sites.day(), time: "2026-11-08T02:00:00Z"},
       "52pt.site": {status: "ready", time: "2026-11-07T01:00:00Z"}
     };
     const selected = [sites.get("piggo"), sites.get("audiences.me"), sites.get("52pt.site")];

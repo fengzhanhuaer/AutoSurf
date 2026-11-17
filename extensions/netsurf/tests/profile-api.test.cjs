@@ -142,6 +142,22 @@ test("modern tracker sign-in submits exactly once and requires server confirmati
   }
 });
 
+test("profile-only API refresh does not depend on attendance being available", async () => {
+  for (const kind of ["sunny", "rousi"]) {
+    const fixture = modernFixture(kind);
+    const fetch = fixture.runtime.fetch;
+    fixture.runtime.fetch = (url, options) => {
+      assert.doesNotMatch(url, /attendance/, "read-only profile refresh must not request attendance");
+      return fetch(url, options);
+    };
+    const result = await api.read(fixture.origin, kind, undefined, fixture.runtime, {dataOnly: true});
+    assert.equal(result.status, "profile_only");
+    assert.equal(result.profile.uploaded, "1.00 KiB");
+    assert.equal(result.profile.bonus, "42");
+    assert.equal(fixture.posts(), 0);
+  }
+});
+
 test("switching to refresh-only at the API submission boundary cancels the POST", async () => {
   for (const kind of ["rousi", "sunny"]) {
     const fixture = modernFixture(kind);

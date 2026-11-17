@@ -17,11 +17,11 @@
     return {level: rank.name || rank.title || rank.level || data.roleName || null, bonus: String(count.bonus ?? count.seedBonus ?? "") || null, seedingPoints: seedingPoints === undefined ? null : String(seedingPoints), uploaded: size(uploaded), downloaded: size(downloaded), ratio: ratio === null ? null : String(ratio)};
   }
 
-  async function read(origin, kind, signal, environment = root) {
+  async function read(origin, kind, signal, environment = root, {dataOnly = false} = {}) {
     const host = new URL(origin).hostname.replace(/^www\./, "");
     const hosts = {mteam: ["kp.m-team.cc"], zhuque: ["zhuque.in"], rousi: ["rousi.pro", "rousi.zip"], sunny: ["sunnypt.top"]};
     if (new URL(origin).protocol !== "https:" || new URL(origin).port || !hosts[kind]?.includes(host)) throw new Error("资料接口不属于当前站点");
-    if (["rousi", "sunny"].includes(kind)) return modernRead(origin, kind, signal, environment);
+    if (["rousi", "sunny"].includes(kind)) return modernRead(origin, kind, signal, environment, dataOnly);
     if (kind === "mteam" && environment.document?.documentElement) {
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline && !signal?.aborted) {
@@ -114,11 +114,12 @@
     return attendance?.server_today && Array.isArray(attendance.attended_dates) ? attendance.attended_dates.includes(attendance.server_today) : null;
   }
 
-  async function modernRead(origin, kind, signal, environment) {
+  async function modernRead(origin, kind, signal, environment, dataOnly = false) {
     const session = await modernSession(origin, kind, signal, environment);
     if (session.failure) return session.failure;
     const base = kind === "rousi" ? origin : "https://api.sunnypt.top";
-    const paths = kind === "rousi" ? ["/api/v1/me/traffic", "/api/v1/me/economy", "/api/v1/me/attendance"] : ["/api/v1/user/details/info", "/api/v1/attendance/status"];
+    const paths = kind === "rousi" ? ["/api/v1/me/traffic", "/api/v1/me/economy"] : ["/api/v1/user/details/info"];
+    if (!dataOnly) paths.push(kind === "rousi" ? "/api/v1/me/attendance" : "/api/v1/attendance/status");
     const bodies = [];
     for (const path of paths) {
       const response = await environment.fetch(base + path, session.options);
@@ -136,6 +137,7 @@
       if (!data || !data.id && !data.username) return {status: "login_required", message: "资料接口没有返回当前账号"};
       stats = profile("zhuque", {...data, class: {name: data.title || data.class}, bonus: data.seed_bonus ?? data.bonus});
     }
+    if (dataOnly) return {status: "profile_only", profile: stats, diagnostic: {path: paths.at(-1), httpStatus: 200, accountFound: true, entries: []}};
     const done = attended(kind, bodies.at(-1));
     return {status: done === true ? "already_done" : done === false ? "ready" : "unknown", ...(done === null ? {message: "账号数据已读取，但接口没有返回明确的今日签到状态"} : {}), profile: stats, diagnostic: {path: paths.at(-1), httpStatus: 200, accountFound: true, entries: []}};
   }

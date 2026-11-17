@@ -1,6 +1,6 @@
 (() => {
   const version = chrome.runtime.getManifest().version;
-  const contentRevision = "2026-11-07-hxpt-home-v82";
+  const contentRevision = "2026-11-13-piggo-unlock-v107";
   const suppressAuto = globalThis.NetSurfReadOnlyInjection === true;
   delete globalThis.NetSurfReadOnlyInjection;
   if (globalThis.NetSurfContentStarted === contentRevision) return;
@@ -10,6 +10,8 @@
   if (!site && !globalThis.NetSurfPiggo.isPiggo(location.href)) return;
   const piggo = site ? globalThis.NetSurfPiggo.create(new URL(location.href).origin, site.signinPath, site.mode === "profile", site.name) : globalThis.NetSurfPiggo;
   let submitted = false;
+  let loginSubmitted = false;
+  let loginTask;
   let latestKey = "";
   let updateTimer;
 
@@ -71,7 +73,7 @@
       if (piggo.profileApi) {
         phase = "账号接口";
         requestPath = "";
-        const snapshot = await globalThis.NetSurfProfileApi.read(piggo.origin, piggo.profileApi, controller.signal);
+        const snapshot = await globalThis.NetSurfProfileApi.read(piggo.origin, piggo.profileApi, controller.signal, globalThis, {dataOnly});
         const status = dataOnly && snapshot.profile && ["profile_only", "ready", "already_done", "unknown"].includes(snapshot.status) ? "refreshed" : snapshot.status;
         return {...piggo.result(status, location.href), ...snapshot, status};
       }
@@ -134,7 +136,7 @@
       const inspection = piggo.inspect(snapshot, response.url);
       const {status} = inspection;
       const diagnostic = diagnose(snapshot, response, status);
-      if (!["unknown", "ready", "already_done", "success", "profile_only"].includes(status) && !(dataOnly && status === "manual_required")) return {...piggo.result(status, response.url), ...(inspection.message ? {message: inspection.message} : {}), diagnostic};
+      if (!["unknown", "ready", "already_done", "success", "profile_only"].includes(status) && !(dataOnly && ["manual_required", "ambiguous"].includes(status))) return {...piggo.result(status, response.url), ...(inspection.message ? {message: inspection.message} : {}), diagnostic};
       if (response.status === 468 || response.status === 403) return {...piggo.result("blocked", response.url), diagnostic};
       if (response.status === 401) return {...piggo.result("login_required", response.url), diagnostic};
       if (!response.ok) return {...piggo.result("error", response.url), diagnostic, message: `首页返回 HTTP ${response.status}`};
@@ -308,6 +310,41 @@
     return pending;
   }
 
+  async function browserLogin(attemptId, timeoutMs) {
+    if (!site || !globalThis.NetSurfRules?.get(location.origin)?.browserLogin) return {status: "login_required"};
+    if (loginSubmitted) return {status: "login_required", message: "已尝试登录一次，请在网页确认结果"};
+    const deadline = Date.now() + Math.max(0, Math.min(Number(timeoutMs) || 0, 8000));
+    while (Date.now() < deadline) {
+      const inspection = piggo.inspect(document, location.href);
+      if (["blocked", "debugging"].includes(inspection.status)) return piggo.result(inspection.status, location.href);
+      if (inspection.status !== "login_required") return {status: "login_required", message: "登录页面已变化，请重新检查账号状态"};
+      const login = piggo.browserLoginForm(document, location.href);
+      if (login?.manual) return {status: "manual_required", message: "PigGo 登录需要验证码或额外验证，请在网页中处理"};
+      if (login?.filled && login.valid) {
+        const permit = await chrome.runtime.sendMessage({type: "browser-login-permit", attemptId});
+        if (!permit?.accepted) return {status: "login_required", message: "登录许可已失效，请重新检查"};
+        const key = globalThis.NetSurfSites.key("browserLoginAttempt", site.id);
+        const settings = await chrome.storage.local.get(["sites", "autoEnabled", key]);
+        const attempt = settings[key];
+        if (attempt?.attemptId !== attemptId || attempt.phase !== "submitted" || settings.sites?.[site.id]?.enabled === false || attempt.automatic && !settings.autoEnabled) return {status: "login_required", message: "登录设置已变化，请重新检查"};
+        const current = piggo.browserLoginForm(document, location.href);
+        if (Date.now() >= deadline || piggo.inspect(document, location.href).status !== "login_required" || !current?.filled || !current.valid || current.manual || current.form !== login.form || current.control !== login.control) return {status: "login_required", message: "登录表单已变化，请在网页中处理"};
+        loginSubmitted = true;
+        if (current.locked) {
+          // StepUp uses a Vue submit handler and defaults to GET in its markup.
+          // Let the official handler run, but never allow a native GET fallback.
+          current.form.addEventListener('submit', event => event.preventDefault(), {capture: true, once: true});
+          current.password.dispatchEvent(new Event('input', {bubbles: true}));
+          current.password.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+        current.control.click();
+        return {status: "login_submitted"};
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(200, Math.max(1, deadline - Date.now()))));
+    }
+    return {status: "login_required", message: "未取得可用的 Chrome 自动填充登录表单，请打开 PigGo 完成登录"};
+  }
+
   function messageListener(message, sender, respond) {
     if (sender.id !== chrome.runtime.id) return;
     if (message.type === "netsurf-inspect") {
@@ -317,7 +354,11 @@
       }
       const inspection = piggo.inspect(document, location.href);
       const status = globalThis.NetSurfRules?.get(location.origin)?.renderedHome && ["success", "already_done"].includes(inspection.status) ? "pending" : inspection.status;
-      respond({...piggo.result(status, location.href), ...(inspection.challengePending ? {challengePending: true} : {}), ...(inspection.message ? {message: inspection.message} : {}), contentVersion: version, contentRevision, pageReady: document.readyState !== "loading", hasProfile: Object.values(piggo.profile(document)).some(Boolean), ...(globalThis.NetSurfRules?.get(location.origin)?.renderedHome ? {canReadRenderedHome: Boolean(document.querySelector('button.usermenu__trigger'))} : {})});
+      respond({...piggo.result(status, location.href), ...(inspection.pageUnavailable ? {pageUnavailable: true} : {}), ...(inspection.challengePending ? {challengePending: true} : {}), ...(inspection.message ? {message: inspection.message} : {}), ...(status === "login_required" && piggo.browserLoginPath?.(document, location.href) ? {browserLoginPath: piggo.browserLoginPath(document, location.href)} : {}), contentVersion: version, contentRevision, pageReady: document.readyState !== "loading", hasProfile: Object.values(piggo.profile(document)).some(Boolean), ...(globalThis.NetSurfRules?.get(location.origin)?.renderedHome ? {canReadRenderedHome: Boolean(document.querySelector('button.usermenu__trigger'))} : {})});
+    } else if (message.type === "netsurf-browser-login") {
+      if (!loginTask) loginTask = browserLogin(message.attemptId, message.timeoutMs).finally(() => { loginTask = null; });
+      loginTask.then(respond).catch(() => respond({status: "login_required", message: "登录操作未确认，请在网页中处理"}));
+      return true;
     } else if (message.type === "netsurf-signin") {
       signin(message.timeoutMs, message.continuation === true, message.operationId).then(respond).catch(() => respond(piggo.result("error", location.href)));
       return true;
